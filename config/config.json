@@ -1,0 +1,31 @@
+{
+  "general": {
+    "debug": false,
+    "listen": "4000",
+    "log_level": 0,
+    "shutdown_timeout": "5s",
+    "app_name": "newser"
+  },
+  "databases": {
+    "redis": {
+      "host": "localhost",
+      "port": "6379",
+      "pass": "",
+      "db": 0,
+      "timeout": "30s"
+    }
+  },
+  "providers": {
+    "openai": {
+      "api_key": "",
+      "model": "gpt-4o-mini",
+      "max_tokens": 1000,
+      "temperature": 0.7,
+      "timeout": "30s"
+    }
+  },
+  "newsapi": {
+    "api_key": "",
+    "endpoint": "https://newsapi.org/v2/everything"
+  }
+}
