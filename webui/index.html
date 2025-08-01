@@ -10,9 +10,22 @@
   <h1>Topics</h1>
   <form id="create-topic-form">
     <input type="text" id="topic-title" placeholder="Enter topic title" required />
-    <button type="submit">Create Topic</button>
+    <button type="submit" id="create-button">Create Topic</button>
   </form>
-  <ul id="topics-list"></ul>
+
+  <table id="topics-table">
+    <thead>
+      <tr>
+        <th>Title</th>
+        <th>State</th>
+        <th>Created At</th>
+        <th>Updated At</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
   <script src="static/script.js"></script>
 </body>
 </html>

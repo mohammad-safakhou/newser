@@ -9,6 +9,22 @@ The system uses AI-powered topic analysis and conversation management to create 
 on a schedule, ensuring users get relevant information without spam.
 
 ## Features
+- **Web User Interface**: Integrated browser-based interface for managing topics and generating news.
+
+## Web User Interface
+
+Newser now includes a fully integrated Web UI for managing topics and generating news interactively. Highlights:
+
+- **Topics Dashboard**: Displays all topics in a sortable table with columns for Title, State, Created At, Updated At, and Actions.
+- **Detailed Topic View**: Shows topic configuration (title, state, subtopics, key concepts, related topics, cron spec, preferences) in a table.
+- **Interactive Chat**: Conversation history rendered as styled message bubbles—**User** messages on the right and **LLM** responses on the left.
+- **Loading Indicators**: Buttons display 'Creating…', 'Sending…', and 'Generating…' while awaiting API responses.
+- **Back Navigation**: A Back button returns to the main Topics dashboard.
+- **Markdown Rendering**: Generated news is parsed and rendered from markdown, with code fences automatically stripped.
+
+![](webui/img.png)
+
+## Architecture
 
 - **Intelligent Topic Management**: Create and configure news topics with AI assistance
 - **Conversational AI Interface**: Interact with LLM to refine and modify topics naturally
@@ -17,8 +33,6 @@ on a schedule, ensuring users get relevant information without spam.
 - **Flexible Scheduling**: Configurable delivery schedules for each topic
 - **State Management**: Track topic configuration progress and conversation history
 - **RESTful API**: Complete API for managing topics and interactions
-
-## Architecture
 
 The project follows a clean architecture pattern with the following components:
 

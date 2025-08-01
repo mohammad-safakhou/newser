@@ -1,55 +1,105 @@
+/* General styling */
 body {
   font-family: Arial, sans-serif;
   margin: 20px;
   background-color: #f5f5f5;
 }
-
 h1 {
   color: #333;
 }
 
+/* Table styling */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 20px;
+  background: #fff;
+}
+th, td {
+  border: 1px solid #ddd;
+  padding: 8px;
+}
+th {
+  background-color: #f2f2f2;
+  text-transform: uppercase;
+  font-size: 0.9em;
+}
+tr:hover {
+  background-color: #f1f1f1;
+}
+
+/* Form styling */
 form {
   margin-bottom: 20px;
+  display: flex;
+  align-items: center;
 }
 
 input[type="text"] {
   padding: 8px;
-  width: 300px;
+  flex: 1;
   margin-right: 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
 }
 
 button {
   padding: 8px 12px;
   cursor: pointer;
+  background-color: #007bff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  transition: background-color 0.2s ease;
+}
+button:hover:not(:disabled) {
+  background-color: #0056b3;
+}
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
-ul {
-  list-style: none;
-  padding: 0;
+/* Back button */
+#back-button {
+  margin-bottom: 20px;
+  background-color: #6c757d;
+}
+#back-button:hover {
+  background-color: #5a6268;
 }
 
-li a {
-  text-decoration: none;
-  color: #007BFF;
-}
-
-li a:hover {
-  text-decoration: underline;
-}
-
+/* Message bubbles */
 #history {
-  max-height: 300px;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   background: #fff;
   padding: 10px;
   border: 1px solid #ddd;
+  max-height: 400px;
+  overflow-y: auto;
   margin-bottom: 20px;
 }
+.message {
+  padding: 10px;
+  border-radius: 8px;
+  max-width: 80%;
+  word-wrap: break-word;
+}
+.message.user {
+  background-color: #d1e7dd;
+  align-self: flex-end;
+}
+.message.llm {
+  background-color: #e2e3e5;
+  align-self: flex-start;
+}
 
+/* News output */
 #news-output {
   background: #fff;
   padding: 10px;
   border: 1px solid #ddd;
-  white-space: pre-wrap;
   margin-top: 20px;
 }

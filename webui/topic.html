@@ -7,14 +7,24 @@
   <link rel="stylesheet" href="static/style.css" />
 </head>
 <body>
+  <button id="back-button">← Back to Topics</button>
+  <!-- Topic Details -->
+  <table id="details-table">
+    <tbody></tbody>
+  </table>
   <h1 id="topic-title"></h1>
   <div id="history"></div>
+
   <form id="modify-topic-form">
     <input type="text" id="message" placeholder="Enter message" required />
-    <button type="submit">Send</button>
+    <button type="submit" id="send-button">Send</button>
   </form>
+
   <button id="generate-news">Generate News</button>
   <div id="news-output"></div>
+
+  <!-- Markdown renderer -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="static/topic.js"></script>
 </body>
 </html>
