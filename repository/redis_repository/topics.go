@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/go-redis/redis/v8"
 	"github.com/mohammad-safakhou/newser/models"
+	"github.com/redis/go-redis/v9"
 )
 
 const topicKeyPrefix = "topic:"

@@ -6,9 +6,10 @@ require (
 	github.com/blevesearch/bleve v1.0.14
 	github.com/chromedp/chromedp v0.14.0
 	github.com/go-chi/chi/v5 v5.2.2
-	github.com/go-redis/redis/v8 v8.11.5
+	github.com/go-shiori/go-readability v0.0.0-20250217085726-9f5bf5ca7612
 	github.com/google/uuid v1.6.0
 	github.com/labstack/echo/v4 v4.13.4
+	github.com/redis/go-redis/v9 v9.11.0
 	github.com/sashabaranov/go-openai v1.40.5
 	github.com/spf13/viper v1.20.1
 )
@@ -35,7 +36,6 @@ require (
 	github.com/glycerine/go-unsnap-stream v0.0.0-20181221182339-f9677308dec2 // indirect
 	github.com/go-json-experiment/json v0.0.0-20250725192818-e39067aee2d2 // indirect
 	github.com/go-shiori/dom v0.0.0-20230515143342-73569d674e1c // indirect
-	github.com/go-shiori/go-readability v0.0.0-20250217085726-9f5bf5ca7612 // indirect
 	github.com/go-viper/mapstructure/v2 v2.2.1 // indirect
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect
