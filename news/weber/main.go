@@ -335,7 +335,7 @@ func handleFetch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp, nil)
 }
 
-// ========== INGEST (per-session ephemeral corpus) ==========
+// ========== INGEST (per-session_object ephemeral corpus) ==========
 
 type ingestReq struct {
 	SessionID string     `json:"session_id,omitempty"`
@@ -526,7 +526,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	sess := getSession(req.SessionID)
 	if sess == nil {
-		http.Error(w, "session not found", http.StatusNotFound)
+		http.Error(w, "session_object not found", http.StatusNotFound)
 		return
 	}
 	k := req.K
@@ -676,7 +676,7 @@ func handleSeen(w http.ResponseWriter, r *http.Request) {
 	}
 	s := getSession(sid)
 	if s == nil {
-		http.Error(w, "session not found", http.StatusNotFound)
+		http.Error(w, "session_object not found", http.StatusNotFound)
 		return
 	}
 	s.mu.Lock()

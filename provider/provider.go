@@ -23,6 +23,7 @@ type Provider interface {
 	GeneralMessage(ctx context.Context, message string, topic models.Topic) (string, models.Topic, error)
 	GenerateNews(ctx context.Context, topic models.Topic) (string, error)
 	SummarizeNews(ctx context.Context, topic models.Topic, articles []newsapi.Article) (string, error)
+	CreateEmbedding(ctx context.Context, texts []string) ([][]float32, error)
 }
 
 // NewProvider creates a new LLM client based on the provided configuration
@@ -31,7 +32,8 @@ func NewProvider(client Client) (Provider, error) {
 	case OpenAI:
 		return openai_provider.NewOpenAIClient(
 			config.AppConfig.Providers.OpenAi.APIKey,
-			config.AppConfig.Providers.OpenAi.Model,
+			config.AppConfig.Providers.OpenAi.CompletionModel,
+			config.AppConfig.Providers.OpenAi.EmbeddingModel,
 			config.AppConfig.Providers.OpenAi.Temperature,
 			config.AppConfig.Providers.OpenAi.MaxTokens,
 			config.AppConfig.Providers.OpenAi.Timeout,

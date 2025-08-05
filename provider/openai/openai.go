@@ -18,11 +18,12 @@ const (
 
 // client implements the client interface using OpenAI's API
 type client struct {
-	apiKey      string
-	model       string
-	temperature float64
-	maxTokens   int
-	httpClient  *http.Client
+	apiKey          string
+	completionModel string
+	embeddingModel  string
+	temperature     float64
+	maxTokens       int
+	httpClient      *http.Client
 }
 
 // Message represents a message in a conversation
@@ -33,7 +34,7 @@ type Message struct {
 
 // request represents a request to the OpenAI API
 type request struct {
-	Model       string    `json:"model"`
+	Model       string    `json:"completionModel"`
 	Messages    []Message `json:"messages"`
 	Temperature float64   `json:"temperature"`
 	MaxTokens   int       `json:"max_tokens,omitempty"`
@@ -49,14 +50,68 @@ type response struct {
 }
 
 // NewOpenAIClient creates a new OpenAI client
-func NewOpenAIClient(apiKey, model string, temperature float64, maxTokens int, timeout time.Duration) *client {
+func NewOpenAIClient(apiKey, completionModel string, embeddingModel string, temperature float64, maxTokens int, timeout time.Duration) *client {
 	return &client{
-		apiKey:      apiKey,
-		model:       model,
-		temperature: temperature,
-		maxTokens:   maxTokens,
-		httpClient:  &http.Client{Timeout: timeout},
+		apiKey:          apiKey,
+		completionModel: completionModel,
+		embeddingModel:  embeddingModel,
+		temperature:     temperature,
+		maxTokens:       maxTokens,
+		httpClient:      &http.Client{Timeout: timeout},
 	}
+}
+
+// CreateEmbedding generates an embedding for the given texts using OpenAI's API
+func (c *client) CreateEmbedding(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+
+	// Prepare the request body
+	requestBody := map[string]interface{}{
+		"model": c.embeddingModel,
+		"input": texts,
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/embeddings", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status: %d", resp.StatusCode)
+	}
+
+	var openaiResp struct {
+		Data []struct {
+			Object    string    `json:"object"`
+			Embedding []float32 `json:"embedding"`
+			Index     int       `json:"index"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&openaiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	vecs := make([][]float32, len(openaiResp.Data))
+	for i, d := range openaiResp.Data {
+		vecs[i] = d.Embedding
+	}
+	return vecs, nil
 }
 
 // GeneralMessage implements the client interface
@@ -211,13 +266,13 @@ Preferences: %v
 // sendRequest sends a request to the OpenAI API
 func (c *client) sendRequest(ctx context.Context, messages []Message) (string, error) {
 	requestBody := request{
-		Model:       c.model,
+		Model:       c.completionModel,
 		Messages:    messages,
 		Temperature: c.temperature,
 		MaxTokens:   c.maxTokens,
 	}
 
-	fmt.Printf("Sending request to OpenAI API with model: %s, temperature: %f, max_tokens: %d\nMessage: %v\n", c.model, c.temperature, c.maxTokens, messages)
+	fmt.Printf("Sending request to OpenAI API with completionModel: %s, temperature: %f, max_tokens: %d\nMessage: %v\n", c.completionModel, c.temperature, c.maxTokens, messages)
 
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {

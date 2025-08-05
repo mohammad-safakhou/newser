@@ -1,48 +1,30 @@
 package web_ingest
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/mohammad-safakhou/newser/config"
+	"github.com/mohammad-safakhou/newser/session"
+	session_models "github.com/mohammad-safakhou/newser/session/session_models"
+	"github.com/mohammad-safakhou/newser/tools/embedding"
 	"github.com/mohammad-safakhou/newser/tools/web_ingest/models"
-	"github.com/mohammad-safakhou/newser/tools/web_ingest/session"
-	"github.com/mohammad-safakhou/newser/tools/web_ingest/session/inmemory"
-	redis_session "github.com/mohammad-safakhou/newser/tools/web_ingest/session/redis"
 	"strings"
 	"time"
 )
 
 type Ingest struct {
-	Store session.Store // Store interface for session management
+	Store     session.Store // Store interface for session_object management
+	Embedding embedding.Embedding
 }
 
-type StoreType string
-
-const (
-	InMemoryStore StoreType = "inmemory"
-	RedisStore    StoreType = "redis"
-)
-
-// NewIngest creates a new Ingest instance with the provided session store.
-func NewIngest(storeType StoreType) *Ingest {
-	var store session.Store
-	switch storeType {
-	case InMemoryStore:
-		store = inmemory.NewInMemorySessionStore()
-	case RedisStore:
-		store = redis_session.NewRedisSessionStore(
-			fmt.Sprintf("%s:%s", config.AppConfig.Databases.Redis.Host, config.AppConfig.Databases.Redis.Port),
-			config.AppConfig.Databases.Redis.Pass,
-			config.AppConfig.Databases.Redis.DB)
-	default:
-		panic(fmt.Sprintf("unsupported store type: %s", storeType))
-	}
+// NewIngest creates a new Ingest instance with the provided session_object store.
+func NewIngest(store session.Store) *Ingest {
 	return &Ingest{Store: store}
 }
 
-func (i Ingest) Ingest(sessionID string, docs []models.DocInput, ttlsHours int) (models.IngestResponse, error) {
+func (i Ingest) Ingest(sessionID string, docs []session.DocInput, ttlsHours int) (models.IngestResponse, error) {
 	if len(docs) == 0 {
 		return models.IngestResponse{}, errors.New("no documents provided")
 	}
@@ -55,7 +37,7 @@ func (i Ingest) Ingest(sessionID string, docs []models.DocInput, ttlsHours int) 
 		return models.IngestResponse{}, err
 	}
 
-	var chunks []models.DocChunk
+	var chunks []session_models.DocChunk
 	now := time.Now()
 	for _, doc := range docs {
 		if strings.TrimSpace(doc.Text) == "" {
@@ -63,7 +45,7 @@ func (i Ingest) Ingest(sessionID string, docs []models.DocInput, ttlsHours int) 
 		}
 		hash := sha1Hex(doc.Text)
 		for i, part := range makeChunks(doc.Text, 1000, 200) {
-			chunk := models.DocChunk{
+			chunk := session_models.DocChunk{
 				DocID:        fmt.Sprintf("%s#%03d", hash, i),
 				URL:          doc.URL,
 				Title:        doc.Title,
@@ -82,10 +64,33 @@ func (i Ingest) Ingest(sessionID string, docs []models.DocInput, ttlsHours int) 
 		}
 	}
 
+	// Index to Bleve
+	bmCount := 0
+	for _, c := range chunks {
+		if err := sess.Index(c.DocID, c); err == nil {
+			bmCount++
+		}
+	}
+
+	// Embeddings (brute-force vectors for small corpora)
+	vecCount := 0
+	if len(chunks) > 0 {
+		ctx := context.Background()
+		vecs, err := i.Embedding.EmbedMany(ctx, i.Embedding.MapChunksToTexts(chunks))
+		if err != nil {
+			return models.IngestResponse{}, fmt.Errorf("embedding error: %w", err)
+		}
+		for i, v := range vecs {
+			sess.Vectors = append(sess.Vectors, embedding.EmbedVec{DocID: chunks[i].DocID, Vec: v})
+			vecCount++
+		}
+	}
+
 	return models.IngestResponse{
-		SessionID: sess.ID(),
-		Chunks:    len(chunks),
-		IndexedBM: len(chunks),
+		SessionID:  sess.ID(),
+		Chunks:     len(chunks),
+		IndexedBM:  bmCount,
+		IndexedVec: vecCount,
 	}, nil
 }
 

@@ -44,11 +44,12 @@ type Providers struct {
 }
 
 type OpenAi struct {
-	APIKey      string        `mapstructure:"api_key"`     // OpenAI API key
-	Model       string        `mapstructure:"model"`       // OpenAI model to use
-	Temperature float64       `mapstructure:"temperature"` // OpenAI temperature setting
-	MaxTokens   int           `mapstructure:"max_tokens"`  // OpenAI max tokens setting
-	Timeout     time.Duration `mapstructure:"timeout"`     // OpenAI request timeout
+	APIKey          string        `mapstructure:"api_key"`          // OpenAI API key
+	CompletionModel string        `mapstructure:"completion_model"` // OpenAI model to use
+	EmbeddingModel  string        `mapstructure:"embedding_model"`  // OpenAI model to use
+	Temperature     float64       `mapstructure:"temperature"`      // OpenAI temperature setting
+	MaxTokens       int           `mapstructure:"max_tokens"`       // OpenAI max tokens setting
+	Timeout         time.Duration `mapstructure:"timeout"`          // OpenAI request timeout
 }
 
 type NewsApi struct {
