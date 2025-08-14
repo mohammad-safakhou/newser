@@ -2,8 +2,8 @@ package search
 
 import (
 	"context"
+
 	"github.com/mohammad-safakhou/newser/session"
-	"github.com/mohammad-safakhou/newser/session/session_models"
 	"github.com/mohammad-safakhou/newser/tools/embedding"
 )
 
@@ -16,7 +16,7 @@ func NewSearch(store session.Store) Search {
 	return Search{Store: store}
 }
 
-func (s Search) Search(sessionID string, q string, k int) ([]session_models.SearchHit, error) {
+func (s Search) Search(sessionID string, q string, k int) ([]session.SearchHit, error) {
 	sess, err := s.Store.GetSession(sessionID)
 	if err != nil {
 		return nil, err

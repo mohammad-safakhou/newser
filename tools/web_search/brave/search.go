@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+
 	"github.com/mohammad-safakhou/newser/tools/web_search/models"
 	"github.com/mohammad-safakhou/newser/utils"
-	"net/http"
 )
 
 type Search struct {

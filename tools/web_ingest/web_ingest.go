@@ -6,12 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/mohammad-safakhou/newser/session"
-	session_models "github.com/mohammad-safakhou/newser/session/session_models"
-	"github.com/mohammad-safakhou/newser/tools/embedding"
-	"github.com/mohammad-safakhou/newser/tools/web_ingest/models"
 	"strings"
 	"time"
+
+	"github.com/mohammad-safakhou/newser/session"
+	"github.com/mohammad-safakhou/newser/tools/embedding"
+	"github.com/mohammad-safakhou/newser/tools/web_ingest/models"
 )
 
 type Ingest struct {
@@ -37,7 +37,7 @@ func (i Ingest) Ingest(sessionID string, docs []session.DocInput, ttlsHours int)
 		return models.IngestResponse{}, err
 	}
 
-	var chunks []session_models.DocChunk
+	var chunks []session.DocChunk
 	now := time.Now()
 	for _, doc := range docs {
 		if strings.TrimSpace(doc.Text) == "" {
@@ -45,7 +45,7 @@ func (i Ingest) Ingest(sessionID string, docs []session.DocInput, ttlsHours int)
 		}
 		hash := sha1Hex(doc.Text)
 		for i, part := range makeChunks(doc.Text, 1000, 200) {
-			chunk := session_models.DocChunk{
+			chunk := session.DocChunk{
 				DocID:        fmt.Sprintf("%s#%03d", hash, i),
 				URL:          doc.URL,
 				Title:        doc.Title,
@@ -81,7 +81,7 @@ func (i Ingest) Ingest(sessionID string, docs []session.DocInput, ttlsHours int)
 			return models.IngestResponse{}, fmt.Errorf("embedding error: %w", err)
 		}
 		for i, v := range vecs {
-			sess.Vectors = append(sess.Vectors, embedding.EmbedVec{DocID: chunks[i].DocID, Vec: v})
+			sess.SetVector(chunks[i].DocID, v)
 			vecCount++
 		}
 	}

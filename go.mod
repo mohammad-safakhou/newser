@@ -5,12 +5,10 @@ go 1.24.4
 require (
 	github.com/blevesearch/bleve v1.0.14
 	github.com/chromedp/chromedp v0.14.0
-	github.com/go-chi/chi/v5 v5.2.2
 	github.com/go-shiori/go-readability v0.0.0-20250217085726-9f5bf5ca7612
 	github.com/google/uuid v1.6.0
 	github.com/labstack/echo/v4 v4.13.4
 	github.com/redis/go-redis/v9 v9.11.0
-	github.com/sashabaranov/go-openai v1.40.5
 	github.com/spf13/viper v1.20.1
 )
 

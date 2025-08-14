@@ -2,8 +2,9 @@ package embedding
 
 import (
 	"context"
+
 	"github.com/mohammad-safakhou/newser/provider"
-	"github.com/mohammad-safakhou/newser/session/session_models"
+	"github.com/mohammad-safakhou/newser/session"
 )
 
 type Embedding struct {
@@ -21,7 +22,7 @@ func NewEmbedding(provider provider.Provider) *Embedding {
 	}
 }
 
-func (e Embedding) MapChunksToTexts(chs []session_models.DocChunk) []string {
+func (e Embedding) MapChunksToTexts(chs []session.DocChunk) []string {
 	out := make([]string, len(chs))
 	for i, c := range chs {
 		out[i] = c.Text
