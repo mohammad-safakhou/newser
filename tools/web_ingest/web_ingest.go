@@ -20,8 +20,8 @@ type Ingest struct {
 }
 
 // NewIngest creates a new Ingest instance with the provided session_object store.
-func NewIngest(store session.Store) *Ingest {
-	return &Ingest{Store: store}
+func NewIngest(store session.Store, embedding embedding.Embedding) *Ingest {
+	return &Ingest{Store: store, Embedding: embedding}
 }
 
 func (i Ingest) Ingest(sessionID string, docs []session.DocInput, ttlsHours int) (models.IngestResponse, error) {
@@ -76,7 +76,7 @@ func (i Ingest) Ingest(sessionID string, docs []session.DocInput, ttlsHours int)
 	vecCount := 0
 	if len(chunks) > 0 {
 		ctx := context.Background()
-		vecs, err := i.Embedding.EmbedMany(ctx, i.Embedding.MapChunksToTexts(chunks))
+		vecs, err := i.Embedding.EmbedMany(ctx, mapChunksToTexts(chunks))
 		if err != nil {
 			return models.IngestResponse{}, fmt.Errorf("embedding error: %w", err)
 		}
@@ -98,6 +98,14 @@ func (i Ingest) Ingest(sessionID string, docs []session.DocInput, ttlsHours int)
 func sha1Hex(s string) string {
 	h := sha1.Sum([]byte(s))
 	return hex.EncodeToString(h[:])
+}
+
+func mapChunksToTexts(chs []session.DocChunk) []string {
+	out := make([]string, len(chs))
+	for i, c := range chs {
+		out[i] = c.Text
+	}
+	return out
 }
 
 func makeChunks(text string, approx, overlap int) []string {

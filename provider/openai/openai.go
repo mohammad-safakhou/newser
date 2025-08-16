@@ -5,11 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/mohammad-safakhou/newser/models"
-	"github.com/mohammad-safakhou/newser/news/newsapi"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/mohammad-safakhou/newser/models"
+	"github.com/mohammad-safakhou/newser/news/newsapi"
 )
 
 const (

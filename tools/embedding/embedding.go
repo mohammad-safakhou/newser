@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/mohammad-safakhou/newser/provider"
-	"github.com/mohammad-safakhou/newser/session"
 )
 
 type Embedding struct {
@@ -20,14 +19,6 @@ func NewEmbedding(provider provider.Provider) *Embedding {
 	return &Embedding{
 		provider: provider,
 	}
-}
-
-func (e Embedding) MapChunksToTexts(chs []session.DocChunk) []string {
-	out := make([]string, len(chs))
-	for i, c := range chs {
-		out[i] = c.Text
-	}
-	return out
 }
 
 func (e Embedding) EmbedMany(ctx context.Context, texts []string) ([][]float32, error) {
