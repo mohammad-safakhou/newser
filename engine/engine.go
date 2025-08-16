@@ -70,7 +70,9 @@ func Start() {
 	e.Logger.Fatal(e.Start(fmt.Sprintf(":%s", config.AppConfig.General.Listen)))
 }
 
-type CreateTopicRequest struct { Title string `json:"title"` }
+type CreateTopicRequest struct {
+	Title string `json:"title"`
+}
 
 func (s *Server) CreateTopic(c echo.Context) error {
 	var req CreateTopicRequest
@@ -105,7 +107,9 @@ func (s *Server) GetTopic(c echo.Context) error {
 
 func (s *Server) ModifyTopic(c echo.Context) error {
 	title := c.Param("title")
-	var req struct{ Message string `json:"message"` }
+	var req struct {
+		Message string `json:"message"`
+	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request", "details": err.Error()})
 	}

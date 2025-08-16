@@ -140,9 +140,9 @@ type RedisStore struct {
 // NewRedisStore constructs a Redis-backed Store.
 //
 // addr example: "127.0.0.1:6379"
-func NewRedisStore(addr, password string, db int) *RedisStore {
+func NewRedisStore(host, port, password string, db int) *RedisStore {
 	rdb := redis.NewClient(&redis.Options{
-		Addr:     addr,
+		Addr:     fmt.Sprintf("%s:%s", host, port),
 		Password: password,
 		DB:       db,
 	})

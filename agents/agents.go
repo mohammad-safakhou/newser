@@ -45,13 +45,17 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/mohammad-safakhou/newser/config"
 )
 
 // ==========================================================
@@ -79,7 +83,7 @@ var CapabilityTools = map[string][]string{
 
 // MCP call defaults/timeouts.
 const (
-	DefaultToolTimeout = 35 * time.Second
+	DefaultToolTimeout = 120 * time.Second
 	MaxJSONFrameBytes  = 1 << 20 // 1MB safety cap for a single JSON-RPC frame
 )
 
@@ -613,6 +617,72 @@ type Master struct {
 	Sink    RunResultSink
 	Tracker *RunTracker
 	Cfg     AppConfig
+
+	mu        sync.Mutex
+	runDone   map[string]chan struct{} // runID -> done channel
+	runSessID map[string]string
+}
+
+func (m *Master) getRunSession(runID string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.runSessID == nil {
+		return ""
+	}
+	return m.runSessID[runID]
+}
+func (m *Master) setRunSession(runID, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	m.mu.Lock()
+	if m.runSessID == nil {
+		m.runSessID = map[string]string{}
+	}
+	m.runSessID[runID] = sessionID
+	m.mu.Unlock()
+}
+
+// registerRun allocates a completion channel for a run.
+func (m *Master) registerRun(runID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.runDone == nil {
+		m.runDone = map[string]chan struct{}{}
+	}
+	if _, ok := m.runDone[runID]; !ok {
+		m.runDone[runID] = make(chan struct{})
+	}
+}
+
+// markRunComplete closes the run's done channel.
+func (m *Master) markRunComplete(runID string) {
+	m.mu.Lock()
+	ch, ok := m.runDone[runID]
+	m.mu.Unlock()
+	if ok {
+		select {
+		case <-ch:
+		default:
+			close(ch)
+		}
+	}
+}
+
+// WaitRunComplete blocks until Master emits completion for runID (or ctx cancels).
+func (m *Master) WaitRunComplete(ctx context.Context, runID string) error {
+	m.mu.Lock()
+	ch := m.runDone[runID]
+	m.mu.Unlock()
+	if ch == nil {
+		return fmt.Errorf("unknown run: %s", runID)
+	}
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // emit records and optionally persists an event.
@@ -648,11 +718,191 @@ func (m *Master) onRunComplete(runID string) {
 			_ = m.Sink.Save(context.Background(), runID, items)
 		}
 	}
+	// NEW: generate report (best-effort; don’t fail the run if LLM is unavailable)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		_, _ = m.GenerateFinalReport(ctx, runID, ReportGenConfig{
+			Model:       envOr("REPORT_MODEL", "gpt-4o-mini"),
+			APIKey:      strings.TrimSpace(os.Getenv("OPENAI_API_KEY")),
+			MaxSnippets: 6,
+		})
+	}()
+
+	m.markRunComplete(runID)
+}
+
+type ReportGenConfig struct {
+	Model       string
+	APIKey      string
+	MaxSnippets int
+}
+
+func (m *Master) GenerateFinalReport(ctx context.Context, runID string, cfg ReportGenConfig) (string, error) {
+	// 1) Load events for the run
+	items, err := m.Repo.List(ctx, runID)
+	if err != nil {
+		return "", err
+	}
+
+	// 2) Pull discover query (first discover title) and the ingested sources
+	var discoverQuery string
+	type Src struct {
+		Title string `json:"title"`
+		URL   string `json:"url"`
+		Note  string `json:"note"`
+	}
+	var sources []Src
+	for _, it := range items {
+		if it.Stage == StageDiscover && discoverQuery == "" {
+			discoverQuery = strings.TrimSpace(it.Title)
+		}
+		if it.Stage == StageIngest && strings.Contains(it.Note, "indexed+embedded") {
+			sources = append(sources, Src{Title: it.Title, URL: it.URL, Note: it.Note})
+		}
+	}
+	if len(sources) == 0 {
+		// No ingests → still produce a minimal report
+		sources = []Src{}
+	}
+
+	// 3) (Optional) Pull a few top snippets from the corpus via MCP search.query
+	//    Use the run’s session_id if we have it.
+	var snippets []map[string]string
+	if cfg.MaxSnippets <= 0 {
+		cfg.MaxSnippets = 6
+	}
+	sessID := m.getRunSession(runID) // your cache populated during ingest
+	if sessID != "" && discoverQuery != "" {
+		if ag := m.Agents.FindAgentFor(CapSearchQuery); ag != nil {
+			tool := pickTool(ag, CapSearchQuery)
+			cctx, cancel := context.WithTimeout(ctx, m.Cfg.ToolTimeout)
+			defer cancel()
+			res, err := ag.Client.CallTool(cctx, tool, map[string]any{
+				"session_id": sessID,
+				"q":          discoverQuery,
+				"k":          cfg.MaxSnippets,
+			})
+			if err == nil {
+				// normalize
+				if c, ok := res["content"].(map[string]any); ok {
+					res = c
+				}
+				if arr, ok := res["hits"].([]any); ok {
+					for _, v := range arr {
+						if m, ok := v.(map[string]any); ok {
+							snippets = append(snippets, map[string]string{
+								"title":   str(m["title"]),
+								"url":     str(m["url"]),
+								"snippet": str(m["snippet"]),
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 4) Build an LLM prompt (or fallback to a deterministic summary)
+	type ReportInput struct {
+		RunID    string              `json:"run_id"`
+		Query    string              `json:"query"`
+		Sources  []Src               `json:"sources"`
+		Snippets []map[string]string `json:"snippets"`
+		When     string              `json:"when"`
+	}
+	rin := ReportInput{
+		RunID:    runID,
+		Query:    discoverQuery,
+		Sources:  sources,
+		Snippets: snippets,
+		When:     time.Now().Format(time.RFC3339),
+	}
+
+	var markdown string
+	if cfg.APIKey != "" && cfg.Model != "" {
+		// Call OpenAI for synthesis (JSON → Markdown)
+		body := map[string]any{
+			"model":       cfg.Model,
+			"temperature": 0.3,
+			"messages": []map[string]any{
+				{"role": "system", "content": "You write concise, factual news briefs. Cite sources inline with [n] and include a final bullet list of sources with titles and links. No preambles."},
+				{"role": "user", "content": fmt.Sprintf("INPUT:\n%s\n\nWrite a brief report:\n- Title\n- 4–8 bullet key findings (factual, deduped)\n- A 1-paragraph summary\n- A timeline (if dates present)\n- Sources (numbered) with title + URL", mustJSON(rin))},
+			},
+		}
+		b, _ := json.Marshal(body)
+		req, _ := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil && resp.StatusCode/100 == 2 {
+			var raw struct {
+				Choices []struct {
+					Message struct {
+						Content string `json:"content"`
+					} `json:"message"`
+				} `json:"choices"`
+			}
+			_ = json.NewDecoder(resp.Body).Decode(&raw)
+			_ = resp.Body.Close()
+			if len(raw.Choices) > 0 {
+				markdown = strings.TrimSpace(raw.Choices[0].Message.Content)
+			}
+		} else if err == nil {
+			io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+		}
+	}
+
+	// Fallback if LLM failed
+	if strings.TrimSpace(markdown) == "" {
+		var b strings.Builder
+		b.WriteString("# Report: " + runID + "\n\n")
+		if discoverQuery != "" {
+			b.WriteString("**Query:** " + discoverQuery + "\n\n")
+		}
+		if len(sources) > 0 {
+			b.WriteString("## Sources\n")
+			for i, s := range sources {
+				fmt.Fprintf(&b, "%d. [%s](%s)\n", i+1, s.Title, s.URL)
+			}
+			b.WriteString("\n")
+		}
+		if len(snippets) > 0 {
+			b.WriteString("## Snippets\n")
+			for _, sn := range snippets {
+				fmt.Fprintf(&b, "- **%s** — %s\n  %s\n\n", sn["title"], sn["url"], sn["snippet"])
+			}
+		} else {
+			b.WriteString("_No snippets available._\n")
+		}
+		markdown = b.String()
+	}
+
+	// 5) Write files
+	pathMD := fmt.Sprintf("runs/%s_report.md", runID)
+	if err := os.WriteFile(pathMD, []byte(markdown), 0o644); err != nil {
+		return "", err
+	}
+	// Sidecar JSON (inputs for traceability)
+	side := map[string]any{
+		"run_id":       runID,
+		"query":        discoverQuery,
+		"sources":      sources,
+		"snippets":     snippets,
+		"generated_at": time.Now().Format(time.RFC3339),
+	}
+	bside, _ := json.MarshalIndent(side, "", "  ")
+	_ = os.WriteFile(fmt.Sprintf("runs/%s_report.json", runID), bside, 0o644)
+
+	m.emit(runID, StageComplete, "report", "", "written: "+pathMD, "")
+	return pathMD, nil
 }
 
 // Kickoff creates a run, enqueues discover tasks, and returns the run ID.
 func (m *Master) Kickoff(ctx context.Context, g Goal) (string, error) {
 	runID := randomID()
+	m.registerRun(runID) // NEW
 	m.emit(runID, StageKickoff, g.Label, "", "planning", "")
 	plan := (Planner{}).MakePlan(g)
 	for _, step := range plan.Steps {
@@ -662,6 +912,134 @@ func (m *Master) Kickoff(ctx context.Context, g Goal) (string, error) {
 		}
 	}
 	return runID, nil
+}
+
+// ThinkAndAct runs iterative planning with an LLMPlanner.
+// On each iteration it asks the LLM for actions, executes them via MCP,
+// waits for completion, summarizes observations, and repeats.
+func (m *Master) ThinkAndAct(ctx context.Context, planner LLMPlanner, goal Goal, maxIters int) (string, error) {
+	// Snapshot available tools as seen by the registry
+	var tools []MCPToolSummary
+	for _, ag := range m.Agents.All() {
+		for name, t := range ag.Tools {
+			tools = append(tools, MCPToolSummary{
+				Name: name, Description: t.Description, InputSchema: t.InputSchema,
+				Capability: mapToolToCapability(name),
+			})
+		}
+	}
+
+	var finalRun string
+	var observations []ObservationSummary
+
+	for iter := 1; iter <= maxIters; iter++ {
+		in := PlannerInput{
+			Goal: goal, Tools: tools, Observations: observations,
+			MaxResults: clamp(goal.MaxResults, 1, 25),
+		}
+		t1 := time.Now()
+		ctxPlan, cancelPlan := context.WithTimeout(ctx, m.Cfg.ToolTimeout)
+		out, err := planner.Plan(ctxPlan, in)
+		t2 := time.Now()
+		fmt.Printf("Planner iteration (Time elapsed %fs) %d/%d: %s\n", t2.Sub(t1).Seconds(), iter, maxIters, mustJSON(out))
+		cancelPlan()
+		if err != nil {
+			return "", fmt.Errorf("planner error: %w", err)
+		}
+		if out.Stop {
+			m.emit("planner", StageComplete, "planner", "", "stop: "+out.WhyStop, "")
+			break
+		}
+
+		// If the planner suggests new queries, launch a run using your normal pipeline.
+		if len(out.NewQueries) > 0 {
+			g := goal
+			g.Queries = out.NewQueries
+			runID, err := m.Kickoff(ctx, g)
+			if err != nil {
+				return "", err
+			}
+			finalRun = runID
+			// Wait for that run to finish
+			if err := m.WaitRunComplete(ctx, runID); err != nil {
+				return "", err
+			}
+			// Summarize observations from the repo
+			items, _ := m.Repo.List(ctx, runID)
+			observations = summarize(items)
+			continue
+		}
+
+		// Or the planner can propose explicit tool actions (rarely needed; included for flexibility).
+		if len(out.Actions) > 0 {
+			// Translate actions → Goal → run (we reuse your discover/fetch/ingest pipeline)
+			var queries []string
+			for _, a := range out.Actions {
+				if a.Capability == CapWebSearch && a.Args != nil {
+					if q := str(a.Args["query"]); q != "" {
+						queries = append(queries, q)
+					}
+				}
+			}
+			if len(queries) == 0 && len(out.NewQueries) == 0 {
+				// Nothing actionable; stop.
+				m.emit("planner", StageComplete, "planner", "", "no actions", "")
+				break
+			}
+			g := goal
+			if len(queries) > 0 {
+				g.Queries = queries
+			}
+			runID, err := m.Kickoff(ctx, g)
+			if err != nil {
+				return "", err
+			}
+			finalRun = runID
+			if err := m.WaitRunComplete(ctx, runID); err != nil {
+				return "", err
+			}
+			items, _ := m.Repo.List(ctx, runID)
+			observations = summarize(items)
+			continue
+		}
+
+		fmt.Printf("planner iteration %d/%d: %s\n", iter, maxIters, mustJSON(out))
+		// If neither queries nor actions are present, we consider done.
+		break
+	}
+	return finalRun, nil
+}
+
+func mapToolToCapability(name string) string {
+	l := strings.ToLower(name)
+	switch {
+	case strings.HasPrefix(l, "web.search"):
+		return CapWebSearch
+	case strings.HasPrefix(l, "web.fetch"):
+		return CapWebFetch
+	case strings.HasPrefix(l, "web.ingest"):
+		return CapWebIngest
+	case strings.HasPrefix(l, "search.query"):
+		return CapSearchQuery
+	case strings.HasPrefix(l, "embedding."):
+		return CapEmbedding
+	default:
+		return ""
+	}
+}
+
+func summarize(items []StreamItem) []ObservationSummary {
+	out := make([]ObservationSummary, 0, len(items))
+	for _, it := range items {
+		out = append(out, ObservationSummary{
+			Stage: it.Stage,
+			Title: it.Title,
+			URL:   it.URL,
+			Note:  it.Note,
+			Err:   it.Err,
+		})
+	}
+	return out
 }
 
 // ==========================================================
@@ -805,23 +1183,43 @@ func (w *Worker) execIngest(ctx context.Context, t Task) error {
 	ag := w.Agents.FindAgentFor(CapWebIngest)
 	if ag == nil {
 		if !w.Master.Cfg.AllowLocalFallback {
-			return errors.New("no agent with web.ingest; expose this tool on your MCP server or enable AllowLocalFallback")
+			return errors.New("no agent with web.ingest; expose this tool or enable AllowLocalFallback")
 		}
-		// If you truly need a local fallback, implement it here. We intentionally
-		// omit local ingestion to keep the pipeline MCP-first.
-		return errors.New("local ingest fallback not implemented; set AllowLocalFallback=false and add web.ingest tool")
+		return errors.New("local ingest fallback not implemented")
 	}
+
 	tool := pickTool(ag, CapWebIngest)
 	ctx2, cancel := context.WithTimeout(ctx, w.Master.Cfg.ToolTimeout)
 	defer cancel()
-	args := map[string]any{
-		"session_id": str(t.Payload["session_id"]),
-		"ttl_hours":  asInt(t.Payload["ttl"], 48),
-		"docs":       []any{map[string]any{"url": u, "title": title, "text": text, "published_at": pub}},
+
+	// If payload has no session, try run-scoped cache first
+	sid := str(t.Payload["session_id"])
+	if sid == "" {
+		if cached := w.Master.getRunSession(t.RunID); cached != "" {
+			sid = cached
+		}
 	}
-	if _, err := ag.Client.CallTool(ctx2, tool, args); err != nil {
+
+	args := map[string]any{
+		"session_id": sid, // may be empty – server will create
+		"ttl_hours":  asInt(t.Payload["ttl"], 48),
+		"docs": []any{map[string]any{
+			"url": u, "title": title, "text": text, "published_at": pub,
+		}},
+	}
+
+	res, err := ag.Client.CallTool(ctx2, tool, args)
+	if err != nil {
 		return err
 	}
+	// capture the session id returned by MCP, cache it for this run
+	if c, ok := res["content"].(map[string]any); ok {
+		res = c
+	}
+	if sid2, _ := res["session_id"].(string); sid2 != "" && sid2 != sid {
+		w.Master.setRunSession(t.RunID, sid2)
+	}
+
 	w.Master.emit(t.RunID, StageIngest, title, u, "indexed+embedded", "")
 	return nil
 }
@@ -980,6 +1378,8 @@ func extractURLs(res map[string]any) []string {
 // main boots the orchestrator, spawns MCP agents, and runs a sample plan.
 // Replace the kickoff with your own API/CLI as needed.
 func main() {
+	config.LoadConfig("", false)
+
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	cfg := loadConfigFromEnv()
 	ctx := context.Background()
@@ -1046,15 +1446,213 @@ func main() {
 		}
 	}()
 
-	// Sample run (replace with your API/CLI)
-	run, err := master.Kickoff(ctx, Goal{Label: "sample-news-run", Queries: []string{"OpenAI o3 news", "EU AI Act status"}, MaxResults: 5, RecencyDays: 14, TTLHours: 72, Priority: PriorityHigh})
-	if err != nil {
-		log.Fatal(err)
+	// ---- Autonomous think/act mode (optional) ----
+	if strings.EqualFold(os.Getenv("MASTER_AUTONOMOUS"), "true") {
+		planner := OpenAIPlanner{
+			APIKey: os.Getenv("OPENAI_API_KEY"),
+			Model:  envOr("PLANNER_MODEL", "gpt-5-2025-08-07"),
+			Temp:   parseFloatEnv("PLANNER_TEMP", 1),
+		}
+		goal := Goal{
+			Label:       envOr("GOAL_LABEL", "sample-news-run"),
+			Queries:     []string{"OpenAI o3 news"}, // the planner will propose queries
+			Sites:       nil,
+			MaxResults:  parseIntEnv("GOAL_MAX_RESULTS", 5),
+			RecencyDays: parseIntEnv("GOAL_RECENCY_DAYS", 14),
+			SessionID:   envOr("GOAL_SESSION_ID", ""), // pass if you want continuity
+			TTLHours:    parseIntEnv("GOAL_TTL_HOURS", 72),
+			Priority:    PriorityHigh,
+		}
+		finalRun, err := master.ThinkAndAct(ctx, planner, goal, parseIntEnv("MASTER_MAX_ITERS", 3))
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Println("final run:", finalRun)
+		if finalRun != "" {
+			log.Printf("final run: %s", finalRun)
+			// Best-effort: point to report file
+			p := fmt.Sprintf("runs/%s_report.md", finalRun)
+			if _, err := os.Stat(p); err == nil {
+				log.Printf("report: %s", p)
+			}
+		}
+	} else {
+		// ---- Single-run mode (existing behavior) ----
+		run, err := master.Kickoff(ctx, Goal{
+			Label:       "sample-news-run",
+			Queries:     []string{"OpenAI o3 news", "EU AI Act status"},
+			MaxResults:  5,
+			RecencyDays: 14,
+			TTLHours:    72,
+			Priority:    PriorityHigh,
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Println("run:", run)
+
+		// NEW: block until the run is truly done (or time out / ctrl-c)
+		waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		if err := master.WaitRunComplete(waitCtx, run); err != nil {
+			log.Printf("wait run error: %v", err)
+		}
 	}
-	log.Println("run:", run)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 	log.Println("shutting down")
+}
+
+func envOr(k, def string) string {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v != "" {
+		return v
+	}
+	return def
+}
+func parseFloatEnv(k string, def float64) float64 {
+	if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return def
+}
+
+func parseIntEnv(k string, def int) int {
+	if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+		if f, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return int(f)
+		}
+	}
+	return def
+}
+
+// ===================== LLM: OpenAI Chat Completions (JSON only) =====================
+
+type OpenAIPlanner struct {
+	APIKey string
+	Model  string  // e.g., "gpt-4o-mini" or anything that does JSON well
+	Temp   float64 // 0.2–0.7 recommended
+}
+
+// Plan prompts the model to return strict JSON (no chain-of-thought).
+func (p OpenAIPlanner) Plan(ctx context.Context, in PlannerInput) (PlannerOutput, error) {
+	type message struct {
+		Role, Content string `json:"role","content"`
+	}
+	sys := `You are a planning controller. 
+- You control web tools ONLY via JSON actions I can execute.
+- Output STRICT JSON matching PlannerOutput. 
+- Do NOT include explanations outside the JSON.
+- Prefer minimal, focused actions. 
+- Stop=true when the goal is satisfied or no more useful actions exist.`
+
+	// We give the tools list & last observations so it can choose the next actions.
+	payload := map[string]any{
+		"model":           p.Model,
+		"temperature":     p.Temp,
+		"response_format": map[string]any{"type": "json_object"},
+		"messages": []map[string]any{
+			{"role": "system", "content": sys},
+			{"role": "user", "content": fmt.Sprintf("INPUT:\n%s", mustJSON(in))},
+			{"role": "user", "content": `Return JSON:
+{"stop":bool,"why_stop":string,"new_queries":[string], "actions":[{"capability":string,"tool":string,"args":object,"reason":string}]}`},
+		},
+	}
+
+	reqBody, _ := json.Marshal(payload)
+	req, _ := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer "+p.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return PlannerOutput{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(resp.Body)
+		return PlannerOutput{}, fmt.Errorf("openai: status %d: %s", resp.StatusCode, string(b))
+	}
+	var raw struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return PlannerOutput{}, err
+	}
+
+	if len(raw.Choices) == 0 {
+		return PlannerOutput{}, errors.New("openai: no choices")
+	}
+	var out PlannerOutput
+	if err := json.Unmarshal([]byte(raw.Choices[0].Message.Content), &out); err != nil {
+		return PlannerOutput{}, fmt.Errorf("bad JSON from model: %w; content=%s", err, raw.Choices[0].Message.Content)
+	}
+	return out, nil
+}
+
+func mustJSON(v any) string {
+	b, _ := json.MarshalIndent(v, "", "  ")
+	return string(b)
+}
+
+// ==========================================================
+// LLM planner (think → act → observe)
+// ==========================================================
+
+// PlannerInput is what we feed the LLM about current goals & observations.
+type PlannerInput struct {
+	Goal         Goal                 `json:"goal"`
+	Tools        []MCPToolSummary     `json:"tools"`
+	Observations []ObservationSummary `json:"observations"`
+	MaxResults   int                  `json:"max_results"`
+}
+
+// MCPToolSummary keeps only what the planner needs to decide actions.
+type MCPToolSummary struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	InputSchema map[string]any `json:"input_schema,omitempty"`
+	Capability  string         `json:"capability"`
+}
+
+// ObservationSummary is a compact digest of what happened last iteration.
+type ObservationSummary struct {
+	Stage Stage  `json:"stage"`
+	Title string `json:"title,omitempty"`
+	URL   string `json:"url,omitempty"`
+	Note  string `json:"note,omitempty"`
+	Err   string `json:"err,omitempty"`
+}
+
+// PlannerAction is the LLM’s proposed step (always executed via MCP).
+type PlannerAction struct {
+	// High-level capability to hit (e.g., "web.search", "web.fetch", "web.ingest")
+	Capability string `json:"capability"`
+	// Optional: direct tool name if planner has a preference; else we pick per CapabilityTools mapping.
+	Tool string `json:"tool,omitempty"`
+	// Arguments passed to MCP tool (must match the tool’s schema)
+	Args map[string]any `json:"args"`
+	// Optional: short reason (logged only; we won’t expose chain-of-thought)
+	Reason string `json:"reason,omitempty"`
+}
+
+// PlannerOutput is a structured instruction set for the Master.
+type PlannerOutput struct {
+	Stop       bool            `json:"stop"`
+	WhyStop    string          `json:"why_stop,omitempty"`
+	NewQueries []string        `json:"new_queries,omitempty"`
+	Actions    []PlannerAction `json:"actions,omitempty"`
+}
+
+// LLMPlanner decides “what to do next” from inputs & observations.
+type LLMPlanner interface {
+	Plan(ctx context.Context, in PlannerInput) (PlannerOutput, error)
 }

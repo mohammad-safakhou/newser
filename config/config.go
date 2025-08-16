@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -70,6 +72,11 @@ func LoadConfig(path string, isTest bool) {
 		viper.AddConfigPath("./app/config") // path to look for the config file in
 		viper.AddConfigPath("./config")     // path to look for the config file in
 		viper.AddConfigPath(".")            // optionally look for config in the working directory
+		exe, _ := os.Executable()
+		exeDir := filepath.Dir(exe)
+		viper.AddConfigPath(exeDir)                                // bin/
+		viper.AddConfigPath(filepath.Join(exeDir, ".."))           // repo root
+		viper.AddConfigPath(filepath.Join(exeDir, "..", "config")) // repo root/config
 	} else {
 		viper.SetConfigFile(path)
 	}

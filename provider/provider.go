@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"errors"
+
 	"github.com/mohammad-safakhou/newser/config"
 	"github.com/mohammad-safakhou/newser/models"
 	"github.com/mohammad-safakhou/newser/news/newsapi"
