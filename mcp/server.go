@@ -1,22 +1,10 @@
-// tools_mcp_server.go
-// A single-file MCP server that exposes your tools/ as MCP tools over stdio (JSON-RPC 2.0).
-// Supported tools:
-//   - web.search.brave    (tools/web_search/brave)
-//   - web.search.serper   (tools/web_search/serper)
-//   - web.fetch.chromedp  (tools/web_fetch/chromedp)
-//   - web.ingest          (tools/web_ingest + embedding/provider + session store)
-//   - search.query        (tools/search)
-//   - embedding.embed_many (tools/embedding)
+// mcp/server.go
+// Minimal MCP stdio server exposing stateless tools.
+// - All persistence & sessions are handled ONLY here (boundary).
+// - Tools remain pure and operate only on explicit inputs.
 //
-// Run:
-//   OPENAI_API_KEY=... BRAVE_API_KEY=... SERPER_API_KEY=... go run tools_mcp_server.go
-//
-// Protocol:
-//   - Request: JSON-RPC 2.0, one object per line on stdin
-//   - Methods:
-//       "tools/list":   -> { tools: [{ name, description, input_schema }] }
-//       "tools/call":   -> args { name: string, arguments: object } returns { content: any }
-//   - Responses printed one per line to stdout.
+// Start: `go run mcp/server.go`
+// The master/agents connect via stdio JSON-RPC: "tools/list" and "tools/call".
 
 package main
 
@@ -29,303 +17,128 @@ import (
 	"io"
 	"log"
 	"os"
-	"strings"
 	"time"
 
+	// --- project imports: adjust if your paths are different ---
 	"github.com/mohammad-safakhou/newser/config"
-	// Project deps
+	"github.com/mohammad-safakhou/newser/mcp/tools/embedding"
+	srch "github.com/mohammad-safakhou/newser/mcp/tools/search"
+	"github.com/mohammad-safakhou/newser/mcp/tools/web_fetch"
+	"github.com/mohammad-safakhou/newser/mcp/tools/web_ingest"
+	"github.com/mohammad-safakhou/newser/mcp/tools/web_search"
 	"github.com/mohammad-safakhou/newser/provider"
 	"github.com/mohammad-safakhou/newser/session"
-	"github.com/mohammad-safakhou/newser/tools/embedding"
-	"github.com/mohammad-safakhou/newser/tools/search"
-	fetch "github.com/mohammad-safakhou/newser/tools/web_fetch/chromedp"
-	fmodels "github.com/mohammad-safakhou/newser/tools/web_fetch/models"
-	wi "github.com/mohammad-safakhou/newser/tools/web_ingest"
-	wimodels "github.com/mohammad-safakhou/newser/tools/web_ingest/models"
-	"github.com/mohammad-safakhou/newser/tools/web_search/brave"
-	"github.com/mohammad-safakhou/newser/tools/web_search/serper"
 )
 
-// ---------------- JSON-RPC plumbing ----------------
+// ---------- JSON-RPC skeleton ----------
 
 type rpcReq struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params"`
+	JSONRPC string                 `json:"jsonrpc"`
+	ID      any                    `json:"id"`
+	Method  string                 `json:"method"`
+	Params  map[string]interface{} `json:"params"`
 }
-
 type rpcResp struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      interface{} `json:"id"`
-	Result  interface{} `json:"result,omitempty"`
-	Error   *rpcError   `json:"error,omitempty"`
+	JSONRPC string                 `json:"jsonrpc"`
+	ID      any                    `json:"id"`
+	Result  map[string]interface{} `json:"result,omitempty"`
+	Error   *rpcError              `json:"error,omitempty"`
 }
-
 type rpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
-	Data    any    `json:"data,omitempty"`
 }
 
-func writeResp(w *bufio.Writer, id interface{}, result interface{}, err *rpcError) error {
-	resp := rpcResp{JSONRPC: "2.0", ID: id, Result: result, Error: err}
-	b, _ := json.Marshal(resp)
-	b = append(b, '\n')
-	_, e := w.Write(b)
-	if e == nil {
-		_ = w.Flush()
+func writeResp(w io.Writer, id any, result map[string]interface{}, err error) {
+	resp := rpcResp{JSONRPC: "2.0", ID: id}
+	if err != nil {
+		resp.Error = &rpcError{Code: -32000, Message: err.Error()}
+	} else {
+		resp.Result = result
 	}
-	return e
+	enc := json.NewEncoder(w)
+	_ = enc.Encode(resp)
 }
 
-// ---------------- MCP tool registry ----------------
+// ---------- Tool registry ----------
 
+// ToolDesc describes a single MCP tool, including input schema.
 type ToolDesc struct {
-	Name        string                                             `json:"name"`
-	Description string                                             `json:"description"`
-	InputSchema map[string]any                                     `json:"input_schema"`
-	Meta        map[string]string                                  `json:"metadata,omitempty"`
-	Call        func(context.Context, map[string]any) (any, error) `json:"-"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	InputSchema map[string]interface{} `json:"input_schema"`
 }
 
-type Server struct {
+// MCPServer holds shared deps (the only “state”).
+type MCPServer struct {
+	// core deps
+	Store  session.Store
+	Embed  embedding.Embedding
+	Search srch.Hybrid
+
+	// external clients
+	Brave  websearch.Brave
+	Serper websearch.Serper
+
+	// reusable headless browser
+	Fetcher *web_fetch.Fetcher
+
+	// configuration
+	DefaultTimeout time.Duration
+	MaxChars       int
+
+	// cached tool descriptors
 	tools []ToolDesc
-	// shared deps
-	store     session.Store
-	prov      provider.Provider
-	emb       *embedding.Embedding
-	wi        *wi.Ingest
-	brave     brave.Search
-	serper    serper.Search
-	fetcher   fetch.Fetch
-	searchSvc search.Search
 }
 
-func (s *Server) listTools() map[string]any {
-	arr := make([]map[string]any, 0, len(s.tools))
-	for _, t := range s.tools {
-		arr = append(arr, map[string]any{
-			"name":         t.Name,
-			"description":  t.Description,
-			"input_schema": t.InputSchema,
-		})
-	}
-	return map[string]any{"tools": arr}
-}
-
-func (s *Server) callTool(ctx context.Context, name string, args map[string]any) (any, error) {
-	for _, t := range s.tools {
-		if t.Name == name {
-			return t.Call(ctx, args)
-		}
-	}
-	return nil, fmt.Errorf("unknown tool: %s", name)
-}
-
-// ---------------- Tool implementations ----------------
-
-func (s *Server) tWebSearchBrave(ctx context.Context, args map[string]any) (any, error) {
-	q := strArg(args, "query")
-	k := intArg(args, "k", 10)
-	sites := strSliceArg(args, "sites")
-	recency := intArg(args, "recency", 7)
-	if q == "" {
-		return nil, errors.New("query is required")
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	res, err := s.brave.Discover(ctx, q, k, sites, recency)
-	if err != nil {
-		return nil, err
-	}
-	// normalize result
-	out := make([]map[string]any, 0, len(res))
-	for _, r := range res {
-		out = append(out, map[string]any{"title": r.Title, "url": r.URL, "snippet": r.Snippet})
-	}
-	return map[string]any{"results": out}, nil
-}
-
-func (s *Server) tWebSearchSerper(ctx context.Context, args map[string]any) (any, error) {
-	q := strArg(args, "query")
-	k := intArg(args, "k", 10)
-	sites := strSliceArg(args, "sites")
-	recency := intArg(args, "recency", 7)
-	if q == "" {
-		return nil, errors.New("query is required")
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	res, err := s.serper.Discover(ctx, q, k, sites, recency)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]map[string]any, 0, len(res))
-	for _, r := range res {
-		out = append(out, map[string]any{"title": r.Title, "url": r.URL, "snippet": r.Snippet})
-	}
-	return map[string]any{"results": out}, nil
-}
-
-func (s *Server) tWebFetchChromedp(ctx context.Context, args map[string]any) (any, error) {
-	u := strArg(args, "url")
-	if u == "" {
-		return nil, errors.New("url is required")
-	}
-	timeoutMS := intArg(args, "timeout_ms", 15000)
-	maxChars := intArg(args, "max_chars", 12000)
-	loc := fetch.Fetch{TimeoutMS: time.Duration(timeoutMS) * time.Millisecond, MaxChars: maxChars}
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMS)*time.Millisecond+3*time.Second)
-	defer cancel()
-	res, err := loc.Exec(ctx, u)
-	if err != nil {
-		// normalize an error response per your models
-		return fmodels.Result{URL: u, Status: 599, RenderMS: int((time.Duration(timeoutMS) * time.Millisecond).Milliseconds())}, nil
-	}
-	return res, nil
-}
-
-func (s *Server) tWebIngest(ctx context.Context, args map[string]any) (any, error) {
-	sessID := strArg(args, "session_id")
-	ttl := intArg(args, "ttl_hours", 48)
-	docsAny, ok := args["docs"].([]any)
-	if !ok || len(docsAny) == 0 {
-		return nil, errors.New("docs: non-empty array required")
-	}
-	docs := make([]session.DocInput, 0, len(docsAny))
-	for _, e := range docsAny {
-		m, ok := e.(map[string]any)
-		if !ok {
-			continue
-		}
-		docs = append(docs, session.DocInput{
-			URL:         strArg(m, "url"),
-			Title:       strArg(m, "title"),
-			Text:        strArg(m, "text"),
-			PublishedAt: strArg(m, "published_at"),
-		})
-	}
-	if len(docs) == 0 {
-		return nil, errors.New("docs: empty after parsing")
-	}
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	sum, err := s.wi.Ingest(sessID, docs, ttl)
-	if err != nil {
-		return nil, err
-	}
-	// convert to public model
-	return wimodels.IngestResponse{SessionID: sum.SessionID, Chunks: sum.Chunks, IndexedBM: sum.IndexedBM, IndexedVec: sum.IndexedVec}, nil
-}
-
-func (s *Server) tSearchQuery(ctx context.Context, args map[string]any) (any, error) {
-	sessionID := strArg(args, "session_id")
-	q := strArg(args, "q")
-	k := intArg(args, "k", 10)
-	if sessionID == "" || q == "" {
-		return nil, errors.New("session_id and q are required")
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	hits, err := s.searchSvc.Search(sessionID, q, k)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"hits": hits}, nil
-}
-
-func (s *Server) tEmbedMany(ctx context.Context, args map[string]any) (any, error) {
-	arrAny, ok := args["texts"].([]any)
-	if !ok || len(arrAny) == 0 {
-		return nil, errors.New("texts: non-empty array required")
-	}
-	texts := make([]string, 0, len(arrAny))
-	for _, e := range arrAny {
-		if s, ok := e.(string); ok {
-			texts = append(texts, s)
-		}
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	vecs, err := s.emb.EmbedMany(ctx, texts)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"vectors": vecs}, nil
-}
-
-// ---------------- Helpers ----------------
-
-func strArg(m map[string]any, k string) string {
-	if v, ok := m[k].(string); ok {
-		return v
-	}
-	return ""
-}
-func intArg(m map[string]any, k string, def int) int {
-	if v, ok := m[k]; ok {
-		switch x := v.(type) {
-		case float64:
-			return int(x)
-		case int:
-			return x
-		case json.Number:
-			i, _ := x.Int64()
-			return int(i)
-		}
-	}
-	return def
-}
-func strSliceArg(m map[string]any, k string) []string {
-	v, ok := m[k].([]any)
-	if !ok {
-		return nil
-	}
-	out := make([]string, 0, len(v))
-	for _, e := range v {
-		if s, ok := e.(string); ok {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-// ---------------- Main ----------------
-
-func main() {
-	log.SetOutput(os.Stderr)
-	log.SetFlags(0)
-	// Load configuration
+// NewMCPServer wires dependencies once.
+func NewMCPServer() (*MCPServer, error) {
 	config.LoadConfig("", false)
-	log.SetFlags(0)
-	enc := json.NewEncoder(os.Stdout)
-	_ = enc // silence lint if unused
-	ctx := context.Background()
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	// Shared deps
-	store := session.NewSessionStore() // swap in your real store
-	prov, err := provider.NewProvider(provider.OpenAI)
+	// Session store: your real implementation here
+	store := session.NewRedisStore(
+		config.AppConfig.Databases.Redis.Host,
+		config.AppConfig.Databases.Redis.Port,
+		config.AppConfig.Databases.Redis.DB,
+	)
+
+	// Provider + embeddings
+	pv, err := provider.NewProvider(provider.OpenAI)
 	if err != nil {
-		log.Fatalf("failed to create provider: %v", err)
+		return nil, fmt.Errorf("provider: %w", err)
 	}
-	emb := embedding.NewEmbedding(prov)
-	ing := wi.NewIngest(store, *emb)
+	emb := embedding.NewEmbedding(pv)
 
-	srv := &Server{
-		store:     store,
-		prov:      prov,
-		emb:       emb,
-		wi:        ing,
-		brave:     brave.Search{ApiKey: os.Getenv("BRAVE_API_KEY")},
-		serper:    serper.Search{ApiKey: os.Getenv("SERPER_API_KEY")},
-		fetcher:   fetch.Fetch{TimeoutMS: 15 * time.Second, MaxChars: 12000},
-		searchSvc: search.NewSearch(store),
+	// Hybrid search (stateless)
+	h := srch.NewHybrid(*emb)
+
+	// Reusable chromedp fetcher (tweak defaults via env if you like)
+	fetcher, err := web_fetch.NewFetcher(30*time.Second, 12000, "NewserMCP/1.0 (+mcp)")
+	if err != nil {
+		return nil, fmt.Errorf("fetcher: %w", err)
 	}
-	// wire embedding into searchSvc
-	srv.searchSvc.Embedding = *emb
 
-	// Register tools
+	// Web search clients (API keys via env)
+	braveKey := os.Getenv("BRAVE_SEARCH_KEY")
+	serperKey := os.Getenv("SERPER_API_KEY")
+
+	srv := &MCPServer{
+		Store:          store,
+		Embed:          *emb,
+		Search:         h,
+		Brave:          websearch.Brave{APIKey: braveKey},
+		Serper:         websearch.Serper{APIKey: serperKey},
+		Fetcher:        fetcher,
+		DefaultTimeout: 30 * time.Second,
+		MaxChars:       12000,
+	}
+	srv.initTools()
+	return srv, nil
+}
+
+// initTools defines schemas and descriptions surfaced to MCP clients.
+func (srv *MCPServer) initTools() {
 	srv.tools = []ToolDesc{
 		{
 			Name:        "web.search.brave",
@@ -340,7 +153,6 @@ func main() {
 				},
 				"required": []string{"query"},
 			},
-			Call: srv.tWebSearchBrave,
 		},
 		{
 			Name:        "web.search.serper",
@@ -355,7 +167,6 @@ func main() {
 				},
 				"required": []string{"query"},
 			},
-			Call: srv.tWebSearchSerper,
 		},
 		{
 			Name:        "web.fetch.chromedp",
@@ -369,16 +180,14 @@ func main() {
 				},
 				"required": []string{"url"},
 			},
-			Call: srv.tWebFetchChromedp,
 		},
 		{
 			Name:        "web.ingest",
-			Description: "Chunk, index, and embed documents into a session store.",
+			Description: "Chunk, index, and embed documents into a session corpus.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"session_id": map[string]any{"type": "string"},
-					"ttl_hours":  map[string]any{"type": "integer", "minimum": 1},
 					"docs": map[string]any{"type": "array", "items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
@@ -389,14 +198,15 @@ func main() {
 						},
 						"required": []string{"text"},
 					}},
+					"approx_chunk": map[string]any{"type": "integer"},
+					"overlap":      map[string]any{"type": "integer"},
 				},
-				"required": []string{"docs"},
+				"required": []string{"session_id", "docs"},
 			},
-			Call: srv.tWebIngest,
 		},
 		{
 			Name:        "search.query",
-			Description: "Hybrid search (BM25+vector) over a session's corpus.",
+			Description: "Hybrid search (BM25 + vector) over a session corpus.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -406,7 +216,6 @@ func main() {
 				},
 				"required": []string{"session_id", "q"},
 			},
-			Call: srv.tSearchQuery,
 		},
 		{
 			Name:        "embedding.embed_many",
@@ -418,53 +227,307 @@ func main() {
 				},
 				"required": []string{"texts"},
 			},
-			Call: srv.tEmbedMany,
 		},
 	}
+}
 
-	in := bufio.NewReader(os.Stdin)
-	out := bufio.NewWriter(os.Stdout)
+// listTools returns the advertised tool list.
+func (srv *MCPServer) listTools() map[string]any {
+	return map[string]any{"tools": srv.tools}
+}
 
-	for {
-		line, err := in.ReadBytes('\n')
-		if err != nil {
-			if errors.Is(err, os.ErrClosed) || strings.Contains(err.Error(), "use of closed") {
-				return
+// callTool dispatches to handler functions.
+func (srv *MCPServer) callTool(ctx context.Context, name string, args map[string]any) (map[string]any, error) {
+	switch name {
+	case "web.search.brave":
+		return srv.tWebSearchBrave(ctx, args)
+	case "web.search.serper":
+		return srv.tWebSearchSerper(ctx, args)
+	case "web.fetch.chromedp":
+		return srv.tWebFetchChromedp(ctx, args)
+	case "web.ingest":
+		return srv.tWebIngest(ctx, args)
+	case "search.query":
+		return srv.tSearchQuery(ctx, args)
+	case "embedding.embed_many":
+		return srv.tEmbedMany(ctx, args)
+	default:
+		return nil, fmt.Errorf("unknown tool: %s", name)
+	}
+}
+
+// ---------- Tool handlers ----------
+
+// tWebSearchBrave executes a Brave query; returns a normalized result list.
+// Input: query (string), k (int), sites ([]string, optional), recency (int days, optional).
+func (srv *MCPServer) tWebSearchBrave(ctx context.Context, args map[string]any) (map[string]any, error) {
+	q := str(args["query"])
+	if q == "" {
+		return nil, errors.New("query is required")
+	}
+	k := clampInt(asInt(args["k"]), 1, 25)
+	sites := asStrSlice(args["sites"])
+	recency := asInt(args["recency"])
+
+	results, err := srv.Brave.Discover(ctx, q, k, sites, recency)
+	if err != nil {
+		return nil, err
+	}
+	// Normalize to a uniform shape
+	out := make([]map[string]any, 0, len(results))
+	for _, r := range results {
+		out = append(out, map[string]any{"title": r.Title, "url": r.URL, "snippet": r.Snippet})
+	}
+	return map[string]any{"results": out}, nil
+}
+
+// tWebSearchSerper executes a Serper query; returns a normalized result list.
+func (srv *MCPServer) tWebSearchSerper(ctx context.Context, args map[string]any) (map[string]any, error) {
+	q := str(args["query"])
+	if q == "" {
+		return nil, errors.New("query is required")
+	}
+	k := clampInt(asInt(args["k"]), 1, 25)
+	sites := asStrSlice(args["sites"])
+	recency := asInt(args["recency"])
+
+	results, err := srv.Serper.Discover(ctx, q, k, sites, recency)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(results))
+	for _, r := range results {
+		out = append(out, map[string]any{"title": r.Title, "url": r.URL, "snippet": r.Snippet})
+	}
+	return map[string]any{"results": out}, nil
+}
+
+// tWebFetchChromedp fetches & extracts readable content using the reusable fetcher.
+// Input: url (string), timeout_ms (optional), max_chars (optional).
+func (srv *MCPServer) tWebFetchChromedp(ctx context.Context, args map[string]any) (map[string]any, error) {
+	url := str(args["url"])
+	if url == "" {
+		return nil, errors.New("url is required")
+	}
+	timeout := time.Duration(asInt(args["timeout_ms"])) * time.Millisecond
+	maxChars := asInt(args["max_chars"])
+	// temporarily override fetcher's MaxChars if provided
+	origMax := srv.Fetcher.MaxChars
+	if maxChars > 0 {
+		srv.Fetcher.MaxChars = maxChars
+	}
+	defer func() { srv.Fetcher.MaxChars = origMax }()
+
+	res, err := srv.Fetcher.Exec(ctx, url, timeout)
+	if err != nil {
+		return nil, err
+	}
+	// models.Result → map
+	return map[string]any{
+		"url":          res.URL,
+		"title":        res.Title,
+		"byline":       res.Byline,
+		"published_at": res.PublishedAt,
+		"text":         res.Text,
+		"top_image":    res.TopImage,
+		"html_hash":    res.HTMLHash,
+		"status":       res.Status,
+		"render_ms":    res.RenderMS,
+	}, nil
+}
+
+// tWebIngest resolves a session corpus and ingests docs via the pure ingestor.
+// Input: session_id (string), docs ([]DocInput), approx_chunk (int, opt), overlap (int, opt).
+func (srv *MCPServer) tWebIngest(ctx context.Context, args map[string]any) (map[string]any, error) {
+	sid := str(args["session_id"])
+	if sid == "" {
+		return nil, errors.New("session_id is required")
+	}
+	// Resolve (or create) the corpus at the boundary; tools remain pure.
+	ttl := 48 * time.Hour
+	corp, err := srv.Store.EnsureSession(sid, ttl)
+	if err != nil {
+		return nil, fmt.Errorf("ensure session: %w", err)
+	}
+
+	rawDocs, ok := args["docs"].([]any)
+	if !ok || len(rawDocs) == 0 {
+		return nil, errors.New("docs is required (non-empty array)")
+	}
+	docs := make([]web_ingest.DocInput, 0, len(rawDocs))
+	for _, v := range rawDocs {
+		m, _ := v.(map[string]any)
+		docs = append(docs, web_ingest.DocInput{
+			URL:         str(m["url"]),
+			Title:       str(m["title"]),
+			Text:        str(m["text"]),
+			PublishedAt: str(m["published_at"]),
+		})
+	}
+
+	approx := asInt(args["approx_chunk"])
+	overlap := asInt(args["overlap"])
+	ing := web_ingest.NewIngestor(srv.Embed, approx, overlap)
+
+	resp, err := ing.IngestDocs(ctx, corp, docs)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"session_id":  resp.SessionID,
+		"chunks":      resp.Chunks,
+		"indexed_bm":  resp.IndexedBM,
+		"indexed_vec": resp.IndexedVec,
+	}, nil
+}
+
+// tSearchQuery resolves a session corpus and runs hybrid search.
+// Input: session_id (string), q (string), k (int).
+func (srv *MCPServer) tSearchQuery(ctx context.Context, args map[string]any) (map[string]any, error) {
+	sid := str(args["session_id"])
+	if sid == "" {
+		return nil, errors.New("session_id is required")
+	}
+	q := str(args["q"])
+	if q == "" {
+		return nil, errors.New("q is required")
+	}
+	k := asInt(args["k"])
+	if k < 1 || k > 50 {
+		k = 10
+	}
+
+	// boundary-only session lookup
+	corp, err := srv.Store.GetSession(sid)
+	if err != nil {
+		return nil, fmt.Errorf("get session: %w", err)
+	}
+
+	hits, err := srv.Search.Search(ctx, corp, q, k)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, map[string]any{
+			"doc_id":  h.DocID,
+			"title":   h.Title,
+			"url":     h.URL,
+			"snippet": h.Snippet,
+			"score":   h.Score,
+		})
+	}
+	return map[string]any{"hits": out}, nil
+}
+
+// tEmbedMany embeds raw texts via provider (pure).
+// Input: texts ([]string)
+func (srv *MCPServer) tEmbedMany(ctx context.Context, args map[string]any) (map[string]any, error) {
+	texts := asStrSlice(args["texts"])
+	if len(texts) == 0 {
+		return map[string]any{"vectors": [][]float32{}}, nil
+	}
+	vecs, err := srv.Embed.EmbedMany(ctx, texts)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"vectors": vecs}, nil
+}
+
+// ---------- helpers ----------
+
+func str(v any) string { s, _ := v.(string); return s }
+func asInt(v any) int {
+	switch x := v.(type) {
+	case float64:
+		return int(x)
+	case int:
+		return x
+	case json.Number:
+		i, _ := x.Int64()
+		return int(i)
+	default:
+		return 0
+	}
+}
+func asStrSlice(v any) []string {
+	if v == nil {
+		return nil
+	}
+	switch x := v.(type) {
+	case []string:
+		return x
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, e := range x {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
 			}
-			if err == io.EOF {
-				return
-			}
-			log.Printf("read error: %v", err)
-			return
 		}
+		return out
+	default:
+		return nil
+	}
+}
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+// ---------- stdio loop ----------
+
+// Serve runs a simple stdio JSON-RPC loop for MCP.
+func (srv *MCPServer) Serve(in io.Reader, out io.Writer) error {
+	rd := bufio.NewReader(in)
+	dec := json.NewDecoder(rd)
+	for {
 		var req rpcReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			_ = writeResp(out, nil, nil, &rpcError{Code: -32700, Message: "parse error", Data: err.Error()})
+		if err := dec.Decode(&req); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			// try to skip bad lines
 			continue
 		}
-		// default id: echo raw id back
-		id := any(req.ID)
 
 		switch req.Method {
 		case "tools/list":
-			_ = writeResp(out, id, srv.listTools(), nil)
+			writeResp(out, req.ID, map[string]any{"tools": srv.tools}, nil)
+
 		case "tools/call":
-			var p struct {
-				Name      string         `json:"name"`
-				Arguments map[string]any `json:"arguments"`
+			name := ""
+			args := map[string]any{}
+			if v, ok := req.Params["name"].(string); ok {
+				name = v
 			}
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				_ = writeResp(out, id, nil, &rpcError{Code: -32602, Message: "invalid params", Data: err.Error()})
-				continue
+			if m, ok := req.Params["arguments"].(map[string]any); ok {
+				args = m
 			}
-			res, err := srv.callTool(ctx, p.Name, p.Arguments)
-			if err != nil {
-				_ = writeResp(out, id, nil, &rpcError{Code: -32000, Message: err.Error()})
-				continue
-			}
-			_ = writeResp(out, id, map[string]any{"content": res}, nil)
+			// Per-call timeout to avoid stuck handlers
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			res, err := srv.callTool(ctx, name, args)
+			cancel()
+			writeResp(out, req.ID, res, err)
+
 		default:
-			_ = writeResp(out, id, nil, &rpcError{Code: -32601, Message: "method not found"})
+			writeResp(out, req.ID, nil, fmt.Errorf("unknown method: %s", req.Method))
 		}
+	}
+}
+
+func main() {
+	srv, err := NewMCPServer()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "init error: %v\n", err)
+		os.Exit(1)
+	}
+	if err := srv.Serve(os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "serve error: %v\n", err)
+		os.Exit(1)
 	}
 }
