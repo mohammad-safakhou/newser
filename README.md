@@ -197,7 +197,7 @@ The system supports multiple LLM providers. Configure in your initialization cod
 ```go
 providerClient := openai_provider.NewOpenAIClient(
     apiKey,
-    "gpt-3.5-turbo",  // or "gpt-4"
+    "gpt-3.5-turbo",  // or "gpt-5"
     0.7,              // temperature
     2000,             // max_tokens
     30*time.Second,   // timeout
