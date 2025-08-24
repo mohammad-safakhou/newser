@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mohammad-safakhou/newser/agents_v3/config"
-	"github.com/mohammad-safakhou/newser/agents_v3/core"
-	"github.com/mohammad-safakhou/newser/agents_v3/telemetry"
+	"github.com/mohammad-safakhou/newser/internal/agent/config"
+	"github.com/mohammad-safakhou/newser/internal/agent/core"
+	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
 )
 
 func main() {
