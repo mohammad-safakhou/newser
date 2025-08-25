@@ -10,7 +10,7 @@ import (
 func main() {
 	addr := os.Getenv("NEWSER_HTTP_ADDR")
 	if addr == "" {
-		addr = ":8080"
+		addr = ":10001"
 	}
 
 	if err := server.Run(addr); err != nil {

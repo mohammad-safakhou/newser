@@ -28,7 +28,7 @@ func loadServerConfig() *ServerConfig {
     v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
     v.AutomaticEnv()
 
-    v.SetDefault("address", ":8080")
+    v.SetDefault("address", ":10001")
     v.SetDefault("jwt_secret", "dev-secret-change-me")
     v.SetDefault("redis.port", "6379")
 

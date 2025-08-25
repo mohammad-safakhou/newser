@@ -17,11 +17,11 @@ func main() {
         Short: "Run HTTP API server",
         RunE: func(cmd *cobra.Command, args []string) error {
             if serveAddr == "" { serveAddr = os.Getenv("NEWSER_HTTP_ADDR") }
-            if serveAddr == "" { serveAddr = ":8080" }
+            if serveAddr == "" { serveAddr = ":10001" }
             return srv.Run(serveAddr)
         },
     }
-    serve.Flags().StringVar(&serveAddr, "addr", ":8080", "listen address")
+    serve.Flags().StringVar(&serveAddr, "addr", ":10001", "listen address")
 
     var migDir string
     var migDirDefault = "file://migrations"
@@ -54,7 +54,7 @@ func main() {
         Short: "Run background scheduler",
         RunE: func(cmd *cobra.Command, args []string) error {
             // reuse server Run which starts scheduler by default for now
-            addr := getenv("NEWSER_HTTP_ADDR", ":8080")
+            addr := getenv("NEWSER_HTTP_ADDR", ":10001")
             return srv.Run(addr)
         },
     }

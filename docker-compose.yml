@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:16
@@ -18,27 +16,6 @@ services:
       retries: 5
 
   redis:
-  app:
-    build: .
-    image: newser:latest
-    depends_on:
-      - postgres
-      - redis
-    environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: "5432"
-      POSTGRES_USER: newser
-      POSTGRES_PASSWORD: newser
-      POSTGRES_DB: newser
-      JWT_SECRET: dev-secret-change-me
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-    ports:
-      - "8080:8080"
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
     image: redis:7
     ports:
       - "6379:6379"
@@ -50,6 +27,39 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: newser:latest
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: newser
+      POSTGRES_PASSWORD: newser
+      POSTGRES_DB: newser
+      JWT_SECRET: dev-secret-change-me
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      NEWSER_REDIS_HOST: redis
+      NEWSER_REDIS_PORT: "6379"
+    ports:
+      - "10001:10001"
+    volumes:
+      - ./config:/app/config:ro
+
+  webui:
+    build:
+      context: ./webui
+      dockerfile: Dockerfile
+    image: newser-webui:latest
+    depends_on:
+      - app
+    ports:
+      - "3000:3000"
 
 volumes:
   pgdata: {}

@@ -90,13 +90,7 @@ func Run(addr string) error {
     sched := &Scheduler{ Store: auth.Store, Stop: make(chan struct{}), Rdb: rdb }
     sched.Start()
 
-    // Static web UI (expects webui build output under webui/dist)
-    if _, err := os.Stat("webui/dist"); err == nil {
-        e.Static("/", "webui/dist")
-        e.File("/index.html", "webui/dist/index.html")
-        // Fallback to index.html for client routing
-        e.Any("/*", func(c echo.Context) error { return c.File("webui/dist/index.html") })
-    }
+    // Note: Web UI is served by a separate container; backend only exposes APIs
 
     if addr == "" { addr = srvCfg.Address }
     log.Printf("listening on %s", addr)
