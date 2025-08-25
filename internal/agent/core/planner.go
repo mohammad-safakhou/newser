@@ -5,12 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mohammad-safakhou/newser/agents_v3/config"
-	"github.com/mohammad-safakhou/newser/agents_v3/telemetry"
+	"github.com/mohammad-safakhou/newser/internal/agent/config"
+	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
 )
 
 // Planner creates intelligent execution plans for user thoughts
@@ -148,15 +147,25 @@ Create a comprehensive plan that will effectively address the user's thought. Fo
 
 // parsePlanningResponse parses the LLM response into a PlanningResult
 func (p *Planner) parsePlanningResponse(response string) (PlanningResult, error) {
-	// Extract JSON from response
-	jsonStart := strings.Index(response, "{")
-	jsonEnd := strings.LastIndex(response, "}")
-	
-	if jsonStart == -1 || jsonEnd == -1 {
+	// Extract JSON from response using balanced brace scanning
+	jsonStr := ""
+	start := -1
+	depth := 0
+	for i, ch := range response {
+		if ch == '{' {
+			if depth == 0 { start = i }
+			depth++
+		} else if ch == '}' {
+			if depth > 0 { depth-- }
+			if depth == 0 && start != -1 {
+				jsonStr = response[start : i+1]
+				break
+			}
+		}
+	}
+	if jsonStr == "" {
 		return PlanningResult{}, fmt.Errorf("no JSON found in response")
 	}
-	
-	jsonStr := response[jsonStart : jsonEnd+1]
 	
 	var rawPlan struct {
 		Tasks              []struct {
@@ -178,6 +187,35 @@ func (p *Planner) parsePlanningResponse(response string) (PlanningResult, error)
 	}
 	
 	if err := json.Unmarshal([]byte(jsonStr), &rawPlan); err != nil {
+		// lenient fallback: coerce numeric IDs
+		var generic map[string]interface{}
+		if err2 := json.Unmarshal([]byte(jsonStr), &generic); err2 == nil {
+			var tasks []AgentTask
+			if tAny, ok := generic["tasks"].([]interface{}); ok {
+				for _, ti := range tAny {
+					tmap, _ := ti.(map[string]interface{})
+					id := ""
+					if v, ok := tmap["id"].(string); ok { id = v } else if fv, ok := tmap["id"].(float64); ok { id = fmt.Sprintf("%.0f", fv) }
+					ttype, _ := tmap["type"].(string)
+					desc, _ := tmap["description"].(string)
+					prio := 0
+					if pv, ok := tmap["priority"].(float64); ok { prio = int(pv) }
+					params := map[string]interface{}{}
+					if pm, ok := tmap["parameters"].(map[string]interface{}); ok { params = pm }
+					var deps []string
+					if dl, ok := tmap["depends_on"].([]interface{}); ok {
+						for _, di := range dl { if ds, ok := di.(string); ok { deps = append(deps, ds) } }
+					}
+					timeout := p.config.Agents.AgentTimeout
+					if ts, ok := tmap["timeout"].(string); ok { if d, e := time.ParseDuration(ts); e == nil { timeout = d } }
+					if id == "" { id = uuid.New().String() }
+					tasks = append(tasks, AgentTask{ ID: id, Type: ttype, Description: desc, Priority: prio, Parameters: params, DependsOn: deps, Timeout: timeout, CreatedAt: time.Now() })
+				}
+			}
+			totalTime := 5 * time.Minute
+			if et, ok := generic["estimated_total_time"].(string); ok { if d, e := time.ParseDuration(et); e == nil { totalTime = d } }
+			return PlanningResult{ Tasks: tasks, ExecutionOrder: []string{}, EstimatedCost: 0, EstimatedTime: totalTime, Confidence: 0.8 }, nil
+		}
 		return PlanningResult{}, fmt.Errorf("failed to parse JSON: %w", err)
 	}
 	

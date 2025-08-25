@@ -1,31 +1,14 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Newser - Topics</title>
-  <link rel="stylesheet" href="static/style.css" />
-</head>
-<body>
-  <h1>Topics</h1>
-  <form id="create-topic-form">
-    <input type="text" id="topic-title" placeholder="Enter topic title" required />
-    <button type="submit" id="create-button">Create Topic</button>
-  </form>
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Newser</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+  </html>
 
-  <table id="topics-table">
-    <thead>
-      <tr>
-        <th>Title</th>
-        <th>State</th>
-        <th>Created At</th>
-        <th>Updated At</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody></tbody>
-  </table>
 
-  <script src="static/script.js"></script>
-</body>
-</html>

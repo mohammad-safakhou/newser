@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mohammad-safakhou/newser/agents_v3/config"
+	"github.com/mohammad-safakhou/newser/internal/agent/config"
 )
 
 // Telemetry provides comprehensive monitoring and cost tracking
@@ -127,8 +127,8 @@ func NewTelemetry(config config.TelemetryConfig) *Telemetry {
 		},
 	}
 
-	// Start background tasks
-	if config.Enabled {
+	// Start background tasks (periodic logs can be disabled via config)
+	if config.Enabled && config.PeriodicLogs {
 		go t.startMetricsCollection()
 		go t.startCostReporting()
 	}

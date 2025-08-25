@@ -1,0 +1,6 @@
+DROP TABLE IF EXISTS processing_results;
+DROP TABLE IF EXISTS runs;
+DROP TABLE IF EXISTS topics;
+DROP TABLE IF EXISTS users;
+
+

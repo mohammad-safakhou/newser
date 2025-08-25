@@ -25,7 +25,6 @@ import (
 	"time"
 
 	// --- project imports: keep aligned with your repo layout ---
-	"github.com/mohammad-safakhou/newser/config"
 	"github.com/mohammad-safakhou/newser/mcp/tools/embedding"
 	srch "github.com/mohammad-safakhou/newser/mcp/tools/search"
 	"github.com/mohammad-safakhou/newser/mcp/tools/web_fetch"
@@ -201,18 +200,17 @@ func NewMCPServer() (*MCPServer, error) {
 	// Log only to stderr so stdout stays pure JSON-RPC.
 	logger := log.New(os.Stderr, "[mcp] ", log.LstdFlags|log.Lshortfile)
 
-	// Config load
-	config.LoadConfig("", false)
-
 	// Boundary session store (Redis-backed recommended for durability)
-	store := session.NewRedisStore(
-		config.AppConfig.Databases.Redis.Host,
-		config.AppConfig.Databases.Redis.Port,
-		config.AppConfig.Databases.Redis.Pass,
-		config.AppConfig.Databases.Redis.DB,
-	)
+	redisHost := strings.TrimSpace(os.Getenv("REDIS_HOST"))
+	if redisHost == "" { redisHost = "localhost" }
+	redisPort := strings.TrimSpace(os.Getenv("REDIS_PORT"))
+	if redisPort == "" { redisPort = "6379" }
+	redisPass := os.Getenv("REDIS_PASSWORD")
+	redisDB := 0
+	if v := strings.TrimSpace(os.Getenv("REDIS_DB")); v != "" { if n, e := strconv.Atoi(v); e == nil { redisDB = n } }
+	store := session.NewRedisStore(redisHost, redisPort, redisPass, redisDB)
 
-	// Provider + embeddings
+	// Provider + embeddings (OpenAI env-based)
 	pv, err := provider.NewProvider(provider.OpenAI)
 	if err != nil {
 		return nil, fmt.Errorf("provider: %w", err)
@@ -799,8 +797,6 @@ func (srv *MCPServer) safeCall(t *Tool, args map[string]any) (res map[string]any
 // ============================= main =============================
 
 func main() {
-	config.LoadConfig("", false)
-
 	srv, err := NewMCPServer()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "init error: %v\n", err)

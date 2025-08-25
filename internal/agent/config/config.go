@@ -70,6 +70,7 @@ type TelemetryConfig struct {
 	MetricsPort  int    `mapstructure:"metrics_port"`
 	LogFile      string `mapstructure:"log_file"`
 	CostTracking bool   `mapstructure:"cost_tracking"`
+	PeriodicLogs bool   `mapstructure:"periodic_logs"`
 }
 
 // AgentsConfig contains agent-specific settings
@@ -119,6 +120,7 @@ type AcademicConfig struct {
 type StorageConfig struct {
 	Redis RedisConfig `mapstructure:"redis"`
 	File  FileConfig  `mapstructure:"file"`
+    Postgres PostgresConfig `mapstructure:"postgres"`
 }
 
 // RedisConfig contains Redis connection settings
@@ -136,11 +138,22 @@ type FileConfig struct {
 	LogDir  string `mapstructure:"log_dir"`
 }
 
+// PostgresConfig contains Postgres connection settings
+type PostgresConfig struct {
+    URL      string        `mapstructure:"url"`
+    Host     string        `mapstructure:"host"`
+    Port     int           `mapstructure:"port"`
+    User     string        `mapstructure:"user"`
+    Password string        `mapstructure:"password"`
+    DBName   string        `mapstructure:"dbname"`
+    SSLMode  string        `mapstructure:"sslmode"`
+    Timeout  time.Duration `mapstructure:"timeout"`
+}
+
 // LoadConfig loads configuration from file and environment variables
 func LoadConfig() (*Config, error) {
 	viper.SetConfigName("agent_config")
 	viper.SetConfigType("json")
-	viper.AddConfigPath("./agents_v3/config")
 	viper.AddConfigPath("./config")
 	viper.AddConfigPath(".")
 
@@ -200,6 +213,7 @@ func setDefaults() {
 	viper.SetDefault("telemetry.enabled", true)
 	viper.SetDefault("telemetry.metrics_port", 9090)
 	viper.SetDefault("telemetry.cost_tracking", true)
+	viper.SetDefault("telemetry.periodic_logs", false)
 
 	// Sources defaults
 	viper.SetDefault("sources.newsapi.max_results", 50)
@@ -213,6 +227,13 @@ func setDefaults() {
 	viper.SetDefault("storage.redis.timeout", "5s")
 	viper.SetDefault("storage.file.data_dir", "./data")
 	viper.SetDefault("storage.file.log_dir", "./logs")
+    viper.SetDefault("storage.postgres.host", "")
+    viper.SetDefault("storage.postgres.port", 5432)
+    viper.SetDefault("storage.postgres.user", "")
+    viper.SetDefault("storage.postgres.password", "")
+    viper.SetDefault("storage.postgres.dbname", "")
+    viper.SetDefault("storage.postgres.sslmode", "disable")
+    viper.SetDefault("storage.postgres.timeout", "5s")
 }
 
 // overrideFromEnv overrides configuration with environment variables
@@ -248,6 +269,27 @@ func overrideFromEnv() {
 	if password := os.Getenv("REDIS_PASSWORD"); password != "" {
 		viper.Set("storage.redis.password", password)
 	}
+    // Postgres configuration (single block)
+    if url := os.Getenv("DATABASE_URL"); url != "" {
+        viper.Set("storage.postgres.url", url)
+    }
+    if host := os.Getenv("POSTGRES_HOST"); host != "" {
+        viper.Set("storage.postgres.host", host)
+    }
+    if port := os.Getenv("POSTGRES_PORT"); port != "" {
+        if p, err := strconv.Atoi(port); err == nil {
+            viper.Set("storage.postgres.port", p)
+        }
+    }
+    if user := os.Getenv("POSTGRES_USER"); user != "" {
+        viper.Set("storage.postgres.user", user)
+    }
+    if pass := os.Getenv("POSTGRES_PASSWORD"); pass != "" {
+        viper.Set("storage.postgres.password", pass)
+    }
+    if db := os.Getenv("POSTGRES_DB"); db != "" {
+        viper.Set("storage.postgres.dbname", db)
+    }
 }
 
 // validateConfig validates the configuration

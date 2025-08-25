@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,8 +11,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/mohammad-safakhou/newser/agents_v3/config"
-	"github.com/mohammad-safakhou/newser/agents_v3/telemetry"
+	_ "github.com/lib/pq"
+	"github.com/mohammad-safakhou/newser/internal/agent/config"
+	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
 )
 
 // NewLLMProvider creates a new LLM provider based on configuration
@@ -70,14 +72,32 @@ func NewAgents(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetry
 
 // NewSourceProviders creates all available source providers
 func NewSourceProviders(cfg config.SourcesConfig) ([]SourceProvider, error) {
-	// Simplified for now - return empty slice
-	return []SourceProvider{}, nil
+    httpc := NewHTTPClient(15*time.Second, 2, 300*time.Millisecond)
+    var providers []SourceProvider
+    if cfg.NewsAPI.APIKey != "" {
+        providers = append(providers, &NewsAPIClient{ cfg: cfg.NewsAPI, http: httpc })
+    }
+    if cfg.WebSearch.BraveAPIKey != "" {
+        providers = append(providers, &BraveClient{ cfg: cfg.WebSearch, http: httpc })
+    }
+    if cfg.WebSearch.SerperAPIKey != "" {
+        providers = append(providers, &SerperClient{ cfg: cfg.WebSearch, http: httpc })
+    }
+    return providers, nil
 }
 
 // NewStorage creates a new storage instance
 func NewStorage(cfg config.StorageConfig) (Storage, error) {
-	// For now, create a Redis-based storage
-	// In the future, this could support multiple storage backends
+	// Prefer Postgres if configured (URL or host/dbname provided)
+	// NOTE: config.Postgres may be zero-value; check key fields
+	if cfg.Postgres.URL != "" || cfg.Postgres.Host != "" || cfg.Postgres.DBName != "" {
+		ps, err := NewPostgresStorage(cfg.Postgres)
+		if err == nil {
+			return ps, nil
+		}
+		log.Printf("Warning: Postgres storage init failed: %v, falling back to Redis", err)
+	}
+	// Fallback to Redis-based storage
 	return NewRedisStorage(cfg.Redis), nil
 }
 
@@ -390,6 +410,166 @@ func (s *RedisStorage) DeleteHighlight(ctx context.Context, highlightID string) 
 	return nil
 }
 
+// PostgresStorage implements Storage using PostgreSQL
+type PostgresStorage struct {
+    db *sql.DB
+}
+
+func NewPostgresStorage(cfg config.PostgresConfig) (*PostgresStorage, error) {
+    dsn := cfg.URL
+    if dsn == "" {
+        host := cfg.Host
+        port := cfg.Port
+        user := cfg.User
+        pass := cfg.Password
+        dbname := cfg.DBName
+        ssl := cfg.SSLMode
+        if host == "" { host = "localhost" }
+        if port == 0 { port = 5432 }
+        if ssl == "" { ssl = "disable" }
+        dsn = fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s", user, pass, host, port, dbname, ssl)
+    }
+    db, err := sql.Open("postgres", dsn)
+    if err != nil { return nil, err }
+    if err := db.Ping(); err != nil { return nil, err }
+    ps := &PostgresStorage{ db: db }
+    if err := ps.ensureSchema(); err != nil { return nil, err }
+    return ps, nil
+}
+
+func (s *PostgresStorage) ensureSchema() error {
+    _, err := s.db.Exec(`
+CREATE TABLE IF NOT EXISTS processing_results (
+    id TEXT PRIMARY KEY,
+    user_thought JSONB NOT NULL,
+    summary TEXT,
+    detailed_report TEXT,
+    sources JSONB,
+    highlights JSONB,
+    conflicts JSONB,
+    confidence DOUBLE PRECISION,
+    processing_time BIGINT,
+    cost_estimate DOUBLE PRECISION,
+    tokens_used BIGINT,
+    agents_used JSONB,
+    llm_models_used JSONB,
+    metadata JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+`)
+    return err
+}
+
+func (s *PostgresStorage) SaveProcessingResult(ctx context.Context, result ProcessingResult) error {
+    toJSON := func(v interface{}) ([]byte, error) { return json.Marshal(v) }
+    userThought, _ := toJSON(result.UserThought)
+    sources, _ := toJSON(result.Sources)
+    highlights, _ := toJSON(result.Highlights)
+    conflicts, _ := toJSON(result.Conflicts)
+    agents, _ := toJSON(result.AgentsUsed)
+    models, _ := toJSON(result.LLMModelsUsed)
+    metadata, _ := toJSON(result.Metadata)
+
+    _, err := s.db.ExecContext(ctx, `
+INSERT INTO processing_results (
+  id, user_thought, summary, detailed_report, sources, highlights, conflicts,
+  confidence, processing_time, cost_estimate, tokens_used, agents_used, llm_models_used, metadata, created_at
+) VALUES (
+  $1, $2, $3, $4, $5, $6, $7,
+  $8, $9, $10, $11, $12, $13, $14, NOW()
+)
+ON CONFLICT (id) DO UPDATE SET
+  user_thought = EXCLUDED.user_thought,
+  summary = EXCLUDED.summary,
+  detailed_report = EXCLUDED.detailed_report,
+  sources = EXCLUDED.sources,
+  highlights = EXCLUDED.highlights,
+  conflicts = EXCLUDED.conflicts,
+  confidence = EXCLUDED.confidence,
+  processing_time = EXCLUDED.processing_time,
+  cost_estimate = EXCLUDED.cost_estimate,
+  tokens_used = EXCLUDED.tokens_used,
+  agents_used = EXCLUDED.agents_used,
+  llm_models_used = EXCLUDED.llm_models_used,
+  metadata = EXCLUDED.metadata;
+`,
+        result.ID, userThought, result.Summary, result.DetailedReport, sources, highlights, conflicts,
+        result.Confidence, int64(result.ProcessingTime), result.CostEstimate, result.TokensUsed, agents, models, metadata,
+    )
+    return err
+}
+
+func (s *PostgresStorage) GetProcessingResult(ctx context.Context, thoughtID string) (ProcessingResult, error) {
+    row := s.db.QueryRowContext(ctx, `SELECT user_thought, summary, detailed_report, sources, highlights, conflicts,
+        confidence, processing_time, cost_estimate, tokens_used, agents_used, llm_models_used, metadata, created_at
+        FROM processing_results WHERE id = $1`, thoughtID)
+
+    var (
+        userThoughtB, sourcesB, highlightsB, conflictsB, agentsB, modelsB, metadataB []byte
+        res ProcessingResult
+        processingTime int64
+    )
+    res.ID = thoughtID
+    if err := row.Scan(&userThoughtB, &res.Summary, &res.DetailedReport, &sourcesB, &highlightsB, &conflictsB,
+        &res.Confidence, &processingTime, &res.CostEstimate, &res.TokensUsed, &agentsB, &modelsB, &metadataB, &res.CreatedAt); err != nil {
+        return ProcessingResult{}, err
+    }
+    _ = json.Unmarshal(userThoughtB, &res.UserThought)
+    _ = json.Unmarshal(sourcesB, &res.Sources)
+    _ = json.Unmarshal(highlightsB, &res.Highlights)
+    _ = json.Unmarshal(conflictsB, &res.Conflicts)
+    _ = json.Unmarshal(agentsB, &res.AgentsUsed)
+    _ = json.Unmarshal(modelsB, &res.LLMModelsUsed)
+    if len(metadataB) > 0 { _ = json.Unmarshal(metadataB, &res.Metadata) }
+    res.ProcessingTime = time.Duration(processingTime)
+    return res, nil
+}
+
+func (s *PostgresStorage) GetKnowledgeGraph(ctx context.Context, topic string) (KnowledgeGraph, error) {
+    var nodesB, edgesB, metaB []byte
+    var kg KnowledgeGraph
+    err := s.db.QueryRowContext(ctx, `SELECT id, nodes, edges, metadata, last_updated FROM knowledge_graphs WHERE topic=$1 ORDER BY last_updated DESC LIMIT 1`, topic).Scan(&kg.ID, &nodesB, &edgesB, &metaB, &kg.LastUpdated)
+    if err != nil { return KnowledgeGraph{}, err }
+    kg.Topic = topic
+    _ = json.Unmarshal(nodesB, &kg.Nodes)
+    _ = json.Unmarshal(edgesB, &kg.Edges)
+    if len(metaB) > 0 { _ = json.Unmarshal(metaB, &kg.Metadata) }
+    return kg, nil
+}
+func (s *PostgresStorage) SaveKnowledgeGraph(ctx context.Context, graph KnowledgeGraph) error {
+    nodesB, _ := json.Marshal(graph.Nodes)
+    edgesB, _ := json.Marshal(graph.Edges)
+    metaB, _ := json.Marshal(graph.Metadata)
+    _, err := s.db.ExecContext(ctx, `INSERT INTO knowledge_graphs (id, topic, nodes, edges, metadata, last_updated) VALUES ($1,$2,$3,$4,$5,NOW()) ON CONFLICT (id) DO UPDATE SET nodes=EXCLUDED.nodes, edges=EXCLUDED.edges, metadata=EXCLUDED.metadata, last_updated=NOW()`, graph.ID, graph.Topic, nodesB, edgesB, metaB)
+    return err
+}
+func (s *PostgresStorage) SaveHighlight(ctx context.Context, h Highlight) error {
+    sourcesB, _ := json.Marshal(h.Sources)
+    _, err := s.db.ExecContext(ctx, `INSERT INTO highlights (id, topic, title, content, type, priority, sources, is_pinned, created_at, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,NOW()),$10) ON CONFLICT (id) DO UPDATE SET title=EXCLUDED.title, content=EXCLUDED.content, type=EXCLUDED.type, priority=EXCLUDED.priority, sources=EXCLUDED.sources, is_pinned=EXCLUDED.is_pinned, expires_at=EXCLUDED.expires_at`, h.ID, graphTopicFromSources(h.Sources), h.Title, h.Content, h.Type, h.Priority, sourcesB, h.IsPinned, h.CreatedAt, h.ExpiresAt)
+    return err
+}
+func (s *PostgresStorage) GetHighlights(ctx context.Context, topic string) ([]Highlight, error) {
+    rows, err := s.db.QueryContext(ctx, `SELECT id, title, content, type, priority, sources, is_pinned, created_at, expires_at FROM highlights WHERE topic=$1 ORDER BY created_at DESC`, topic)
+    if err != nil { return nil, err }
+    defer rows.Close()
+    var out []Highlight
+    for rows.Next() {
+        var h Highlight
+        var sourcesB []byte
+        if err := rows.Scan(&h.ID, &h.Title, &h.Content, &h.Type, &h.Priority, &sourcesB, &h.IsPinned, &h.CreatedAt, &h.ExpiresAt); err != nil { return nil, err }
+        _ = json.Unmarshal(sourcesB, &h.Sources)
+        out = append(out, h)
+    }
+    return out, rows.Err()
+}
+func (s *PostgresStorage) UpdateHighlight(ctx context.Context, h Highlight) error { return s.SaveHighlight(ctx, h) }
+func (s *PostgresStorage) DeleteHighlight(ctx context.Context, highlightID string) error {
+    _, err := s.db.ExecContext(ctx, `DELETE FROM highlights WHERE id=$1`, highlightID)
+    return err
+}
+
+func graphTopicFromSources(srcs []string) string { if len(srcs) > 0 { return srcs[0] }; return "general" }
+
 // Helper function
 func min(a, b int) int {
 	if a < b {
@@ -582,61 +762,31 @@ func (a *SimpleAgent) GetEstimatedTime(task AgentTask) time.Duration {
 // Agent execution methods
 
 func (a *SimpleAgent) executeResearch(ctx context.Context, task AgentTask) AgentResult {
-	// Extract query for generic research simulation
 	query, _ := task.Parameters["query"].(string)
 	if query == "" {
 		query = "general topic"
 	}
 
-	// Create generic mock sources (domain-agnostic)
-	sourcesList := []Source{
-		{
-			ID:          "news_source_1",
-			Title:       fmt.Sprintf("Breaking News: %s Development", query),
-			URL:         "https://example.com/news/1",
-			Type:        "news",
-			Credibility: 0.8,
-			PublishedAt: time.Now().Add(-2 * time.Hour),
-			ExtractedAt: time.Now(),
-			Content:     fmt.Sprintf("Latest news about %s with comprehensive coverage and expert analysis.", query),
-			Summary:     fmt.Sprintf("Breaking news summary about %s", query),
-			Tags:        []string{"news", "breaking", "latest"},
-		},
-		{
-			ID:          "analysis_source_2",
-			Title:       fmt.Sprintf("Expert Analysis: %s Implications", query),
-			URL:         "https://example.com/analysis/1",
-			Type:        "analysis",
-			Credibility: 0.85,
-			PublishedAt: time.Now().Add(-1 * time.Hour),
-			ExtractedAt: time.Now(),
-			Content:     fmt.Sprintf("Expert analysis of %s implications and potential impact on various stakeholders.", query),
-			Summary:     fmt.Sprintf("Expert analysis of %s implications", query),
-			Tags:        []string{"analysis", "expert", "implications"},
-		},
-		{
-			ID:          "web_source_3",
-			Title:       fmt.Sprintf("Web Article: %s Update", query),
-			URL:         "https://example.com/web/1",
-			Type:        "web",
-			Credibility: 0.7,
-			PublishedAt: time.Now().Add(-30 * time.Minute),
-			ExtractedAt: time.Now(),
-			Content:     fmt.Sprintf("Web-based coverage of %s with additional context and background information.", query),
-			Summary:     fmt.Sprintf("Web article about %s with context", query),
-			Tags:        []string{"web", "context", "background"},
-		},
+	providers, _ := NewSourceProviders(a.config.Sources)
+	ctx2, cancel := context.WithTimeout(ctx, a.config.General.DefaultTimeout)
+	defer cancel()
+	var sourcesList []Source
+	for _, p := range providers {
+		if res, err := p.Search(ctx2, query, map[string]interface{}{"query": query}); err == nil {
+			sourcesList = append(sourcesList, res...)
+		}
 	}
+	// de-duplicate
+	sourcesList = DeduplicateSources(sourcesList)
 
 	return AgentResult{
 		Data: map[string]interface{}{
-			"sources":         sourcesList,
-			"total_sources":   len(sourcesList),
-			"query":           task.Parameters["query"],
-			"relevance_score": 0.85,
+			"sources":       sourcesList,
+			"total_sources": len(sourcesList),
+			"query":         query,
 		},
 		Sources:    sourcesList,
-		Confidence: 0.9,
+		Confidence: 0.85,
 		Cost:       0.5,
 		TokensUsed: 500,
 		ModelUsed:  "gpt-5",

@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mohammad-safakhou/newser/agents_v3/config"
-	"github.com/mohammad-safakhou/newser/agents_v3/telemetry"
+	"github.com/mohammad-safakhou/newser/internal/agent/config"
+	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
 )
 
 // Orchestrator coordinates all agents and manages the processing pipeline
@@ -50,8 +50,8 @@ func NewOrchestrator(cfg *config.Config, logger *log.Logger, telemetry *telemetr
 		return nil, fmt.Errorf("failed to create agents: %w", err)
 	}
 
-	// Initialize source providers (simplified for now)
-	var sources []SourceProvider
+	// Initialize source providers
+	sources, _ := NewSourceProviders(cfg.Sources)
 
 	// Initialize storage
 	storage, err := NewStorage(cfg.Storage)
@@ -171,10 +171,7 @@ func (o *Orchestrator) ProcessThought(ctx context.Context, thought UserThought) 
 		processingEvent.SourcesUsed[i] = source.Type
 	}
 
-	// Save result to storage
-	if err := o.storage.SaveProcessingResult(ctx, result); err != nil {
-		o.logger.Printf("Warning: failed to save processing result: %v", err)
-	}
+	// Persistence of result is handled by API server layer after orchestration completes
 
 	o.updateStatus(status, "completed", 1.0, "Processing completed successfully")
 	o.logger.Printf("Completed processing for thought: %s in %v", thought.ID, time.Since(startTime))
@@ -300,6 +297,8 @@ func (o *Orchestrator) synthesizeResults(ctx context.Context, thought UserThough
 	allData = make(map[string]interface{})
 	agentSet := make(map[string]bool)
 	modelSet := make(map[string]bool)
+	var kgNodes []KnowledgeNode
+	var kgEdges []KnowledgeEdge
 
 	for _, result := range results {
 		// Collect sources
@@ -322,6 +321,14 @@ func (o *Orchestrator) synthesizeResults(ctx context.Context, thought UserThough
 		if !modelSet[result.ModelUsed] {
 			modelsUsed = append(modelsUsed, result.ModelUsed)
 			modelSet[result.ModelUsed] = true
+		}
+
+		// Capture knowledge graph data if present
+		if nodes, ok := result.Data["nodes"].([]KnowledgeNode); ok {
+			kgNodes = append(kgNodes, nodes...)
+		}
+		if edges, ok := result.Data["edges"].([]KnowledgeEdge); ok {
+			kgEdges = append(kgEdges, edges...)
 		}
 	}
 
@@ -378,6 +385,13 @@ func (o *Orchestrator) synthesizeResults(ctx context.Context, thought UserThough
 		AgentsUsed:     agentsUsed,
 		LLMModelsUsed:  modelsUsed,
 		CreatedAt:      time.Now(),
+	}
+	if len(kgNodes) > 0 || len(kgEdges) > 0 {
+		if result.Metadata == nil { result.Metadata = make(map[string]interface{}) }
+		result.Metadata["knowledge_graph"] = map[string]interface{}{
+			"nodes": kgNodes,
+			"edges": kgEdges,
+		}
 	}
 
 	return result, nil

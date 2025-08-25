@@ -8,15 +8,16 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
-	"github.com/mohammad-safakhou/newser/config"
+	// Deprecated: legacy root config removed in favor of internal/server
+	// "github.com/labstack/echo/v4/middleware"
 	"github.com/mohammad-safakhou/newser/models"
 	"github.com/mohammad-safakhou/newser/news"
-	"github.com/mohammad-safakhou/newser/news/newsapi"
+	// "github.com/mohammad-safakhou/newser/news/newsapi"
 	"github.com/mohammad-safakhou/newser/provider"
 	"github.com/mohammad-safakhou/newser/repository"
 )
 
+// Deprecated: use internal/server instead. Leaving stub to avoid breaking imports.
 type Server struct {
 	Repo     repository.TopicRepository
 	Provider provider.Provider
@@ -24,50 +25,8 @@ type Server struct {
 }
 
 func Start() {
-	// Load configuration
-	config.LoadConfig("", false)
-
-	// Initialize Echo
-	e := echo.New()
-	e.Use(middleware.Logger())
-	e.Use(middleware.Recover())
-
-	// Serve Web UI
-	e.Static("/static", "webui/static")
-	e.GET("/", func(c echo.Context) error {
-		return c.File("webui/index.html")
-	})
-	e.GET("/topic.html", func(c echo.Context) error {
-		return c.File("webui/topic.html")
-	})
-
-	// Initialize dependencies
-	ctx := context.Background()
-	repo, err := repository.NewTopicRepository(ctx, repository.RepoTypeRedis)
-	if err != nil {
-		e.Logger.Fatal("Failed to initialize repository:", err)
-		return
-	}
-	prov, err := provider.NewProvider(provider.OpenAI)
-	if err != nil {
-		e.Logger.Fatal("Failed to initialize provider:", err)
-		return
-	}
-	newsClient := news.NewRetriever(prov, newsapi.NewsAPI{
-		APIKey:   config.AppConfig.NewsApi.APIKey,
-		Endpoint: config.AppConfig.NewsApi.Endpoint,
-	})
-	server := &Server{Repo: repo, Provider: prov, News: newsClient}
-
-	// API routes for topics
-	e.POST("/topics", server.CreateTopic)
-	e.GET("/topics", server.GetAllTopics)
-	e.GET("/topics/:title", server.GetTopic)
-	e.PUT("/topics/:title", server.ModifyTopic)
-	e.GET("/topics/:title/generate-news", server.GenerateNews)
-
-	// Start server
-	e.Logger.Fatal(e.Start(fmt.Sprintf(":%s", config.AppConfig.General.Listen)))
+	// Deprecated path; do nothing to avoid conflicting servers.
+	fmt.Println("engine.Start is deprecated; use cmd/newser serve")
 }
 
 type CreateTopicRequest struct {

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mohammad-safakhou/newser/agents_v3/config"
+	"github.com/mohammad-safakhou/newser/internal/agent/config"
 )
 
 // Source represents a source of information

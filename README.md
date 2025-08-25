@@ -8,227 +8,72 @@ Newser is an intelligent news aggregation system that delivers personalized news
 The system uses AI-powered topic analysis and conversation management to create customized news feeds that are delivered
 on a schedule, ensuring users get relevant information without spam.
 
+## Quick start (API + WebUI)
+
+- Dependencies: Docker (for Postgres/Redis via compose), Go 1.22+, Node/npm if building WebUI locally
+- Start infra: `make up`
+- Env (example):
+```bash
+export POSTGRES_HOST=localhost POSTGRES_PORT=5432 POSTGRES_USER=newser POSTGRES_PASSWORD=newser POSTGRES_DB=newser
+export OPENAI_API_KEY=sk-...
+export JWT_SECRET=dev-secret-change-me
+```
+- Build WebUI (optional, requires npm):
+```bash
+make webui-build
+```
+- Run server (serves API and `webui/dist` if present):
+```bash
+make serve
+# or build UI then serve in one: make serve-all
+```
+
+API docs: GET /api/docs, OpenAPI: GET /api/openapi.yaml
+Health: GET /healthz, Metrics: GET /metrics
+
+## MCP (optional)
+
+An auxiliary MCP stdio server exposes stateless tools over JSON-RPC.
+- Start: `go run ./mcp/server.go`
+- Env used: `BRAVE_SEARCH_KEY`, `SERPER_API_KEY`, `REDIS_HOST/PORT/PASSWORD`, `MCP_DEFAULT_TIMEOUT`, `MCP_MAX_CONCURRENT`
+- Intended for advanced agent integrations; not required for WebUI/API usage.
+
 ## Features
 - **Web User Interface**: Integrated browser-based interface for managing topics and generating news.
 
 ## Web User Interface
 
-Newser now includes a fully integrated Web UI for managing topics and generating news interactively. Highlights:
+Minimal React app is under `webui/`. When `webui/dist` exists, the server serves it at `/` with index fallback.
 
-- **Topics Dashboard**: Displays all topics in a sortable table with columns for Title, State, Created At, Updated At, and Actions.
-- **Detailed Topic View**: Shows topic configuration (title, state, subtopics, key concepts, related topics, cron spec, preferences) in a table.
-- **Interactive Chat**: Conversation history rendered as styled message bubbles—**User** messages on the right and **LLM** responses on the left.
-- **Loading Indicators**: Buttons display 'Creating…', 'Sending…', and 'Generating…' while awaiting API responses.
-- **Back Navigation**: A Back button returns to the main Topics dashboard.
-- **Markdown Rendering**: Generated news is parsed and rendered from markdown, with code fences automatically stripped.
+## Architecture (high level)
 
-![](webui/img.png)
+- Echo API with JWT auth (cookie or Bearer)
+- Postgres primary DB (migrations via golang-migrate)
+- Redis for scheduler locks/sessions
+- Agent pipeline (planner/research/analysis/synthesis/conflict/highlights) with real sources and OpenAI (gpt-5 family)
 
-## Architecture
+## Getting Started (API only)
 
-- **Intelligent Topic Management**: Create and configure news topics with AI assistance
-- **Conversational AI Interface**: Interact with LLM to refine and modify topics naturally
-- **Automated News Fetching**: Schedule-based news collection using cron expressions
-- **AI-Powered Summarization**: Generate comprehensive markdown summaries of collected articles
-- **Flexible Scheduling**: Configurable delivery schedules for each topic
-- **State Management**: Track topic configuration progress and conversation history
-- **RESTful API**: Complete API for managing topics and interactions
+- Install Go deps: `go mod tidy`
+- Export DB envs (see Quick start) and run: `go run ./cmd/newserd`
 
-The project follows a clean architecture pattern with the following components:
+## Tests
 
-- **Models**: Core data structures (Topic, Article, etc.)
-- **Repository**: Data persistence layer with Redis support
-- **Provider**: AI/LLM integration (OpenAI, etc.)
-- **Conversation**: Conversation state management
-- **API**: RESTful endpoints using Echo framework
-
-## Getting Started
-
-### Prerequisites
-
-- Go 1.19 or higher
-- Redis server
-- OpenAI API key (For now only OpenAI is supported)
-- NewsApi API key (for news fetching)
-
-### Installation
-
-1. Clone the repository:
-
+- Integration tests (spin up ephemeral Postgres via testcontainers):
 ```bash
-git clone https://github.com/mohammad-safakhou/newser.git
-cd newser
+go test ./examples/integration -v
 ```
-
-2. Install dependencies:
-```bash
-go mod tidy
-```
-
-3. Set up environment variables:
-
-```bash
-export NEWSER_OPENAI_API_KEY="your-openai-api-key"
-export NEWSER_NEWSAPI_API_KEY="your-newsapi-key"
-
-OR
-
-Update the /config/config.go file with your API keys and Redis URL.
-```
-
-4. Run Redis server:
-
-```bash
-redis-server
-```
-
-5. Start the application:
-
-```bash
-go run main.go
-```
-
-## API Endpoints
-
-### Topic Management
-
-- `POST /topics` - Create a new topic
-- `GET /topics` - Get all topics
-- `GET /topics/:title` - Get a specific topic
-- `PUT /topics/:title` - Update a topic
-- `DELETE /topics/:title` - Delete a topic
-
-### AI Interaction
-
-- `POST /topics/:title/complete` - Use AI to complete topic structure
-- `POST /topics/:title/chat` - Chat with AI to modify topic
-
-### News Processing
-
-- `POST /topics/:title/fetch` - Fetch news for a topic
-- `POST /topics/:title/summarize` - Generate markdown summary
-
-## Usage Example
-
-### 1. Create a Topic
-
-```bash
-curl -X POST http://localhost:8080/topics \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "Artificial Intelligence",
-    "state": "initial"
-  }'
-```
-
-### 2. Complete Topic with AI
-
-```bash
-curl -X POST http://localhost:8080/topics/Artificial%20Intelligence/complete
-```
-
-### 3. Chat with AI to Refine Topic
-
-```bash
-curl -X POST http://localhost:8080/topics/Artificial%20Intelligence/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "message": "I want to focus more on machine learning and deep learning. Set up daily updates at 9 AM."
-  }'
-```
-
-### 4. Launch Topic
-
-Once configured, the system will automatically fetch news based on the cron specification and generate summaries.
-
-## Data Models
-
-### Topic
-
-```go
-type Topic struct {
-    State         TopicState             `json:"state"`
-    History       []string               `json:"history"`
-    Title         string                 `json:"title"`
-    Subtopics     []string               `json:"subtopics"`
-    KeyConcepts   []string               `json:"key_concepts"`
-    RelatedTopics []string               `json:"related_topics"`
-    Preferences   map[string]interface{} `json:"preferences"`
-    CronSpec      string                 `json:"cron_spec"`
-    CreatedAt     time.Time              `json:"created_at"`
-    UpdatedAt     time.Time              `json:"updated_at"`
-}
-```
-
-### Article
-
-```go
-type Article struct {
-    Source struct {
-        Name string `json:"name"`
-    } `json:"source"`
-    Author      string    `json:"author"`
-    Title       string    `json:"title"`
-    Description string    `json:"description"`
-    URL         string    `json:"url"`
-    PublishedAt time.Time `json:"publishedAt"`
-}
-```
-
-## Cron Schedule Examples
-
-- **Daily at 9 AM**: `0 9 * * *`
-- **Every Monday at 9 AM**: `0 9 * * 1`
-- **Twice daily (9 AM & 6 PM)**: `0 9,18 * * *`
-- **Every hour**: `0 * * * *`
 
 ## Configuration
 
-### Environment Variables
-
-- `OPENAI_API_KEY` - OpenAI API key for LLM integration
-- `REDIS_URL` - Redis server connection string
-- `PORT` - Server port (default: 8080)
-
-### Provider Configuration
-
-The system supports multiple LLM providers. Configure in your initialization code:
-
-```go
-providerClient := openai_provider.NewOpenAIClient(
-    apiKey,
-    "gpt-3.5-turbo",  // or "gpt-5"
-    0.7,              // temperature
-    2000,             // max_tokens
-    30*time.Second,   // timeout
-)
-```
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+- Primary agent config: `config/agent_config.json` (overridden by env)
+- Server reads env and also maps agent Postgres/Redis settings to env when available
+- Key envs:
+  - `OPENAI_API_KEY`
+  - `POSTGRES_HOST/PORT/USER/PASSWORD/DB` or `DATABASE_URL`
+  - `REDIS_HOST/PORT/PASSWORD`
+  - `JWT_SECRET`
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Roadmap
-
-- [ ] Support for multiple news sources
-- [ ] Web UI interface
-- [ ] Email delivery integration
-- [ ] Advanced filtering and categorization
-- [ ] User authentication and multi-tenancy
-- [ ] Analytics and usage statistics
-- [ ] Mobile app support
-
-## Support
-
-For support and questions, please open an issue in the GitHub repository.
-
-
-This README provides a comprehensive overview of your Newser project, including setup instructions, API documentation, usage examples, and technical details that would help users understand and use your system effectively.
+MIT
