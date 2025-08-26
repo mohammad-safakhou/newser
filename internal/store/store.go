@@ -83,6 +83,16 @@ func (s *Store) GetTopicByID(ctx context.Context, id string, userID string) (nam
     return
 }
 
+// UpdateTopicPrefsAndCron updates a topic's preferences and optional cron
+func (s *Store) UpdateTopicPrefsAndCron(ctx context.Context, topicID string, userID string, preferences []byte, scheduleCron *string) error {
+    if scheduleCron != nil && *scheduleCron != "" {
+        _, err := s.DB.ExecContext(ctx, `UPDATE topics SET preferences=$1, schedule_cron=$2 WHERE id=$3 AND user_id=$4`, preferences, *scheduleCron, topicID, userID)
+        return err
+    }
+    _, err := s.DB.ExecContext(ctx, `UPDATE topics SET preferences=$1 WHERE id=$2 AND user_id=$3`, preferences, topicID, userID)
+    return err
+}
+
 func (s *Store) ListAllTopics(ctx context.Context) ([]Topic, error) {
     rows, err := s.DB.QueryContext(ctx, `SELECT id, user_id, name, schedule_cron, created_at FROM topics`)
     if err != nil { return nil, err }

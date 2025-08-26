@@ -17,6 +17,7 @@ type Scheduler struct {
     Store *store.Store
     Stop chan struct{}
     Rdb *redis.Client
+    Orch *core.Orchestrator
 }
 
 func (s *Scheduler) Start() {
@@ -57,13 +58,17 @@ func (s *Scheduler) tick() {
         go func(topic store.Topic, runID string) {
             // jitter to avoid stampedes
             time.Sleep(time.Duration(250+int64(time.Now().UnixNano()%250)) * time.Millisecond)
-            cfg, err := config.LoadConfig()
-            if err != nil { _ = s.Store.FinishRun(ctx, runID, "failed", strPtr(err.Error())); return }
-            tele := telemetry.NewTelemetry(cfg.Telemetry)
-            defer tele.Shutdown()
-            logger := log.New(log.Writer(), "[SCHED] ", log.LstdFlags)
-            orch, err := core.NewOrchestrator(cfg, logger, tele)
-            if err != nil { _ = s.Store.FinishRun(ctx, runID, "failed", strPtr(err.Error())); return }
+            orch := s.Orch
+            if orch == nil {
+                cfg, err := config.LoadConfig()
+                if err != nil { _ = s.Store.FinishRun(ctx, runID, "failed", strPtr(err.Error())); return }
+                tele := telemetry.NewTelemetry(cfg.Telemetry)
+                defer tele.Shutdown()
+                logger := log.New(log.Writer(), "[SCHED] ", log.LstdFlags)
+                var err2 error
+                orch, err2 = core.NewOrchestrator(cfg, logger, tele)
+                if err2 != nil { _ = s.Store.FinishRun(ctx, runID, "failed", strPtr(err2.Error())); return }
+            }
             thought := core.UserThought{ ID: topic.ID, Content: topic.Name, Timestamp: time.Now() }
             _, err = orch.ProcessThought(ctx, thought)
             if err != nil { _ = s.Store.FinishRun(ctx, runID, "failed", strPtr(err.Error())); return }

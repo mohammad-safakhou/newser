@@ -16,6 +16,7 @@ import (
 
 type RunsHandler struct {
     Store *store.Store
+    Orch  *core.Orchestrator
 }
 
 func (h *RunsHandler) Register(g *echo.Group, secret []byte) {
@@ -29,26 +30,28 @@ func (h *RunsHandler) trigger(c echo.Context) error {
     userID := c.Get("user_id").(string)
     topicID := c.Param("topic_id")
     name, prefsB, _, err := h.Store.GetTopicByID(c.Request().Context(), topicID, userID)
-    if err != nil { return c.NoContent(http.StatusNotFound) }
+    if err != nil { return echo.NewHTTPError(http.StatusNotFound, err.Error()) }
 
     // create run
     runID, err := h.Store.CreateRun(c.Request().Context(), topicID, "running")
     if err != nil { return c.NoContent(http.StatusInternalServerError) }
 
-    // launch background processing
+    // launch background processing (use injected orchestrator)
     go func() {
         ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
         defer cancel()
 
-        // load agent config and telemetry
-        cfg, err := config.LoadConfig()
-        if err != nil { _ = h.Store.FinishRun(ctx, runID, "failed", strPtr(err.Error())); return }
-        tele := telemetry.NewTelemetry(cfg.Telemetry)
-        defer tele.Shutdown()
-
-        stdLogger := log.New(os.Stdout, "[ORCH] ", log.LstdFlags)
-        orch, err := core.NewOrchestrator(cfg, stdLogger, tele)
-        if err != nil { _ = h.Store.FinishRun(ctx, runID, "failed", strPtr(err.Error())); return }
+        orch := h.Orch
+        if orch == nil {
+            // Fallback: create once if not provided (should not happen)
+            cfg, err := config.LoadConfig()
+            if err != nil { _ = h.Store.FinishRun(ctx, runID, "failed", strPtr(err.Error())); return }
+            tele := telemetry.NewTelemetry(cfg.Telemetry)
+            defer tele.Shutdown()
+            logger := log.New(os.Stdout, "[ORCH] ", log.LstdFlags)
+            orch, err = core.NewOrchestrator(cfg, logger, tele)
+            if err != nil { _ = h.Store.FinishRun(ctx, runID, "failed", strPtr(err.Error())); return }
+        }
 
         // construct thought from topic name/preferences
         thought := core.UserThought{
@@ -79,10 +82,10 @@ func (h *RunsHandler) list(c echo.Context) error {
     userID := c.Get("user_id").(string)
     topicID := c.Param("topic_id")
     if _, _, _, err := h.Store.GetTopicByID(c.Request().Context(), topicID, userID); err != nil {
-        return c.NoContent(http.StatusNotFound)
+        return echo.NewHTTPError(http.StatusNotFound, err.Error())
     }
     items, err := h.Store.ListRuns(c.Request().Context(), topicID)
-    if err != nil { return c.NoContent(http.StatusInternalServerError) }
+    if err != nil { return echo.NewHTTPError(http.StatusInternalServerError, err.Error()) }
     return c.JSON(http.StatusOK, items)
 }
 
@@ -90,12 +93,12 @@ func (h *RunsHandler) latest(c echo.Context) error {
     userID := c.Get("user_id").(string)
     topicID := c.Param("topic_id")
     if _, _, _, err := h.Store.GetTopicByID(c.Request().Context(), topicID, userID); err != nil {
-        return c.NoContent(http.StatusNotFound)
+        return echo.NewHTTPError(http.StatusNotFound, err.Error())
     }
     runID, err := h.Store.GetLatestRunID(c.Request().Context(), topicID)
-    if err != nil || runID == "" { return c.NoContent(http.StatusNotFound) }
+    if err != nil || runID == "" { return echo.NewHTTPError(http.StatusNotFound, "no runs") }
     res, err := h.Store.GetProcessingResultByID(c.Request().Context(), runID)
-    if err != nil { return c.NoContent(http.StatusNotFound) }
+    if err != nil { return echo.NewHTTPError(http.StatusNotFound, err.Error()) }
     return c.JSON(http.StatusOK, res)
 }
 

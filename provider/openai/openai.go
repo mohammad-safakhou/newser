@@ -35,7 +35,7 @@ type Message struct {
 
 // request represents a request to the OpenAI API
 type request struct {
-	Model       string    `json:"completionModel"`
+	Model       string    `json:"model"`
 	Messages    []Message `json:"messages"`
 	Temperature float64   `json:"temperature"`
 	MaxTokens   int       `json:"max_tokens,omitempty"`
@@ -295,7 +295,11 @@ func (c *client) sendRequest(ctx context.Context, messages []Message) (string, e
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API returned status: %d", resp.StatusCode)
+		var errBuf bytes.Buffer
+		if resp.Body != nil {
+			_, _ = errBuf.ReadFrom(resp.Body)
+		}
+		return "", fmt.Errorf("API returned status: %d: %s", resp.StatusCode, errBuf.String())
 	}
 
 	// Log the response status and body for debugging

@@ -141,7 +141,7 @@ OUTPUT FORMAT (JSON):
   "reasoning": "Explanation of why this plan was chosen"
 }
 
-Create a comprehensive plan that will effectively address the user's thought. Focus on accuracy and relevance over speed.`)
+Create a comprehensive plan that will effectively address the user's thought. Focus on accuracy and relevance over speed.`, thought.Content)
 
 }
 
