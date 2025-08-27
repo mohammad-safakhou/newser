@@ -6,6 +6,7 @@ import cronParser from 'cron-parser'
 
 interface ProvisionalTopic { name: string; preferences: Record<string, any>; schedule_cron: string }
 interface Props { onClose: () => void; onCreated: () => void }
+interface ChatMsg { role: 'user' | 'assistant'; content: string }
 
 type Step = 0 | 1 | 2 | 3
 
@@ -13,7 +14,7 @@ export default function NewTopicWizard({ onClose, onCreated }: Props) {
   const [step, setStep] = useState<Step>(0)
   const [name, setName] = useState('')
   const [goalMsg, setGoalMsg] = useState('')
-  const [assistConversation, setAssistConversation] = useState<{ role: 'user' | 'assistant'; content: string }[]>([])
+  const [assistConversation, setAssistConversation] = useState<ChatMsg[]>([])
   const [provisional, setProvisional] = useState<ProvisionalTopic>({ name: '', preferences: {}, schedule_cron: '@daily' })
   const [prefMessage, setPrefMessage] = useState('')
   const [prefDiffs, setPrefDiffs] = useState<DiffEntry[]>([])
@@ -64,11 +65,11 @@ export default function NewTopicWizard({ onClose, onCreated }: Props) {
 
   const validateCron = useCallback((val: string) => {
     if (!val) return 'Cron required'
-    try {
-      const expr = macroToCron(val)
-      cronParser.parseExpression(expr)
-      return null
-    } catch (e:any) {
+      try {
+        const expr = macroToCron(val)
+        cronParser.parse(expr)
+        return null
+      } catch (e:any) {
       return e.message?.slice(0,80) || 'Invalid cron'
     }
   }, [])
@@ -122,7 +123,16 @@ export default function NewTopicWizard({ onClose, onCreated }: Props) {
   )
 }
 
-function StepIdea({ name, setName, goalMsg, setGoalMsg, conversation, sendAssist, loading, provisional }: any) {
+  function StepIdea({ name, setName, goalMsg, setGoalMsg, conversation, sendAssist, loading, provisional }: {
+    name: string
+    setName: (v: string) => void
+    goalMsg: string
+    setGoalMsg: (v: string) => void
+    conversation: ChatMsg[]
+    sendAssist: () => void
+    loading: boolean
+    provisional: ProvisionalTopic
+  }) {
   return (
     <div className="p-6 space-y-6">
       <div className="space-y-2">
@@ -180,13 +190,13 @@ function StepSchedule({ scheduleCron, setScheduleCron, error }: any) {
   const [nextRuns, setNextRuns] = useState<string[]>([])
   useEffect(()=>{
     if (error) { setNextRuns([]); return }
-    try {
-      const expr = macroToCron(scheduleCron)
-      const it = cronParser.parseExpression(expr, { utc: false })
-      const arr: string[] = []
-      for (let i=0;i<5;i++) arr.push(new Date(it.next().toString()).toLocaleString())
-      setNextRuns(arr)
-    } catch { setNextRuns([]) }
+      try {
+        const expr = macroToCron(scheduleCron)
+        const it = cronParser.parse(expr, { currentDate: new Date() })
+        const arr: string[] = []
+        for (let i=0;i<5;i++) arr.push(new Date(it.next().toString()).toLocaleString())
+        setNextRuns(arr)
+      } catch { setNextRuns([]) }
   }, [scheduleCron, error])
   return (
     <div className="p-6 space-y-6">
