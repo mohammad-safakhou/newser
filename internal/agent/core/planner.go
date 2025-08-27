@@ -33,13 +33,13 @@ func NewPlanner(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetr
 // Plan creates an execution plan for a user thought
 func (p *Planner) Plan(ctx context.Context, thought UserThought) (PlanningResult, error) {
 	startTime := time.Now()
-	
+
 	// Create planning prompt
 	prompt := p.createPlanningPrompt(thought)
-	
+
 	// Get the planning model
 	model := p.config.LLM.Routing.Planning
-	
+
 	// Generate plan using LLM
 	response, err := p.llmProvider.Generate(ctx, prompt, model, map[string]interface{}{
 		"temperature": 0.3, // Lower temperature for more consistent planning
@@ -48,32 +48,32 @@ func (p *Planner) Plan(ctx context.Context, thought UserThought) (PlanningResult
 	if err != nil {
 		return PlanningResult{}, fmt.Errorf("failed to generate plan: %w", err)
 	}
-	
+
 	// Parse the response
 	plan, err := p.parsePlanningResponse(response)
 	if err != nil {
 		return PlanningResult{}, fmt.Errorf("failed to parse planning response: %w", err)
 	}
-	
+
 	// Validate the plan
 	if err := p.ValidatePlan(plan); err != nil {
 		return PlanningResult{}, fmt.Errorf("plan validation failed: %w", err)
 	}
-	
+
 	// Optimize the plan
 	optimizedPlan, err := p.OptimizePlan(plan, map[string]interface{}{
-		"max_cost":    10.0, // $10 max cost
-		"max_time":    5 * time.Minute,
-		"quality":     "high",
+		"max_cost": 10.0, // $10 max cost
+		"max_time": 5 * time.Minute,
+		"quality":  "high",
 	})
 	if err != nil {
 		p.logger.Printf("Warning: plan optimization failed: %v, using original plan", err)
 		optimizedPlan = plan
 	}
-	
+
 	processingTime := time.Since(startTime)
 	p.logger.Printf("Planning completed in %v with %d tasks", processingTime, len(optimizedPlan.Tasks))
-	
+
 	return optimizedPlan, nil
 }
 
@@ -153,10 +153,14 @@ func (p *Planner) parsePlanningResponse(response string) (PlanningResult, error)
 	depth := 0
 	for i, ch := range response {
 		if ch == '{' {
-			if depth == 0 { start = i }
+			if depth == 0 {
+				start = i
+			}
 			depth++
 		} else if ch == '}' {
-			if depth > 0 { depth-- }
+			if depth > 0 {
+				depth--
+			}
 			if depth == 0 && start != -1 {
 				jsonStr = response[start : i+1]
 				break
@@ -166,26 +170,26 @@ func (p *Planner) parsePlanningResponse(response string) (PlanningResult, error)
 	if jsonStr == "" {
 		return PlanningResult{}, fmt.Errorf("no JSON found in response")
 	}
-	
+
 	var rawPlan struct {
-		Tasks              []struct {
-			ID              string                 `json:"id"`
-			Type            string                 `json:"type"`
-			Description     string                 `json:"description"`
-			Priority        int                    `json:"priority"`
-			Parameters      map[string]interface{} `json:"parameters"`
-			DependsOn       []string               `json:"depends_on"`
-			Timeout         string                 `json:"timeout"`
-			EstimatedCost   float64                `json:"estimated_cost"`
-			EstimatedTime   string                 `json:"estimated_time"`
+		Tasks []struct {
+			ID            string                 `json:"id"`
+			Type          string                 `json:"type"`
+			Description   string                 `json:"description"`
+			Priority      int                    `json:"priority"`
+			Parameters    map[string]interface{} `json:"parameters"`
+			DependsOn     []string               `json:"depends_on"`
+			Timeout       string                 `json:"timeout"`
+			EstimatedCost float64                `json:"estimated_cost"`
+			EstimatedTime string                 `json:"estimated_time"`
 		} `json:"tasks"`
-		ExecutionOrder      []string  `json:"execution_order"`
-		EstimatedTotalCost  float64   `json:"estimated_total_cost"`
-		EstimatedTotalTime  string    `json:"estimated_total_time"`
-		Confidence          float64   `json:"confidence"`
-		Reasoning           string    `json:"reasoning"`
+		ExecutionOrder     []string `json:"execution_order"`
+		EstimatedTotalCost float64  `json:"estimated_total_cost"`
+		EstimatedTotalTime string   `json:"estimated_total_time"`
+		Confidence         float64  `json:"confidence"`
+		Reasoning          string   `json:"reasoning"`
 	}
-	
+
 	if err := json.Unmarshal([]byte(jsonStr), &rawPlan); err != nil {
 		// lenient fallback: coerce numeric IDs
 		var generic map[string]interface{}
@@ -195,30 +199,52 @@ func (p *Planner) parsePlanningResponse(response string) (PlanningResult, error)
 				for _, ti := range tAny {
 					tmap, _ := ti.(map[string]interface{})
 					id := ""
-					if v, ok := tmap["id"].(string); ok { id = v } else if fv, ok := tmap["id"].(float64); ok { id = fmt.Sprintf("%.0f", fv) }
+					if v, ok := tmap["id"].(string); ok {
+						id = v
+					} else if fv, ok := tmap["id"].(float64); ok {
+						id = fmt.Sprintf("%.0f", fv)
+					}
 					ttype, _ := tmap["type"].(string)
 					desc, _ := tmap["description"].(string)
 					prio := 0
-					if pv, ok := tmap["priority"].(float64); ok { prio = int(pv) }
+					if pv, ok := tmap["priority"].(float64); ok {
+						prio = int(pv)
+					}
 					params := map[string]interface{}{}
-					if pm, ok := tmap["parameters"].(map[string]interface{}); ok { params = pm }
+					if pm, ok := tmap["parameters"].(map[string]interface{}); ok {
+						params = pm
+					}
 					var deps []string
 					if dl, ok := tmap["depends_on"].([]interface{}); ok {
-						for _, di := range dl { if ds, ok := di.(string); ok { deps = append(deps, ds) } }
+						for _, di := range dl {
+							if ds, ok := di.(string); ok {
+								deps = append(deps, ds)
+							}
+						}
 					}
 					timeout := p.config.Agents.AgentTimeout
-					if ts, ok := tmap["timeout"].(string); ok { if d, e := time.ParseDuration(ts); e == nil { timeout = d } }
-					if id == "" { id = uuid.New().String() }
-					tasks = append(tasks, AgentTask{ ID: id, Type: ttype, Description: desc, Priority: prio, Parameters: params, DependsOn: deps, Timeout: timeout, CreatedAt: time.Now() })
+					if ts, ok := tmap["timeout"].(string); ok {
+						if d, e := time.ParseDuration(ts); e == nil {
+							timeout = d
+						}
+					}
+					if id == "" {
+						id = uuid.New().String()
+					}
+					tasks = append(tasks, AgentTask{ID: id, Type: ttype, Description: desc, Priority: prio, Parameters: params, DependsOn: deps, Timeout: timeout, CreatedAt: time.Now()})
 				}
 			}
 			totalTime := 5 * time.Minute
-			if et, ok := generic["estimated_total_time"].(string); ok { if d, e := time.ParseDuration(et); e == nil { totalTime = d } }
-			return PlanningResult{ Tasks: tasks, ExecutionOrder: []string{}, EstimatedCost: 0, EstimatedTime: totalTime, Confidence: 0.8 }, nil
+			if et, ok := generic["estimated_total_time"].(string); ok {
+				if d, e := time.ParseDuration(et); e == nil {
+					totalTime = d
+				}
+			}
+			return PlanningResult{Tasks: tasks, ExecutionOrder: []string{}, EstimatedCost: 0, EstimatedTime: totalTime, Confidence: 0.8}, nil
 		}
 		return PlanningResult{}, fmt.Errorf("failed to parse JSON: %w", err)
 	}
-	
+
 	// Convert to PlanningResult
 	var tasks []AgentTask
 	for _, rawTask := range rawPlan.Tasks {
@@ -226,19 +252,19 @@ func (p *Planner) parsePlanningResponse(response string) (PlanningResult, error)
 		if rawTask.ID == "" {
 			rawTask.ID = uuid.New().String()
 		}
-		
+
 		// Parse timeout
 		timeout, err := time.ParseDuration(rawTask.Timeout)
 		if err != nil {
 			timeout = p.config.Agents.AgentTimeout
 		}
-		
+
 		// Parse estimated time (not used in current implementation)
 		_, err = time.ParseDuration(rawTask.EstimatedTime)
 		if err != nil {
 			// Use default time
 		}
-		
+
 		task := AgentTask{
 			ID:          rawTask.ID,
 			Type:        rawTask.Type,
@@ -249,22 +275,22 @@ func (p *Planner) parsePlanningResponse(response string) (PlanningResult, error)
 			Timeout:     timeout,
 			CreatedAt:   time.Now(),
 		}
-		
+
 		tasks = append(tasks, task)
 	}
-	
+
 	// Parse total estimated time
 	totalTime, err := time.ParseDuration(rawPlan.EstimatedTotalTime)
 	if err != nil {
 		totalTime = 5 * time.Minute
 	}
-	
+
 	return PlanningResult{
-		Tasks:         tasks,
+		Tasks:          tasks,
 		ExecutionOrder: rawPlan.ExecutionOrder,
 		EstimatedCost:  rawPlan.EstimatedTotalCost,
 		EstimatedTime:  totalTime,
-		Confidence:    rawPlan.Confidence,
+		Confidence:     rawPlan.Confidence,
 	}, nil
 }
 
@@ -273,33 +299,33 @@ func (p *Planner) ValidatePlan(plan PlanningResult) error {
 	if len(plan.Tasks) == 0 {
 		return fmt.Errorf("plan has no tasks")
 	}
-	
+
 	// Check for circular dependencies
 	if err := p.checkCircularDependencies(plan.Tasks); err != nil {
 		return fmt.Errorf("circular dependencies detected: %w", err)
 	}
-	
+
 	// Check for missing dependencies
 	if err := p.checkMissingDependencies(plan.Tasks); err != nil {
 		return fmt.Errorf("missing dependencies: %w", err)
 	}
-	
+
 	// Validate task types
 	for _, task := range plan.Tasks {
 		if !p.isValidTaskType(task.Type) {
 			return fmt.Errorf("invalid task type: %s", task.Type)
 		}
 	}
-	
+
 	// Check cost and time estimates
 	if plan.EstimatedCost > 20.0 {
 		return fmt.Errorf("estimated cost too high: $%.2f", plan.EstimatedCost)
 	}
-	
+
 	if plan.EstimatedTime > 10*time.Minute {
 		return fmt.Errorf("estimated time too long: %v", plan.EstimatedTime)
 	}
-	
+
 	return nil
 }
 
@@ -309,29 +335,29 @@ func (p *Planner) OptimizePlan(plan PlanningResult, constraints map[string]inter
 	maxCost, _ := constraints["max_cost"].(float64)
 	maxTime, _ := constraints["max_time"].(time.Duration)
 	_ = constraints["quality"] // quality constraint not used in current implementation
-	
+
 	if maxCost == 0 {
 		maxCost = 10.0
 	}
 	if maxTime == 0 {
 		maxTime = 5 * time.Minute
 	}
-	
+
 	// If plan is already within constraints, return as is
 	if plan.EstimatedCost <= maxCost && plan.EstimatedTime <= maxTime {
 		return plan, nil
 	}
-	
+
 	// Create optimization prompt
 	prompt := p.createOptimizationPrompt(plan, constraints)
-	
+
 	// Get optimization model (use same as planning for consistency)
 	model := p.config.LLM.Routing.Planning
-	
+
 	// Generate optimized plan
 	ctx2, cancel2 := context.WithTimeout(context.Background(), p.config.General.DefaultTimeout)
 	defer cancel2()
-	
+
 	response, err := p.llmProvider.Generate(ctx2, prompt, model, map[string]interface{}{
 		"temperature": 0.2,
 		"max_tokens":  1500,
@@ -339,18 +365,18 @@ func (p *Planner) OptimizePlan(plan PlanningResult, constraints map[string]inter
 	if err != nil {
 		return plan, fmt.Errorf("failed to optimize plan: %w", err)
 	}
-	
+
 	// Parse optimized plan
 	optimizedPlan, err := p.parsePlanningResponse(response)
 	if err != nil {
 		return plan, fmt.Errorf("failed to parse optimized plan: %w", err)
 	}
-	
+
 	// Validate optimized plan
 	if err := p.ValidatePlan(optimizedPlan); err != nil {
 		return plan, fmt.Errorf("optimized plan validation failed: %w", err)
 	}
-	
+
 	return optimizedPlan, nil
 }
 
@@ -359,7 +385,7 @@ func (p *Planner) createOptimizationPrompt(plan PlanningResult, constraints map[
 	maxCost, _ := constraints["max_cost"].(float64)
 	maxTime, _ := constraints["max_time"].(time.Duration)
 	quality, _ := constraints["quality"].(string)
-	
+
 	return fmt.Sprintf(`You are optimizing an execution plan to meet specific constraints.
 
 CURRENT PLAN:
@@ -388,7 +414,7 @@ TASK PRIORITIES:
 
 Optimize the plan to meet the constraints while maintaining the highest possible quality for the user's request.
 
-OUTPUT FORMAT: Same JSON format as planning, but with optimized tasks.`, 
+OUTPUT FORMAT: Same JSON format as planning, but with optimized tasks.`,
 		len(plan.Tasks), plan.EstimatedCost, plan.EstimatedTime, plan.Confidence,
 		maxCost, maxTime, quality)
 }
@@ -400,11 +426,11 @@ func (p *Planner) checkCircularDependencies(tasks []AgentTask) error {
 	for _, task := range tasks {
 		deps[task.ID] = task.DependsOn
 	}
-	
+
 	// Check for cycles using DFS
 	visited := make(map[string]bool)
 	recStack := make(map[string]bool)
-	
+
 	var hasCycle func(string) bool
 	hasCycle = func(taskID string) bool {
 		if recStack[taskID] {
@@ -413,20 +439,20 @@ func (p *Planner) checkCircularDependencies(tasks []AgentTask) error {
 		if visited[taskID] {
 			return false
 		}
-		
+
 		visited[taskID] = true
 		recStack[taskID] = true
-		
+
 		for _, dep := range deps[taskID] {
 			if hasCycle(dep) {
 				return true
 			}
 		}
-		
+
 		recStack[taskID] = false
 		return false
 	}
-	
+
 	for _, task := range tasks {
 		if !visited[task.ID] {
 			if hasCycle(task.ID) {
@@ -434,7 +460,7 @@ func (p *Planner) checkCircularDependencies(tasks []AgentTask) error {
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -444,7 +470,7 @@ func (p *Planner) checkMissingDependencies(tasks []AgentTask) error {
 	for _, task := range tasks {
 		taskIDs[task.ID] = true
 	}
-	
+
 	for _, task := range tasks {
 		for _, depID := range task.DependsOn {
 			if !taskIDs[depID] {
@@ -452,7 +478,7 @@ func (p *Planner) checkMissingDependencies(tasks []AgentTask) error {
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -460,18 +486,18 @@ func (p *Planner) checkMissingDependencies(tasks []AgentTask) error {
 func (p *Planner) isValidTaskType(taskType string) bool {
 	validTypes := []string{
 		"research",
-		"analysis", 
+		"analysis",
 		"synthesis",
 		"conflict_detection",
 		"highlight_management",
 		"knowledge_graph",
 	}
-	
+
 	for _, validType := range validTypes {
 		if taskType == validType {
 			return true
 		}
 	}
-	
+
 	return false
 }

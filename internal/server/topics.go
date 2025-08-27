@@ -4,11 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"log"
+
 	"github.com/labstack/echo/v4"
 	"github.com/mohammad-safakhou/newser/internal/store"
 	"github.com/mohammad-safakhou/newser/models"
 	"github.com/mohammad-safakhou/newser/provider"
-	"log"
 )
 
 type TopicsHandler struct {
