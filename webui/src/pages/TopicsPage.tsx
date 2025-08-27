@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api2, Topic } from '../api'
 import NewTopicWizard from '../components/NewTopicWizard'
 
@@ -8,7 +8,11 @@ export default function TopicsPage() {
   const qc = useQueryClient()
   const nav = useNavigate()
   const [wizardOpen, setWizardOpen] = useState(false)
-  const { data: topics, isLoading, error } = useQuery({ queryKey: ['topics'], queryFn: api2.topics })
+  const { data: topics = [], isLoading, error } = useQuery<Topic[]>({
+    queryKey: ['topics'],
+    queryFn: api2.topics,
+    select: (data) => Array.isArray(data) ? data : []
+  })
 
   return (
     <div className="h-full flex flex-col">
@@ -23,7 +27,7 @@ export default function TopicsPage() {
         {isLoading && <div className="text-sm text-slate-500">Loading…</div>}
         {error && <div className="text-sm text-red-400">{(error as Error).message}</div>}
         <ul className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {topics?.map(t => (
+          {topics.map(t => (
             <li key={t.ID} className="card cursor-pointer group" onClick={()=>nav(`/topics/${t.ID}`)}>
               <div className="flex items-start justify-between">
                 <p className="font-medium leading-tight group-hover:text-brand-400 transition">{t.Name}</p>
@@ -32,7 +36,7 @@ export default function TopicsPage() {
               <div className="mt-2 text-xs text-slate-500">Created topic</div>
             </li>
           ))}
-          {topics && topics.length === 0 && <div className="text-sm text-slate-500">No topics yet.</div>}
+          {topics.length === 0 && <div className="text-sm text-slate-500">No topics yet.</div>}
         </ul>
       </div>
       {wizardOpen && (
