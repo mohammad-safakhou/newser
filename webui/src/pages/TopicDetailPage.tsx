@@ -18,11 +18,16 @@ export default function TopicDetailPage() {
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const toast = useToast()
 
-  const runsQ = useQuery({ queryKey: ['runs', id], queryFn: () => api2.runs(id!), enabled: !!id, refetchInterval: (data) => {
-    // keep polling while any run is running
-    if (!data) return 0
-    return data.some(r => r.Status === 'running') ? 4000 : 0
-  } })
+    const runsQ = useQuery({
+      queryKey: ['runs', id],
+      queryFn: () => api2.runs(id!),
+      enabled: !!id,
+      refetchInterval: (q) => {
+        const data = q.state.data as Run[] | undefined
+        if (!data) return 0
+        return data.some((r: Run) => r.Status === 'running') ? 4000 : 0
+      }
+    })
   const latestQ = useQuery({ queryKey: ['latest', id], queryFn: () => api2.latestResult(id!), enabled: !!id, staleTime: 10_000 })
   const topicQ = useQuery({ queryKey: ['topic', id], queryFn: () => api2.getTopic(id!), enabled: !!id })
   const topicName = qc.getQueryData<any>(['topics'])?.find?.((t: any)=>t.ID===id)?.Name

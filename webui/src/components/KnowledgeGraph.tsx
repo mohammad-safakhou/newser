@@ -67,6 +67,7 @@ export default function KnowledgeGraph({ nodes, edges }: Props) {
   useEffect(()=>{
     const canvas = canvasRef.current; if (!canvas) return
     function onMove(ev: MouseEvent) {
+      if (!canvas) return
       const rect = canvas.getBoundingClientRect()
       const x = ev.clientX - rect.left - rect.width/2
       const y = ev.clientY - rect.top - rect.height/2
