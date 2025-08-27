@@ -8,11 +8,12 @@ export default function TopicsPage() {
   const qc = useQueryClient()
   const nav = useNavigate()
   const [wizardOpen, setWizardOpen] = useState(false)
-  const { data: topics = [], isLoading, error } = useQuery<Topic[]>({
+  const { data, isLoading, error } = useQuery<Topic[]>({
     queryKey: ['topics'],
     queryFn: api2.topics,
-    select: (data) => Array.isArray(data) ? data : []
+    select: (d) => Array.isArray(d) ? d : [],
   })
+  const topics = Array.isArray(data) ? data : []
 
   return (
     <div className="h-full flex flex-col">
