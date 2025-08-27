@@ -1,7 +1,9 @@
 FROM node:20-alpine AS build
 WORKDIR /ui
-COPY package.json ./package.json
-RUN npm install
+# Copy lockfile for reproducible builds
+COPY package.json package-lock.json ./
+RUN npm ci
+# Copy source after installing dependencies to leverage Docker layer cache
 COPY . .
 RUN npm run build
 
