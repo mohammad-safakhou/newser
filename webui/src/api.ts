@@ -1,38 +1,44 @@
 export type Me = { user_id: string }
 export type Topic = { ID: string; Name: string; ScheduleCron: string }
 export type Run = { ID: string; Status: string; StartedAt: string; FinishedAt?: string; Error?: string }
+export type ChatMessage = { role: 'user' | 'assistant'; content: string }
 
-type Json = Record<string, unknown> | null
-
-async function request(path: string, options: RequestInit = {}): Promise<Json> {
+// Enhanced request with abort support
+export async function apiRequest<T = any>(path: string, options: RequestInit & { signal?: AbortSignal } = {}): Promise<T> {
   const res = await fetch(path, {
     credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
     ...options,
   })
-
+  let data: any = null
+  const ct = res.headers.get('content-type') || ''
   const text = await res.text()
-  const isJson = res.headers.get('content-type')?.includes('application/json')
-  const data = isJson && text ? JSON.parse(text) : text || null
-
+  if (ct.includes('application/json') && text) {
+    try { data = JSON.parse(text) } catch { data = text }
+  } else { data = text || null }
   if (!res.ok) {
-    const message = typeof data === 'string' ? data : (data && (data.error || data.message)) || 'Request failed'
+    const message = typeof data === 'string' ? data : data?.error || data?.message || `HTTP ${res.status}`
     throw new Error(message)
   }
-
-  return data as Json
+  return data as T
 }
 
-export const api = {
-  me: () => request('/api/me') as Promise<Me>,
-  signup: (email: string, password: string) => request('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email, password }) }),
-  login: (email: string, password: string) => request('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
-  topics: () => request('/api/topics') as Promise<Topic[]>,
-  createTopic: (name: string) => request('/api/topics', { method: 'POST', body: JSON.stringify({ name, preferences: { bias_detection: true }, schedule_cron: '@daily' }) }),
-  trigger: (id: string) => request(`/api/topics/${id}/trigger`, { method: 'POST' }),
-  runs: (id: string) => request(`/api/topics/${id}/runs`) as Promise<Run[]>,
-  latestResult: (id: string) => request(`/api/topics/${id}/latest_result`) as Promise<any>,
-  chat: (id: string, message: string) => request(`/api/topics/${id}/chat`, { method: 'POST', body: JSON.stringify({ message }) }) as Promise<{ message: string, topic: any }>,
+export const api2 = {
+  me: () => apiRequest<Me>('/api/me'),
+  signup: (email: string, password: string) => apiRequest('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  login: (email: string, password: string) => apiRequest('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  topics: () => apiRequest<Topic[]>('/api/topics'),
+  createTopic: (name: string) => apiRequest('/api/topics', { method: 'POST', body: JSON.stringify({ name, preferences: { bias_detection: true }, schedule_cron: '@daily' }) }),
+  createTopicFull: (name: string, preferences: Record<string, any>, scheduleCron: string) => apiRequest('/api/topics', { method: 'POST', body: JSON.stringify({ name, preferences, schedule_cron: scheduleCron }) }),
+  triggerRun: (id: string) => apiRequest(`/api/topics/${id}/trigger`, { method: 'POST' }),
+  runs: (id: string) => apiRequest<Run[]>(`/api/topics/${id}/runs`),
+  latestResult: (id: string) => apiRequest<any>(`/api/topics/${id}/latest_result`),
+  chat: (id: string, message: string) => apiRequest<{ message: string; topic: any }>(`/api/topics/${id}/chat`, { method: 'POST', body: JSON.stringify({ message }) }),
+  getTopic: (id: string) => apiRequest<any>(`/api/topics/${id}`),
+  assistChat: (payload: { message: string; name?: string; preferences?: Record<string, any>; schedule_cron?: string }) => apiRequest<{ message: string; topic: any }>(`/api/topics/assist/chat`, { method: 'POST', body: JSON.stringify(payload) }),
 }
 
-
+export function formatDate(ts?: string) {
+  if (!ts) return '—'
+  try { return new Date(ts).toLocaleString() } catch { return ts }
+}

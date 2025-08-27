@@ -44,4 +44,5 @@ webui-clean:
 serve-all: webui-build
 	go run ./cmd/newserd
 
- 
+webui-dev:
+	cd webui && npm run dev

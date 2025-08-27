@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom scrollbars */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: theme('colors.slate.900'); }
+::-webkit-scrollbar-thumb { background: theme('colors.slate.700'); border-radius: 9999px; }
+::-webkit-scrollbar-thumb:hover { background: theme('colors.slate.600'); }
+
+html, body { @apply h-full; }
+body { @apply bg-slate-950 text-slate-100 font-sans; }
+
+.fade-in { animation: fade-in .4s ease; }
+@keyframes fade-in { from { opacity:0; transform: translateY(4px);} to { opacity:1; transform: translateY(0);} }
+
+input, button, textarea { @apply outline-none; }
+
+.btn { @apply inline-flex items-center gap-2 rounded-md bg-brand-600 hover:bg-brand-500 active:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed px-4 py-2 text-sm font-medium shadow focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 transition; }
+.btn-secondary { @apply bg-slate-700 hover:bg-slate-600 active:bg-slate-800; }
+.btn-danger { @apply bg-red-600 hover:bg-red-500 active:bg-red-700; }
+
+.card { @apply bg-slate-900/60 border border-slate-800 rounded-xl backdrop-blur px-5 py-4 shadow-sm; }
+
+.input { @apply w-full rounded-md bg-slate-800 border border-slate-700 focus:border-brand-500 focus:ring-2 focus:ring-brand-600/40 px-3 py-2 text-sm placeholder:text-slate-500; }
+
+.badge { @apply inline-flex items-center rounded-full bg-slate-800 border border-slate-700 text-xs font-medium px-2.5 py-0.5 text-slate-300; }
+
+.skeleton { @apply animate-pulse-slow bg-slate-800 rounded; }
+
