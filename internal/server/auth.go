@@ -8,6 +8,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/labstack/echo/v4"
+	"github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/mohammad-safakhou/newser/internal/store"
@@ -34,7 +35,10 @@ func (a *AuthHandler) signup(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	if err := a.Store.CreateUser(c.Request().Context(), req.Email, string(hash)); err != nil {
-		return echo.NewHTTPError(http.StatusConflict, err.Error())
+		if pgErr, ok := err.(*pq.Error); ok && pgErr.Code == "23505" {
+			return echo.NewHTTPError(http.StatusConflict, "email already exists")
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	return c.NoContent(http.StatusCreated)
 }
