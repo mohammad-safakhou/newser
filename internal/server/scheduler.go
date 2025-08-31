@@ -1,16 +1,15 @@
 package server
 
 import (
-	"context"
-	"log"
-	"time"
+    "context"
+    "log"
+    "time"
 
-	"github.com/gorhill/cronexpr"
-	"github.com/mohammad-safakhou/newser/internal/agent/config"
-	"github.com/mohammad-safakhou/newser/internal/agent/core"
-	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
-	"github.com/mohammad-safakhou/newser/internal/store"
-	"github.com/redis/go-redis/v9"
+    "github.com/gorhill/cronexpr"
+    "github.com/mohammad-safakhou/newser/internal/agent/core"
+    "github.com/mohammad-safakhou/newser/internal/agent/telemetry"
+    "github.com/mohammad-safakhou/newser/internal/store"
+    "github.com/redis/go-redis/v9"
 )
 
 type Scheduler struct {
@@ -67,18 +66,14 @@ func (s *Scheduler) tick() {
 			// jitter to avoid stampedes
 			time.Sleep(time.Duration(250+int64(time.Now().UnixNano()%250)) * time.Millisecond)
 			orch := s.Orch
-			if orch == nil {
-				cfg, err := config.LoadConfig()
-				if err != nil {
-					_ = s.Store.FinishRun(ctx, runID, "failed", strPtr(err.Error()))
-					return
-				}
-				tele := telemetry.NewTelemetry(cfg.Telemetry)
-				defer tele.Shutdown()
-				logger := log.New(log.Writer(), "[SCHED] ", log.LstdFlags)
-				var err2 error
-				orch, err2 = core.NewOrchestrator(cfg, logger, tele)
-				if err2 != nil {
+            if orch == nil {
+                cfg := buildAgentConfigFromApp()
+                tele := telemetry.NewTelemetry(cfg.Telemetry)
+                defer tele.Shutdown()
+                logger := log.New(log.Writer(), "[SCHED] ", log.LstdFlags)
+                var err2 error
+                orch, err2 = core.NewOrchestrator(cfg, logger, tele)
+                if err2 != nil {
 					_ = s.Store.FinishRun(ctx, runID, "failed", strPtr(err2.Error()))
 					return
 				}

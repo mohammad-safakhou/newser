@@ -1,18 +1,17 @@
 package server
 
 import (
-	"context"
-	"net/http"
-	"time"
+    "context"
+    "net/http"
+    "time"
 
-	"log"
-	"os"
+    "log"
+    "os"
 
-	"github.com/labstack/echo/v4"
-	"github.com/mohammad-safakhou/newser/internal/agent/config"
-	"github.com/mohammad-safakhou/newser/internal/agent/core"
-	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
-	"github.com/mohammad-safakhou/newser/internal/store"
+    "github.com/labstack/echo/v4"
+    "github.com/mohammad-safakhou/newser/internal/agent/core"
+    "github.com/mohammad-safakhou/newser/internal/agent/telemetry"
+    "github.com/mohammad-safakhou/newser/internal/store"
 )
 
 type RunsHandler struct {
@@ -47,22 +46,18 @@ func (h *RunsHandler) trigger(c echo.Context) error {
 		defer cancel()
 
 		orch := h.Orch
-		if orch == nil {
-			// Fallback: create once if not provided (should not happen)
-			cfg, err := config.LoadConfig()
-			if err != nil {
-				_ = h.Store.FinishRun(ctx, runID, "failed", strPtr(err.Error()))
-				return
-			}
-			tele := telemetry.NewTelemetry(cfg.Telemetry)
-			defer tele.Shutdown()
-			logger := log.New(os.Stdout, "[ORCH] ", log.LstdFlags)
-			orch, err = core.NewOrchestrator(cfg, logger, tele)
-			if err != nil {
-				_ = h.Store.FinishRun(ctx, runID, "failed", strPtr(err.Error()))
-				return
-			}
-		}
+        if orch == nil {
+            // Fallback: create once if not provided (should not happen)
+            cfg := buildAgentConfigFromApp()
+            tele := telemetry.NewTelemetry(cfg.Telemetry)
+            defer tele.Shutdown()
+            logger := log.New(os.Stdout, "[ORCH] ", log.LstdFlags)
+            orch, err = core.NewOrchestrator(cfg, logger, tele)
+            if err != nil {
+                _ = h.Store.FinishRun(ctx, runID, "failed", strPtr(err.Error()))
+                return
+            }
+        }
 
 		// construct thought from topic name/preferences
 		thought := core.UserThought{

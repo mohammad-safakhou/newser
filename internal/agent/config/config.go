@@ -12,12 +12,19 @@ import (
 
 // Config holds all configuration for the agent system
 type Config struct {
-	General   GeneralConfig   `mapstructure:"general"`
-	LLM       LLMConfig       `mapstructure:"llm"`
-	Telemetry TelemetryConfig `mapstructure:"telemetry"`
-	Agents    AgentsConfig    `mapstructure:"agents"`
-	Sources   SourcesConfig   `mapstructure:"sources"`
-	Storage   StorageConfig   `mapstructure:"storage"`
+    General   GeneralConfig   `mapstructure:"general"`
+    Server    ServerConfig    `mapstructure:"server"`
+    LLM       LLMConfig       `mapstructure:"llm"`
+    Telemetry TelemetryConfig `mapstructure:"telemetry"`
+    Agents    AgentsConfig    `mapstructure:"agents"`
+    Sources   SourcesConfig   `mapstructure:"sources"`
+    Storage   StorageConfig   `mapstructure:"storage"`
+}
+
+// ServerConfig contains HTTP server and auth settings
+type ServerConfig struct {
+    Address   string `mapstructure:"address"`
+    JWTSecret string `mapstructure:"jwt_secret"`
 }
 
 // GeneralConfig contains general application settings
@@ -190,11 +197,15 @@ func LoadConfig() (*Config, error) {
 
 // setDefaults sets default configuration values
 func setDefaults() {
-	// General defaults
-	viper.SetDefault("general.debug", false)
-	viper.SetDefault("general.log_level", "info")
-	viper.SetDefault("general.max_processing_time", "10m")
-	viper.SetDefault("general.default_timeout", "30s")
+    // General defaults
+    viper.SetDefault("general.debug", false)
+    viper.SetDefault("general.log_level", "info")
+    viper.SetDefault("general.max_processing_time", "10m")
+    viper.SetDefault("general.default_timeout", "30s")
+
+    // Server defaults
+    viper.SetDefault("server.address", ":10001")
+    viper.SetDefault("server.jwt_secret", "dev-secret-change-me")
 
 	// LLM defaults (only gpt-5 family)
 	viper.SetDefault("llm.routing.planning", "gpt-5")
@@ -253,9 +264,17 @@ func overrideFromEnv() {
 	if apiKey := os.Getenv("BRAVE_SEARCH_KEY"); apiKey != "" {
 		viper.Set("sources.web_search.brave_api_key", apiKey)
 	}
-	if apiKey := os.Getenv("SERPER_API_KEY"); apiKey != "" {
-		viper.Set("sources.web_search.serper_api_key", apiKey)
-	}
+    if apiKey := os.Getenv("SERPER_API_KEY"); apiKey != "" {
+        viper.Set("sources.web_search.serper_api_key", apiKey)
+    }
+
+    // Server configuration
+    if addr := os.Getenv("NEWSER_HTTP_ADDR"); addr != "" {
+        viper.Set("server.address", addr)
+    }
+    if jwt := os.Getenv("JWT_SECRET"); jwt != "" {
+        viper.Set("server.jwt_secret", jwt)
+    }
 
 	// Redis configuration
 	if host := os.Getenv("REDIS_HOST"); host != "" {
@@ -266,9 +285,9 @@ func overrideFromEnv() {
 			viper.Set("storage.redis.port", p)
 		}
 	}
-	if password := os.Getenv("REDIS_PASSWORD"); password != "" {
-		viper.Set("storage.redis.password", password)
-	}
+    if password := os.Getenv("REDIS_PASSWORD"); password != "" {
+        viper.Set("storage.redis.password", password)
+    }
     // Postgres configuration (single block)
     if url := os.Getenv("DATABASE_URL"); url != "" {
         viper.Set("storage.postgres.url", url)

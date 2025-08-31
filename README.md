@@ -28,15 +28,21 @@ make serve
 # or build UI then serve in one: make serve-all
 ```
 
+### Docker Compose
+
+The repo ships with a multi-service compose file that runs Postgres, Redis, the API server, and a separate Nginx-based WebUI container.
+
+- Start everything: `docker compose up -d`
+- UI: http://localhost:3000 (proxies `/api` to the API container)
+- API: http://localhost:10001
+
+Notes:
+- Chat/assist features require `OPENAI_API_KEY`. The API fails fast on startup if the key is missing.
+- In Docker Compose, never use `localhost`/`127.0.0.1` for cross‑container services. Use the service name (e.g. `redis`, `postgres`) via env `NEWSER_REDIS_HOST=redis`, `POSTGRES_HOST=postgres`.
+- To enable full features via compose, export `OPENAI_API_KEY` in your shell before `docker compose up` or inject it into the `app` service environment.
+
 API docs: GET /api/docs, OpenAPI: GET /api/openapi.yaml
 Health: GET /healthz, Metrics: GET /metrics
-
-## MCP (optional)
-
-An auxiliary MCP stdio server exposes stateless tools over JSON-RPC.
-- Start: `go run ./mcp/server.go`
-- Env used: `BRAVE_SEARCH_KEY`, `SERPER_API_KEY`, `REDIS_HOST/PORT/PASSWORD`, `MCP_DEFAULT_TIMEOUT`, `MCP_MAX_CONCURRENT`
-- Intended for advanced agent integrations; not required for WebUI/API usage.
 
 ## Features
 - **Web User Interface**: Integrated browser-based interface for managing topics and generating news.

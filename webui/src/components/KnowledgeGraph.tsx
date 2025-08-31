@@ -11,15 +11,17 @@ export default function KnowledgeGraph({ nodes, edges }: Props) {
   const [hoverNode, setHoverNode] = useState<KGNode | null>(null)
 
   const layout = useMemo(()=>{
-    if (!nodes || nodes.length === 0) return { nodes: [], edges }
-    const placed = nodes.map((n, i) => {
+    const safeNodes = Array.isArray(nodes) ? nodes : []
+    const safeEdges = Array.isArray(edges) ? edges : []
+    if (safeNodes.length === 0) return { nodes: [], edges: safeEdges }
+    const placed = safeNodes.map((n, i) => {
       const angle = (i / nodes.length) * Math.PI * 2
       const radius = 140 + (i % 7) * 6
       return { ...n, x: Math.cos(angle) * radius, y: Math.sin(angle) * radius }
     })
     // light iterative adjustment based on edges (pull connected nodes slightly together)
     for (let iter=0; iter<25; iter++) {
-      edges.forEach(e => {
+      safeEdges.forEach(e => {
         const a = placed.find(p=>p.id===e.source)
         const b = placed.find(p=>p.id===e.target)
         if (!a || !b) return
@@ -31,7 +33,7 @@ export default function KnowledgeGraph({ nodes, edges }: Props) {
         b.x -= dx * diff; b.y -= dy * diff
       })
     }
-    return { nodes: placed, edges }
+    return { nodes: placed, edges: safeEdges }
   }, [nodes, edges])
 
   useEffect(()=>{
@@ -47,7 +49,7 @@ export default function KnowledgeGraph({ nodes, edges }: Props) {
     // draw edges
     ctx.lineWidth = 1
     ctx.strokeStyle = 'rgba(148,163,184,0.35)'
-    layout.edges.forEach(e => {
+    (layout.edges || []).forEach(e => {
       const a = layout.nodes.find(n=>n.id===e.source)
       const b = layout.nodes.find(n=>n.id===e.target)
       if(!a||!b) return
@@ -103,4 +105,3 @@ function colorForGroup(g: any) {
   return colors[idx]
 }
 function hash(s: string) { let h=0; for (let i=0;i<s.length;i++) h = (h*31 + s.charCodeAt(i))|0; return h }
-

@@ -37,6 +37,7 @@ services:
       - postgres
       - redis
     environment:
+      NEWSER_HTTP_ADDR: ":10001"
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_USER: newser
@@ -44,8 +45,8 @@ services:
       POSTGRES_DB: newser
       JWT_SECRET: dev-secret-change-me
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      NEWSER_REDIS_HOST: redis
-      NEWSER_REDIS_PORT: "6379"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
     ports:
       - "10001:10001"
     volumes:
