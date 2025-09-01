@@ -28,25 +28,53 @@ services:
       timeout: 5s
       retries: 5
 
+  migration:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: newser:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NEWSER_STORAGE_POSTGRES_HOST: postgres
+      NEWSER_STORAGE_POSTGRES_PORT: "5432"
+      NEWSER_STORAGE_POSTGRES_USER: newser
+      NEWSER_STORAGE_POSTGRES_PASSWORD: newser
+      NEWSER_STORAGE_POSTGRES_DB: newser
+      NEWSER_STORAGE_REDIS_HOST: redis
+      NEWSER_STORAGE_REDIS_PORT: "6379"
+    command: [ "migrate","up" ]
+    restart: "no"
+    volumes:
+      - ./config:/app/config:ro
+
   app:
     build:
       context: .
       dockerfile: Dockerfile
     image: newser:latest
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
     environment:
       NEWSER_HTTP_ADDR: ":10001"
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: "5432"
-      POSTGRES_USER: newser
-      POSTGRES_PASSWORD: newser
-      POSTGRES_DB: newser
+      NEWSER_STORAGE_POSTGRES_HOST: postgres
+      NEWSER_STORAGE_POSTGRES_PORT: "5432"
+      NEWSER_STORAGE_POSTGRES_USER: newser
+      NEWSER_STORAGE_POSTGRES_PASSWORD: newser
+      NEWSER_STORAGE_POSTGRES_DB: newser
       JWT_SECRET: dev-secret-change-me
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      REDIS_HOST: redis
-      REDIS_PORT: "6379"
+      NEWSER_STORAGE_REDIS_HOST: redis
+      NEWSER_STORAGE_REDIS_PORT: "6379"
+    command: ["serve", "--config", "/app/config/config.json"]
     ports:
       - "10001:10001"
     volumes:

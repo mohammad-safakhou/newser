@@ -1,22 +1,34 @@
 package server
 
 import (
-    "context"
-    "log"
-    "time"
+	"context"
+	"log"
+	"time"
 
-    "github.com/gorhill/cronexpr"
-    "github.com/mohammad-safakhou/newser/internal/agent/core"
-    "github.com/mohammad-safakhou/newser/internal/agent/telemetry"
-    "github.com/mohammad-safakhou/newser/internal/store"
-    "github.com/redis/go-redis/v9"
+	"github.com/gorhill/cronexpr"
+	"github.com/mohammad-safakhou/newser/config"
+	"github.com/mohammad-safakhou/newser/internal/agent/core"
+	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
+	"github.com/mohammad-safakhou/newser/internal/store"
+	"github.com/redis/go-redis/v9"
 )
 
 type Scheduler struct {
-	Store *store.Store
-	Stop  chan struct{}
-	Rdb   *redis.Client
-	Orch  *core.Orchestrator
+	store *store.Store
+	stop  chan struct{}
+	rdb   *redis.Client
+	orch  *core.Orchestrator
+	cfg   *config.Config
+}
+
+func NewScheduler(cfg *config.Config, store *store.Store, rdb *redis.Client, orch *core.Orchestrator) *Scheduler {
+	return &Scheduler{
+		store: store,
+		stop:  make(chan struct{}),
+		rdb:   rdb,
+		orch:  orch,
+		cfg:   cfg,
+	}
 }
 
 func (s *Scheduler) Start() {
@@ -24,7 +36,7 @@ func (s *Scheduler) Start() {
 	go func() {
 		for {
 			select {
-			case <-s.Stop:
+			case <-s.stop:
 				ticker.Stop()
 				return
 			case <-ticker.C:
@@ -36,28 +48,28 @@ func (s *Scheduler) Start() {
 
 func (s *Scheduler) tick() {
 	ctx := context.Background()
-	topics, err := s.Store.ListAllTopics(ctx)
+	topics, err := s.store.ListAllTopics(ctx)
 	if err != nil {
 		return
 	}
 	for _, t := range topics {
-		last, _ := s.Store.LatestRunTime(ctx, t.ID)
+		last, _ := s.store.LatestRunTime(ctx, t.ID)
 		if !isDue(t.ScheduleCron, last) {
 			continue
 		}
 
 		// Fire run
 		// distributed lock to avoid duplicate runs
-		if s.Rdb != nil {
+		if s.rdb != nil {
 			lockKey := "sched:lock:" + t.ID
-			ok, _ := s.Rdb.SetNX(ctx, lockKey, "1", 2*time.Minute).Result()
+			ok, _ := s.rdb.SetNX(ctx, lockKey, "1", 2*time.Minute).Result()
 			if !ok {
 				continue
 			}
-			defer s.Rdb.Del(ctx, lockKey)
+			defer s.rdb.Del(ctx, lockKey)
 		}
 
-		runID, err := s.Store.CreateRun(ctx, t.ID, "running")
+		runID, err := s.store.CreateRun(ctx, t.ID, "running")
 		if err != nil {
 			continue
 		}
@@ -65,26 +77,25 @@ func (s *Scheduler) tick() {
 		go func(topic store.Topic, runID string) {
 			// jitter to avoid stampedes
 			time.Sleep(time.Duration(250+int64(time.Now().UnixNano()%250)) * time.Millisecond)
-			orch := s.Orch
-            if orch == nil {
-                cfg := buildAgentConfigFromApp()
-                tele := telemetry.NewTelemetry(cfg.Telemetry)
-                defer tele.Shutdown()
-                logger := log.New(log.Writer(), "[SCHED] ", log.LstdFlags)
-                var err2 error
-                orch, err2 = core.NewOrchestrator(cfg, logger, tele)
-                if err2 != nil {
-					_ = s.Store.FinishRun(ctx, runID, "failed", strPtr(err2.Error()))
+			orch := s.orch
+			if orch == nil {
+				tele := telemetry.NewTelemetry(s.cfg.Telemetry)
+				defer tele.Shutdown()
+				logger := log.New(log.Writer(), "[SCHED] ", log.LstdFlags)
+				var err2 error
+				orch, err2 = core.NewOrchestrator(s.cfg, logger, tele)
+				if err2 != nil {
+					_ = s.store.FinishRun(ctx, runID, "failed", strPtr(err2.Error()))
 					return
 				}
 			}
 			thought := core.UserThought{ID: topic.ID, Content: topic.Name, Timestamp: time.Now()}
 			_, err = orch.ProcessThought(ctx, thought)
 			if err != nil {
-				_ = s.Store.FinishRun(ctx, runID, "failed", strPtr(err.Error()))
+				_ = s.store.FinishRun(ctx, runID, "failed", strPtr(err.Error()))
 				return
 			}
-			_ = s.Store.FinishRun(ctx, runID, "succeeded", nil)
+			_ = s.store.FinishRun(ctx, runID, "succeeded", nil)
 		}(t, runID)
 	}
 }

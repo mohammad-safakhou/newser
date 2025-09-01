@@ -10,76 +10,158 @@ import (
 	"github.com/spf13/viper"
 )
 
-var AppConfig *config // global app config
-
-type config struct {
-    General   General   `mapstructure:"general"`   // general configs
-    Databases Databases `mapstructure:"databases"` // databases configs
-    Providers Providers `mapstructure:"providers"` // providers configs
-    NewsApi   NewsApi   `mapstructure:"newsapi"`   // newsapi configs
+// Config holds all configuration for the agent system
+type Config struct {
+	General   GeneralConfig   `mapstructure:"general"`
+	Server    ServerConfig    `mapstructure:"server"`
+	LLM       LLMConfig       `mapstructure:"llm"`
+	Telemetry TelemetryConfig `mapstructure:"telemetry"`
+	Agents    AgentsConfig    `mapstructure:"agents"`
+	Sources   SourcesConfig   `mapstructure:"sources"`
+	Storage   StorageConfig   `mapstructure:"storage"`
 }
 
-type General struct {
-    Debug           bool          `mapstructure:"debug"`            // debug mode
-    Listen          string        `mapstructure:"listen"`           // rest listen port
-    Host            string        `mapstructure:"host"`             // rest host
-    LogLevel        int8          `mapstructure:"log_level"`        // logger level
-    ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"` // shutdown timeout
-    AutoTLS         bool          `mapstructure:"auto_tls"`         // auto tls
-    AppName         string        `mapstructure:"app_name"`         // application name
-    JWTSecret       string        `mapstructure:"jwt_secret"`       // JWT secret for auth
+// ServerConfig contains HTTP server and auth settings
+type ServerConfig struct {
+	Address   string `mapstructure:"address"`
+	JWTSecret string `mapstructure:"jwt_secret"`
 }
 
-type Databases struct {
-    Redis Redis `mapstructure:"redis"` // redis configs
-    Postgres Postgres `mapstructure:"postgres"` // postgres configs
+// GeneralConfig contains general application settings
+type GeneralConfig struct {
+	Debug             bool          `mapstructure:"debug"`
+	LogLevel          string        `mapstructure:"log_level"`
+	MaxProcessingTime time.Duration `mapstructure:"max_processing_time"`
+	DefaultTimeout    time.Duration `mapstructure:"default_timeout"`
+	JWTSecret         string        `mapstructure:"jwt_secret"` // JWT secret for auth
 }
 
-type Redis struct {
-    Host    string        `mapstructure:"host"`    // redis host
-    Port    string        `mapstructure:"port"`    // redis port
-    Pass    string        `mapstructure:"pass"`    // redis pass
-    DB      int           `mapstructure:"db"`      // redis db
-    Timeout time.Duration `mapstructure:"timeout"` // redis timeout
+// LLMConfig contains LLM provider configurations
+type LLMConfig struct {
+	Providers map[string]LLMProvider `mapstructure:"providers"`
+	Routing   LLMRoutingConfig       `mapstructure:"routing"`
 }
 
-type Postgres struct {
-    URL      string        `mapstructure:"url"`      // full DSN
-    Host     string        `mapstructure:"host"`     // host
-    Port     string        `mapstructure:"port"`     // port
-    User     string        `mapstructure:"user"`     // user
-    Password string        `mapstructure:"password"` // password
-    DBName   string        `mapstructure:"dbname"`   // db name
-    SSLMode  string        `mapstructure:"sslmode"`  // ssl mode
-    Timeout  time.Duration `mapstructure:"timeout"`  // connect timeout
+// LLMProvider represents a single LLM provider configuration
+type LLMProvider struct {
+	Type       string              `mapstructure:"type"` // openai, anthropic, local, etc.
+	APIKey     string              `mapstructure:"api_key"`
+	BaseURL    string              `mapstructure:"base_url"`
+	Models     map[string]LLMModel `mapstructure:"models"`
+	MaxRetries int                 `mapstructure:"max_retries"`
+	Timeout    time.Duration       `mapstructure:"timeout"`
 }
 
-type Providers struct {
-	OpenAi OpenAi `mapstructure:"openai"` // OpenAI provider configs
+// LLMModel represents a specific model configuration
+type LLMModel struct {
+	Name            string   `mapstructure:"name"`
+	APIName         string   `mapstructure:"api_name"`
+	MaxTokens       int      `mapstructure:"max_tokens"`
+	Temperature     float64  `mapstructure:"temperature"`
+	CostPer1K       float64  `mapstructure:"cost_per_1k_input"`
+	CostPer1KOutput float64  `mapstructure:"cost_per_1k_output"`
+	Capabilities    []string `mapstructure:"capabilities"` // planning, analysis, synthesis, etc.
 }
 
-type OpenAi struct {
-	APIKey          string        `mapstructure:"api_key"`          // OpenAI API key
-	CompletionModel string        `mapstructure:"completion_model"` // OpenAI model to use
-	EmbeddingModel  string        `mapstructure:"embedding_model"`  // OpenAI model to use
-	Temperature     float64       `mapstructure:"temperature"`      // OpenAI temperature setting
-	MaxTokens       int           `mapstructure:"max_tokens"`       // OpenAI max tokens setting
-	Timeout         time.Duration `mapstructure:"timeout"`          // OpenAI request timeout
+// LLMRoutingConfig defines which model to use for different tasks
+type LLMRoutingConfig struct {
+	Planning  string `mapstructure:"planning"`  // Use for complex planning tasks
+	Analysis  string `mapstructure:"analysis"`  // Use for content analysis
+	Synthesis string `mapstructure:"synthesis"` // Use for content synthesis
+	Research  string `mapstructure:"research"`  // Use for research tasks
+	Fallback  string `mapstructure:"fallback"`  // Fallback model
 }
 
-type NewsApi struct {
-	APIKey   string `mapstructure:"api_key"` // NewsAPI API key
-	Endpoint string `mapstructure:"endpoint"`
+// TelemetryConfig contains telemetry and monitoring settings
+type TelemetryConfig struct {
+	Enabled      bool   `mapstructure:"enabled"`
+	MetricsPort  int    `mapstructure:"metrics_port"`
+	LogFile      string `mapstructure:"log_file"`
+	CostTracking bool   `mapstructure:"cost_tracking"`
+	PeriodicLogs bool   `mapstructure:"periodic_logs"`
+}
+
+// AgentsConfig contains agent-specific settings
+type AgentsConfig struct {
+	MaxConcurrentAgents int           `mapstructure:"max_concurrent_agents"`
+	AgentTimeout        time.Duration `mapstructure:"agent_timeout"`
+	MaxRetries          int           `mapstructure:"max_retries"`
+	ConfidenceThreshold float64       `mapstructure:"confidence_threshold"`
+}
+
+// SourcesConfig contains news source configurations
+type SourcesConfig struct {
+	NewsAPI     NewsAPIConfig     `mapstructure:"newsapi"`
+	WebSearch   WebSearchConfig   `mapstructure:"web_search"`
+	SocialMedia SocialMediaConfig `mapstructure:"social_media"`
+	Academic    AcademicConfig    `mapstructure:"academic"`
+}
+
+// NewsAPIConfig contains NewsAPI settings
+type NewsAPIConfig struct {
+	APIKey     string `mapstructure:"api_key"`
+	Endpoint   string `mapstructure:"endpoint"`
+	MaxResults int    `mapstructure:"max_results"`
+}
+
+// WebSearchConfig contains web search settings
+type WebSearchConfig struct {
+	BraveAPIKey  string        `mapstructure:"brave_api_key"`
+	SerperAPIKey string        `mapstructure:"serper_api_key"`
+	MaxResults   int           `mapstructure:"max_results"`
+	Timeout      time.Duration `mapstructure:"timeout"`
+}
+
+// SocialMediaConfig contains social media monitoring settings
+type SocialMediaConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	// Add specific social media configs as needed
+}
+
+// AcademicConfig contains academic paper search settings
+type AcademicConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	// Add academic search configs as needed
+}
+
+// StorageConfig contains storage and persistence settings
+type StorageConfig struct {
+	Redis    RedisConfig    `mapstructure:"redis"`
+	File     FileConfig     `mapstructure:"file"`
+	Postgres PostgresConfig `mapstructure:"postgres"`
+}
+
+// RedisConfig contains Redis connection settings
+type RedisConfig struct {
+	Host     string        `mapstructure:"host"`
+	Port     string        `mapstructure:"port"`
+	Password string        `mapstructure:"password"`
+	DB       int           `mapstructure:"db"`
+	Timeout  time.Duration `mapstructure:"timeout"`
+}
+
+// FileConfig contains file storage settings
+type FileConfig struct {
+	DataDir string `mapstructure:"data_dir"`
+	LogDir  string `mapstructure:"log_dir"`
+}
+
+// PostgresConfig contains Postgres connection settings
+type PostgresConfig struct {
+	URL      string        `mapstructure:"url"`
+	Host     string        `mapstructure:"host"`
+	Port     string        `mapstructure:"port"`
+	User     string        `mapstructure:"user"`
+	Password string        `mapstructure:"password"`
+	DBName   string        `mapstructure:"dbname"`
+	SSLMode  string        `mapstructure:"sslmode"`
+	Timeout  time.Duration `mapstructure:"timeout"`
 }
 
 // LoadConfig loads config from file
-func LoadConfig(path string, isTest bool) {
-	if isTest {
-		viper.SetConfigName("config_test") // name of test config file (without extension)
-	} else {
-		viper.SetConfigName("config") // name of config file (without extension)
-	}
-	viper.SetConfigType("json") // REQUIRED if the config file does not have the extension in the name
+func LoadConfig(path string) *Config {
+	viper.SetConfigName("config") // name of config file (without extension)
+	viper.SetConfigType("json")   // REQUIRED if the config file does not have the extension in the name
 
 	if path == "" {
 		viper.AddConfigPath("./app/config") // path to look for the config file in
@@ -98,34 +180,18 @@ func LoadConfig(path string, isTest bool) {
 	replacer := strings.NewReplacer(".", "_")
 	viper.SetEnvKeyReplacer(replacer)
 
-    viper.AutomaticEnv() // read in environment variables that match (NEWSER_*)
+	viper.AutomaticEnv() // read in environment variables that match (NEWSER_*)
 
-    err := viper.ReadInConfig() // Find and read the config file
-    if err != nil {             // Handle errors reading the config file
-        panic(fmt.Errorf("fatal error config file: %w", err))
-    }
+	err := viper.ReadInConfig() // Find and read the config file
+	if err != nil {             // Handle errors reading the config file
+		panic(fmt.Errorf("fatal error config file: %w", err))
+	}
 
-    // Map well-known non-prefixed env vars into config (single source for all consumers)
-    if v := os.Getenv("OPENAI_API_KEY"); v != "" { viper.Set("providers.openai.api_key", v) }
-    if v := os.Getenv("JWT_SECRET"); v != "" { viper.Set("general.jwt_secret", v) }
-    if v := os.Getenv("NEWSER_HTTP_ADDR"); v != "" { viper.Set("general.listen", v) }
-    // Postgres
-    if v := os.Getenv("DATABASE_URL"); v != "" { viper.Set("databases.postgres.url", v) }
-    if v := os.Getenv("POSTGRES_HOST"); v != "" { viper.Set("databases.postgres.host", v) }
-    if v := os.Getenv("POSTGRES_PORT"); v != "" { viper.Set("databases.postgres.port", v) }
-    if v := os.Getenv("POSTGRES_USER"); v != "" { viper.Set("databases.postgres.user", v) }
-    if v := os.Getenv("POSTGRES_PASSWORD"); v != "" { viper.Set("databases.postgres.password", v) }
-    if v := os.Getenv("POSTGRES_DB"); v != "" { viper.Set("databases.postgres.dbname", v) }
-    if v := os.Getenv("POSTGRES_SSLMODE"); v != "" { viper.Set("databases.postgres.sslmode", v) }
-    // Redis
-    if v := os.Getenv("REDIS_HOST"); v != "" { viper.Set("databases.redis.host", v) }
-    if v := os.Getenv("REDIS_PORT"); v != "" { viper.Set("databases.redis.port", v) }
-    if v := os.Getenv("REDIS_PASSWORD"); v != "" { viper.Set("databases.redis.pass", v) }
-    // NewsAPI
-    if v := os.Getenv("NEWSAPI_API_KEY"); v != "" { viper.Set("newsapi.api_key", v) }
+	// unmarshal config
+	var config Config
 
-    AppConfig = &config{}
-    if err = viper.Unmarshal(&AppConfig); err != nil {
-        panic(fmt.Errorf("fatal error config file: %w", err))
-    }
+	if err = viper.Unmarshal(&config); err != nil {
+		panic(fmt.Errorf("fatal error config file: %w", err))
+	}
+	return &config
 }

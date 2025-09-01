@@ -73,7 +73,9 @@ func newServer(t *testing.T, ctx context.Context) (*httptest.Server, *store.Stor
 	var migErr error
 	for i := 0; i < 6; i++ {
 		migErr = server.Migrate(migDir, "", "up", 0)
-		if migErr == nil { break }
+		if migErr == nil {
+			break
+		}
 		time.Sleep(300 * time.Millisecond)
 	}
 	if migErr != nil {
@@ -94,7 +96,7 @@ func newServer(t *testing.T, ctx context.Context) (*httptest.Server, *store.Stor
 	th := &server.TopicsHandler{Store: st}
 	th.Register(api.Group("/topics"), secret)
 
-	rh := &server.RunsHandler{Store: st}
+	rh := &server.runsHandler{store: st}
 	rh.Register(api.Group("/topics"), secret)
 
 	srv := httptest.NewServer(e)
@@ -112,7 +114,9 @@ func TestAuthTopicsRunsFlow(t *testing.T) {
 	os.Setenv("POSTGRES_HOST", "localhost")
 	// testcontainers maps to host network via forwarded port; override port below
 	port, err := pg.MappedPort(ctx, "5432")
-	if err != nil { t.Fatalf("map port: %v", err) }
+	if err != nil {
+		t.Fatalf("map port: %v", err)
+	}
 	os.Setenv("POSTGRES_PORT", port.Port())
 	os.Setenv("POSTGRES_USER", "newser")
 	os.Setenv("POSTGRES_PASSWORD", "newser")
@@ -130,7 +134,9 @@ func TestAuthTopicsRunsFlow(t *testing.T) {
 		req, _ := http.NewRequest("POST", srv.URL+"/api/auth/signup", bytes.NewReader(b))
 		req.Header.Set("Content-Type", "application/json")
 		res, err := client.Do(req)
-		if err != nil { t.Fatalf("signup request failed: %v", err) }
+		if err != nil {
+			t.Fatalf("signup request failed: %v", err)
+		}
 		defer res.Body.Close()
 		if res.StatusCode != http.StatusCreated {
 			t.Fatalf("expected 201 for signup, got %d", res.StatusCode)
@@ -145,7 +151,9 @@ func TestAuthTopicsRunsFlow(t *testing.T) {
 		req, _ := http.NewRequest("POST", srv.URL+"/api/auth/login", bytes.NewReader(b))
 		req.Header.Set("Content-Type", "application/json")
 		res, err := client.Do(req)
-		if err != nil { t.Fatalf("login request failed: %v", err) }
+		if err != nil {
+			t.Fatalf("login request failed: %v", err)
+		}
 		defer res.Body.Close()
 		if res.StatusCode != http.StatusOK {
 			t.Fatalf("expected 200 for login, got %d", res.StatusCode)
@@ -153,15 +161,17 @@ func TestAuthTopicsRunsFlow(t *testing.T) {
 		var resp map[string]string
 		_ = json.NewDecoder(res.Body).Decode(&resp)
 		token = resp["token"]
-		if token == "" { t.Fatalf("expected token in login response") }
+		if token == "" {
+			t.Fatalf("expected token in login response")
+		}
 	}
 
 	// create topic
 	var topicID string
 	{
 		payload := map[string]interface{}{
-			"name": "Test Topic",
-			"preferences": map[string]interface{}{"source": "test"},
+			"name":          "Test Topic",
+			"preferences":   map[string]interface{}{"source": "test"},
 			"schedule_cron": "@daily",
 		}
 		b, _ := json.Marshal(payload)
@@ -169,7 +179,9 @@ func TestAuthTopicsRunsFlow(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+token)
 		res, err := client.Do(req)
-		if err != nil { t.Fatalf("create topic failed: %v", err) }
+		if err != nil {
+			t.Fatalf("create topic failed: %v", err)
+		}
 		defer res.Body.Close()
 		if res.StatusCode != http.StatusCreated {
 			t.Fatalf("expected 201 for create topic, got %d", res.StatusCode)
@@ -177,7 +189,9 @@ func TestAuthTopicsRunsFlow(t *testing.T) {
 		var resp map[string]string
 		_ = json.NewDecoder(res.Body).Decode(&resp)
 		topicID = resp["id"]
-		if topicID == "" { t.Fatalf("expected topic id") }
+		if topicID == "" {
+			t.Fatalf("expected topic id")
+		}
 	}
 
 	// list topics
@@ -185,9 +199,13 @@ func TestAuthTopicsRunsFlow(t *testing.T) {
 		req, _ := http.NewRequest("GET", srv.URL+"/api/topics", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		res, err := client.Do(req)
-		if err != nil { t.Fatalf("list topics failed: %v", err) }
+		if err != nil {
+			t.Fatalf("list topics failed: %v", err)
+		}
 		defer res.Body.Close()
-		if res.StatusCode != http.StatusOK { t.Fatalf("expected 200 list topics, got %d", res.StatusCode) }
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 list topics, got %d", res.StatusCode)
+		}
 	}
 
 	// trigger run (we only assert it is accepted and a run row is created)
@@ -195,9 +213,13 @@ func TestAuthTopicsRunsFlow(t *testing.T) {
 		req, _ := http.NewRequest("POST", fmt.Sprintf("%s/api/topics/%s/trigger", srv.URL, topicID), nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		res, err := client.Do(req)
-		if err != nil { t.Fatalf("trigger run failed: %v", err) }
+		if err != nil {
+			t.Fatalf("trigger run failed: %v", err)
+		}
 		defer res.Body.Close()
-		if res.StatusCode != http.StatusAccepted { t.Fatalf("expected 202 trigger, got %d", res.StatusCode) }
+		if res.StatusCode != http.StatusAccepted {
+			t.Fatalf("expected 202 trigger, got %d", res.StatusCode)
+		}
 	}
 
 	// poll runs list until we see at least one entry or timeout
@@ -206,12 +228,16 @@ func TestAuthTopicsRunsFlow(t *testing.T) {
 		req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/topics/%s/runs", srv.URL, topicID), nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		res, err := client.Do(req)
-		if err != nil { t.Fatalf("list runs failed: %v", err) }
+		if err != nil {
+			t.Fatalf("list runs failed: %v", err)
+		}
 		if res.StatusCode == http.StatusOK {
 			var arr []map[string]interface{}
 			_ = json.NewDecoder(res.Body).Decode(&arr)
 			res.Body.Close()
-			if len(arr) > 0 { break }
+			if len(arr) > 0 {
+				break
+			}
 		}
 		res.Body.Close()
 		if time.Now().After(deadline) {
@@ -228,7 +254,9 @@ func TestLatestResultAndUnauthorized(t *testing.T) {
 
 	os.Setenv("POSTGRES_HOST", "localhost")
 	port, err := pg.MappedPort(ctx, "5432")
-	if err != nil { t.Fatalf("map port: %v", err) }
+	if err != nil {
+		t.Fatalf("map port: %v", err)
+	}
 	os.Setenv("POSTGRES_PORT", port.Port())
 	os.Setenv("POSTGRES_USER", "newser")
 	os.Setenv("POSTGRES_PASSWORD", "newser")
@@ -243,7 +271,9 @@ func TestLatestResultAndUnauthorized(t *testing.T) {
 	{
 		req, _ := http.NewRequest("GET", srv.URL+"/api/topics", nil)
 		res, err := client.Do(req)
-		if err != nil { t.Fatalf("unauth list topics failed: %v", err) }
+		if err != nil {
+			t.Fatalf("unauth list topics failed: %v", err)
+		}
 		defer res.Body.Close()
 		if res.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("expected 401 for unauthorized topics, got %d", res.StatusCode)
@@ -255,12 +285,18 @@ func TestLatestResultAndUnauthorized(t *testing.T) {
 	{
 		b, _ := json.Marshal(map[string]string{"Email": "bob@example.com", "Password": "supersecret"})
 		res, err := client.Post(srv.URL+"/api/auth/signup", "application/json", bytes.NewReader(b))
-		if err != nil { t.Fatalf("signup: %v", err) }
+		if err != nil {
+			t.Fatalf("signup: %v", err)
+		}
 		res.Body.Close()
 		res, err = client.Post(srv.URL+"/api/auth/login", "application/json", bytes.NewReader(b))
-		if err != nil { t.Fatalf("login: %v", err) }
+		if err != nil {
+			t.Fatalf("login: %v", err)
+		}
 		defer res.Body.Close()
-		if res.StatusCode != http.StatusOK { t.Fatalf("expected 200 login, got %d", res.StatusCode) }
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 login, got %d", res.StatusCode)
+		}
 		var resp map[string]string
 		_ = json.NewDecoder(res.Body).Decode(&resp)
 		token = resp["token"]
@@ -275,7 +311,9 @@ func TestLatestResultAndUnauthorized(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+token)
 		res, err := client.Do(req)
-		if err != nil { t.Fatalf("create topic: %v", err) }
+		if err != nil {
+			t.Fatalf("create topic: %v", err)
+		}
 		defer res.Body.Close()
 		var j map[string]string
 		_ = json.NewDecoder(res.Body).Decode(&j)
@@ -288,13 +326,19 @@ func TestLatestResultAndUnauthorized(t *testing.T) {
 		req, _ := http.NewRequest("POST", fmt.Sprintf("%s/api/topics/%s/trigger", srv.URL, topicID), nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		res, err := client.Do(req)
-		if err != nil { t.Fatalf("trigger: %v", err) }
+		if err != nil {
+			t.Fatalf("trigger: %v", err)
+		}
 		defer res.Body.Close()
-		if res.StatusCode != http.StatusAccepted { t.Fatalf("expected 202, got %d", res.StatusCode) }
+		if res.StatusCode != http.StatusAccepted {
+			t.Fatalf("expected 202, got %d", res.StatusCode)
+		}
 		var j map[string]string
 		_ = json.NewDecoder(res.Body).Decode(&j)
 		runID = j["run_id"]
-		if runID == "" { t.Fatalf("missing run_id") }
+		if runID == "" {
+			t.Fatalf("missing run_id")
+		}
 	}
 
 	// Ensure scheduler lock code path can be exercised: mock minimal Redis with no-op by leaving REDIS unset here
@@ -302,7 +346,9 @@ func TestLatestResultAndUnauthorized(t *testing.T) {
 	// upsert a minimal processing result for that run
 	{
 		pr := core.ProcessingResult{ID: runID, Summary: "ok", DetailedReport: "ok", Confidence: 0.9}
-		if err := st.UpsertProcessingResult(ctx, pr); err != nil { t.Fatalf("upsert pr: %v", err) }
+		if err := st.UpsertProcessingResult(ctx, pr); err != nil {
+			t.Fatalf("upsert pr: %v", err)
+		}
 	}
 
 	// fetch latest_result
@@ -310,10 +356,12 @@ func TestLatestResultAndUnauthorized(t *testing.T) {
 		req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/topics/%s/latest_result", srv.URL, topicID), nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		res, err := client.Do(req)
-		if err != nil { t.Fatalf("latest_result: %v", err) }
+		if err != nil {
+			t.Fatalf("latest_result: %v", err)
+		}
 		defer res.Body.Close()
-		if res.StatusCode != http.StatusOK { t.Fatalf("expected 200 latest_result, got %d", res.StatusCode) }
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 latest_result, got %d", res.StatusCode)
+		}
 	}
 }
-
-

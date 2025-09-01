@@ -8,27 +8,27 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mohammad-safakhou/newser/internal/agent/config"
+	"github.com/mohammad-safakhou/newser/config"
 	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
 )
 
 // Orchestrator coordinates all agents and manages the processing pipeline
 type Orchestrator struct {
-	config     *config.Config
-	logger     *log.Logger
-	telemetry  *telemetry.Telemetry
-	
+	config    *config.Config
+	logger    *log.Logger
+	telemetry *telemetry.Telemetry
+
 	// Core components
 	planner     *Planner
 	agents      map[string]Agent
 	llmProvider LLMProvider
 	sources     []SourceProvider
 	storage     Storage
-	
+
 	// Processing state
 	processing map[string]*ProcessingStatus
 	mu         sync.RWMutex
-	
+
 	// Concurrency control
 	semaphore chan struct{}
 }
@@ -60,16 +60,16 @@ func NewOrchestrator(cfg *config.Config, logger *log.Logger, telemetry *telemetr
 	}
 
 	o := &Orchestrator{
-		config:     cfg,
-		logger:     logger,
-		telemetry:  telemetry,
-		planner:    planner,
-		agents:     agents,
+		config:      cfg,
+		logger:      logger,
+		telemetry:   telemetry,
+		planner:     planner,
+		agents:      agents,
 		llmProvider: llmProvider,
-		sources:    sources,
-		storage:    storage,
-		processing: make(map[string]*ProcessingStatus),
-		semaphore:  make(chan struct{}, cfg.Agents.MaxConcurrentAgents),
+		sources:     sources,
+		storage:     storage,
+		processing:  make(map[string]*ProcessingStatus),
+		semaphore:   make(chan struct{}, cfg.Agents.MaxConcurrentAgents),
 	}
 
 	return o, nil
@@ -78,12 +78,12 @@ func NewOrchestrator(cfg *config.Config, logger *log.Logger, telemetry *telemetr
 // ProcessThought processes a user thought and returns comprehensive results
 func (o *Orchestrator) ProcessThought(ctx context.Context, thought UserThought) (ProcessingResult, error) {
 	startTime := time.Now()
-	
+
 	// Generate unique ID if not provided
 	if thought.ID == "" {
 		thought.ID = uuid.New().String()
 	}
-	
+
 	// Initialize processing status
 	status := &ProcessingStatus{
 		ThoughtID:   thought.ID,
@@ -92,11 +92,11 @@ func (o *Orchestrator) ProcessThought(ctx context.Context, thought UserThought) 
 		CreatedAt:   time.Now(),
 		LastUpdated: time.Now(),
 	}
-	
+
 	o.mu.Lock()
 	o.processing[thought.ID] = status
 	o.mu.Unlock()
-	
+
 	defer func() {
 		o.mu.Lock()
 		delete(o.processing, thought.ID)
@@ -113,9 +113,9 @@ func (o *Orchestrator) ProcessThought(ctx context.Context, thought UserThought) 
 
 	// Record processing event
 	processingEvent := telemetry.ProcessingEvent{
-		ID:         thought.ID,
+		ID:          thought.ID,
 		UserThought: thought.Content,
-		StartTime:  startTime,
+		StartTime:   startTime,
 	}
 
 	defer func() {
@@ -183,7 +183,7 @@ func (o *Orchestrator) ProcessThought(ctx context.Context, thought UserThought) 
 func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, plan PlanningResult, status *ProcessingStatus) ([]AgentResult, error) {
 	var results []AgentResult
 	var mu sync.Mutex
-	
+
 	// Create a map for quick task lookup
 	taskMap := make(map[string]AgentTask)
 	for _, task := range plan.Tasks {
@@ -192,7 +192,7 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 
 	// Execute tasks in dependency order
 	executed := make(map[string]bool)
-	
+
 	for len(executed) < len(plan.Tasks) {
 		// Find tasks that are ready to execute (all dependencies satisfied)
 		var readyTasks []AgentTask
@@ -200,7 +200,7 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 			if executed[task.ID] {
 				continue
 			}
-			
+
 			// Check if all dependencies are satisfied
 			ready := true
 			for _, depID := range task.DependsOn {
@@ -209,7 +209,7 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 					break
 				}
 			}
-			
+
 			if ready {
 				readyTasks = append(readyTasks, task)
 			}
@@ -227,7 +227,7 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 			wg.Add(1)
 			go func(t AgentTask) {
 				defer wg.Done()
-				
+
 				// Find the appropriate agent for this task
 				agent := o.findBestAgent(t)
 				if agent == nil {
@@ -244,17 +244,17 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 
 				// Record agent event
 				agentEvent := telemetry.AgentEvent{
-					ID:           result.ID,
-					AgentType:    result.AgentType,
-					StartTime:    result.CreatedAt,
-					EndTime:      result.CreatedAt.Add(result.ProcessingTime),
-					Duration:     result.ProcessingTime,
-					Success:      result.Success,
-					Error:        result.Error,
-					Cost:         result.Cost,
-					TokensUsed:   result.TokensUsed,
-					ModelUsed:    result.ModelUsed,
-					Confidence:   result.Confidence,
+					ID:         result.ID,
+					AgentType:  result.AgentType,
+					StartTime:  result.CreatedAt,
+					EndTime:    result.CreatedAt.Add(result.ProcessingTime),
+					Duration:   result.ProcessingTime,
+					Success:    result.Success,
+					Error:      result.Error,
+					Cost:       result.Cost,
+					TokensUsed: result.TokensUsed,
+					ModelUsed:  result.ModelUsed,
+					Confidence: result.Confidence,
 				}
 				o.telemetry.RecordAgentEvent(ctx, agentEvent)
 
@@ -303,16 +303,16 @@ func (o *Orchestrator) synthesizeResults(ctx context.Context, thought UserThough
 	for _, result := range results {
 		// Collect sources
 		allSources = append(allSources, result.Sources...)
-		
+
 		// Collect data
 		for k, v := range result.Data {
 			allData[k] = v
 		}
-		
+
 		// Track costs and tokens
 		totalCost += result.Cost
 		totalTokens += result.TokensUsed
-		
+
 		// Track agents and models
 		if !agentSet[result.AgentType] {
 			agentsUsed = append(agentsUsed, result.AgentType)
@@ -387,7 +387,9 @@ func (o *Orchestrator) synthesizeResults(ctx context.Context, thought UserThough
 		CreatedAt:      time.Now(),
 	}
 	if len(kgNodes) > 0 || len(kgEdges) > 0 {
-		if result.Metadata == nil { result.Metadata = make(map[string]interface{}) }
+		if result.Metadata == nil {
+			result.Metadata = make(map[string]interface{})
+		}
 		result.Metadata["knowledge_graph"] = map[string]interface{}{
 			"nodes": kgNodes,
 			"edges": kgEdges,
@@ -417,7 +419,7 @@ func (o *Orchestrator) findBestAgent(task AgentTask) Agent {
 func (o *Orchestrator) updateStatus(status *ProcessingStatus, newStatus string, progress float64, currentTask string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	
+
 	status.Status = newStatus
 	status.Progress = progress
 	status.CurrentTask = currentTask
@@ -428,12 +430,12 @@ func (o *Orchestrator) updateStatus(status *ProcessingStatus, newStatus string, 
 func (o *Orchestrator) GetStatus(thoughtID string) (ProcessingStatus, error) {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-	
+
 	status, exists := o.processing[thoughtID]
 	if !exists {
 		return ProcessingStatus{}, fmt.Errorf("thought not found: %s", thoughtID)
 	}
-	
+
 	return *status, nil
 }
 
@@ -441,15 +443,15 @@ func (o *Orchestrator) GetStatus(thoughtID string) (ProcessingStatus, error) {
 func (o *Orchestrator) CancelProcessing(thoughtID string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	
+
 	status, exists := o.processing[thoughtID]
 	if !exists {
 		return fmt.Errorf("thought not found: %s", thoughtID)
 	}
-	
+
 	status.Status = "cancelled"
 	status.LastUpdated = time.Now()
-	
+
 	return nil
 }
 
@@ -457,7 +459,7 @@ func (o *Orchestrator) CancelProcessing(thoughtID string) error {
 func (o *Orchestrator) GetPerformanceMetrics() map[string]interface{} {
 	metrics := o.telemetry.GetMetrics()
 	costs := o.telemetry.GetCostSummary()
-	
+
 	return map[string]interface{}{
 		"metrics": metrics,
 		"costs":   costs,

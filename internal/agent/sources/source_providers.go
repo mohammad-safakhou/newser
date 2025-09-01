@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mohammad-safakhou/newser/internal/agent/config"
+	"github.com/mohammad-safakhou/newser/config"
 )
 
 // Source represents a source of information
@@ -15,7 +15,7 @@ type Source struct {
 	ID          string    `json:"id"`
 	Title       string    `json:"title"`
 	URL         string    `json:"url"`
-	Type        string    `json:"type"` // news, web, social, academic, etc.
+	Type        string    `json:"type"`        // news, web, social, academic, etc.
 	Credibility float64   `json:"credibility"` // 0.0 to 1.0
 	PublishedAt time.Time `json:"published_at"`
 	ExtractedAt time.Time `json:"extracted_at"`
@@ -41,10 +41,10 @@ func NewNewsAPIProvider(cfg config.NewsAPIConfig) *NewsAPIProvider {
 // Search searches for news articles
 func (n *NewsAPIProvider) Search(ctx context.Context, query string, options map[string]interface{}) ([]Source, error) {
 	n.logger.Printf("Searching NewsAPI for: %s", query)
-	
+
 	// This is a placeholder implementation
 	// In a real implementation, this would make actual API calls to NewsAPI
-	
+
 	sources := []Source{
 		{
 			ID:          uuid.New().String(),
@@ -71,7 +71,7 @@ func (n *NewsAPIProvider) Search(ctx context.Context, query string, options map[
 			Tags:        []string{"breaking", "urgent"},
 		},
 	}
-	
+
 	return sources, nil
 }
 
@@ -109,10 +109,10 @@ func NewBraveSearchProvider(cfg config.WebSearchConfig) *BraveSearchProvider {
 // Search searches for web content using Brave
 func (b *BraveSearchProvider) Search(ctx context.Context, query string, options map[string]interface{}) ([]Source, error) {
 	b.logger.Printf("Searching Brave for: %s", query)
-	
+
 	// This is a placeholder implementation
 	// In a real implementation, this would make actual API calls to Brave Search
-	
+
 	sources := []Source{
 		{
 			ID:          uuid.New().String(),
@@ -139,7 +139,7 @@ func (b *BraveSearchProvider) Search(ctx context.Context, query string, options 
 			Tags:        []string{"blog", "opinion"},
 		},
 	}
-	
+
 	return sources, nil
 }
 
@@ -177,10 +177,10 @@ func NewSerperSearchProvider(cfg config.WebSearchConfig) *SerperSearchProvider {
 // Search searches for web content using Serper
 func (s *SerperSearchProvider) Search(ctx context.Context, query string, options map[string]interface{}) ([]Source, error) {
 	s.logger.Printf("Searching Serper for: %s", query)
-	
+
 	// This is a placeholder implementation
 	// In a real implementation, this would make actual API calls to Serper
-	
+
 	sources := []Source{
 		{
 			ID:          uuid.New().String(),
@@ -195,7 +195,7 @@ func (s *SerperSearchProvider) Search(ctx context.Context, query string, options
 			Tags:        []string{"web", "search", "serper"},
 		},
 	}
-	
+
 	return sources, nil
 }
 
@@ -233,10 +233,10 @@ func NewSocialMediaProvider(cfg config.SocialMediaConfig) *SocialMediaProvider {
 // Search searches for social media content
 func (s *SocialMediaProvider) Search(ctx context.Context, query string, options map[string]interface{}) ([]Source, error) {
 	s.logger.Printf("Searching social media for: %s", query)
-	
+
 	// This is a placeholder implementation
 	// In a real implementation, this would search Twitter, Reddit, etc.
-	
+
 	sources := []Source{
 		{
 			ID:          uuid.New().String(),
@@ -263,7 +263,7 @@ func (s *SocialMediaProvider) Search(ctx context.Context, query string, options 
 			Tags:        []string{"social", "reddit", "discussion"},
 		},
 	}
-	
+
 	return sources, nil
 }
 
@@ -301,10 +301,10 @@ func NewAcademicProvider(cfg config.AcademicConfig) *AcademicProvider {
 // Search searches for academic papers
 func (a *AcademicProvider) Search(ctx context.Context, query string, options map[string]interface{}) ([]Source, error) {
 	a.logger.Printf("Searching academic papers for: %s", query)
-	
+
 	// This is a placeholder implementation
 	// In a real implementation, this would search arXiv, PubMed, etc.
-	
+
 	sources := []Source{
 		{
 			ID:          uuid.New().String(),
@@ -319,7 +319,7 @@ func (a *AcademicProvider) Search(ctx context.Context, query string, options map
 			Tags:        []string{"academic", "research", "paper"},
 		},
 	}
-	
+
 	return sources, nil
 }
 

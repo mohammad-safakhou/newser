@@ -7,39 +7,39 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mohammad-safakhou/newser/internal/agent/config"
+	"github.com/mohammad-safakhou/newser/config"
 )
 
 // Telemetry provides comprehensive monitoring and cost tracking
 type Telemetry struct {
-	config     config.TelemetryConfig
-	logger     *log.Logger
-	metrics    *Metrics
+	config      config.TelemetryConfig
+	logger      *log.Logger
+	metrics     *Metrics
 	costTracker *CostTracker
-	mu         sync.RWMutex
+	mu          sync.RWMutex
 }
 
 // Metrics holds various performance metrics
 type Metrics struct {
 	mu sync.RWMutex
 	// Processing metrics
-	TotalRequests     int64
-	SuccessfulRequests int64
-	FailedRequests    int64
+	TotalRequests         int64
+	SuccessfulRequests    int64
+	FailedRequests        int64
 	AverageProcessingTime time.Duration
-	
+
 	// Agent metrics
-	AgentExecutions    map[string]int64
-	AgentSuccessRates  map[string]float64
-	AgentAverageTimes  map[string]time.Duration
-	
+	AgentExecutions   map[string]int64
+	AgentSuccessRates map[string]float64
+	AgentAverageTimes map[string]time.Duration
+
 	// LLM metrics
 	LLMRequests       map[string]int64
 	LLMTokensUsed     map[string]int64
 	LLMAverageLatency map[string]time.Duration
-	
+
 	// Source metrics
-	SourceRequests    map[string]int64
+	SourceRequests     map[string]int64
 	SourceSuccessRates map[string]float64
 	SourceAverageTimes map[string]time.Duration
 }
@@ -49,47 +49,47 @@ type CostTracker struct {
 	mu sync.RWMutex
 	// Daily costs
 	DailyCosts map[string]float64 // provider -> cost
-	
+
 	// Operation costs
 	OperationCosts map[string]float64 // operation -> cost
-	
+
 	// Model costs
 	ModelCosts map[string]float64 // model -> cost
-	
+
 	// Total costs
-	TotalCost float64
+	TotalCost   float64
 	TotalTokens int64
 }
 
 // ProcessingEvent represents a single processing event
 type ProcessingEvent struct {
-	ID              string
-	UserThought     string
-	StartTime       time.Time
-	EndTime         time.Time
-	ProcessingTime  time.Duration
-	Success         bool
-	Error           string
-	Cost            float64
-	TokensUsed      int64
-	AgentsUsed      []string
-	SourcesUsed     []string
-	LLMModelsUsed   []string
+	ID             string
+	UserThought    string
+	StartTime      time.Time
+	EndTime        time.Time
+	ProcessingTime time.Duration
+	Success        bool
+	Error          string
+	Cost           float64
+	TokensUsed     int64
+	AgentsUsed     []string
+	SourcesUsed    []string
+	LLMModelsUsed  []string
 }
 
 // AgentEvent represents an agent execution event
 type AgentEvent struct {
-	ID           string
-	AgentType    string
-	StartTime    time.Time
-	EndTime      time.Time
-	Duration     time.Duration
-	Success      bool
-	Error        string
-	Cost         float64
-	TokensUsed   int64
-	ModelUsed    string
-	Confidence   float64
+	ID         string
+	AgentType  string
+	StartTime  time.Time
+	EndTime    time.Time
+	Duration   time.Duration
+	Success    bool
+	Error      string
+	Cost       float64
+	TokensUsed int64
+	ModelUsed  string
+	Confidence float64
 }
 
 // SourceEvent represents a source access event
@@ -197,7 +197,7 @@ func (t *Telemetry) RecordAgentEvent(ctx context.Context, event AgentEvent) {
 
 	// Update agent metrics
 	t.metrics.AgentExecutions[event.AgentType]++
-	
+
 	// Update success rate
 	currentSuccess := t.metrics.AgentSuccessRates[event.AgentType]
 	currentExecutions := t.metrics.AgentExecutions[event.AgentType]
@@ -239,7 +239,7 @@ func (t *Telemetry) RecordSourceEvent(ctx context.Context, event SourceEvent) {
 
 	// Update source metrics
 	t.metrics.SourceRequests[event.Source]++
-	
+
 	// Update success rate
 	currentSuccess := t.metrics.SourceSuccessRates[event.Source]
 	currentRequests := t.metrics.SourceRequests[event.Source]
@@ -315,10 +315,10 @@ func (t *Telemetry) GetCostSummary() CostSummary {
 	defer t.mu.RUnlock()
 
 	summary := CostSummary{
-		TotalCost:    t.costTracker.TotalCost,
-		TotalTokens:  t.costTracker.TotalTokens,
-		DailyCosts:   make(map[string]float64),
-		ModelCosts:   make(map[string]float64),
+		TotalCost:      t.costTracker.TotalCost,
+		TotalTokens:    t.costTracker.TotalTokens,
+		DailyCosts:     make(map[string]float64),
+		ModelCosts:     make(map[string]float64),
 		OperationCosts: make(map[string]float64),
 	}
 
@@ -366,14 +366,14 @@ func (t *Telemetry) startCostReporting() {
 
 	for range ticker.C {
 		costs := t.GetCostSummary()
-		
+
 		t.logger.Printf("Cost Report: Total=$%.4f, Tokens=%d", costs.TotalCost, costs.TotalTokens)
-		
+
 		// Log model costs
 		for model, cost := range costs.ModelCosts {
 			t.logger.Printf("  Model %s: $%.4f", model, cost)
 		}
-		
+
 		// Log operation costs
 		for op, cost := range costs.OperationCosts {
 			t.logger.Printf("  Operation %s: $%.4f", op, cost)
@@ -384,11 +384,11 @@ func (t *Telemetry) startCostReporting() {
 // Shutdown gracefully shuts down the telemetry system
 func (t *Telemetry) Shutdown() {
 	t.logger.Println("Shutting down telemetry system...")
-	
+
 	// Final metrics report
 	metrics := t.GetMetrics()
 	costs := t.GetCostSummary()
-	
+
 	t.logger.Printf("Final Report:")
 	t.logger.Printf("  Total Requests: %d", metrics.TotalRequests)
 	t.logger.Printf("  Success Rate: %.2f%%", float64(metrics.SuccessfulRequests)/float64(metrics.TotalRequests)*100)
@@ -420,10 +420,10 @@ Overall Metrics:
   Total Tokens: %d
 
 Agent Performance:
-`, metrics.TotalRequests, metrics.SuccessfulRequests, 
-   float64(metrics.SuccessfulRequests)/float64(metrics.TotalRequests)*100,
-   metrics.FailedRequests, float64(metrics.FailedRequests)/float64(metrics.TotalRequests)*100,
-   metrics.AverageProcessingTime, costs.TotalCost, costs.TotalTokens)
+`, metrics.TotalRequests, metrics.SuccessfulRequests,
+		float64(metrics.SuccessfulRequests)/float64(metrics.TotalRequests)*100,
+		metrics.FailedRequests, float64(metrics.FailedRequests)/float64(metrics.TotalRequests)*100,
+		metrics.AverageProcessingTime, costs.TotalCost, costs.TotalTokens)
 
 	for agent, executions := range metrics.AgentExecutions {
 		successRate := metrics.AgentSuccessRates[agent]

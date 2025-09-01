@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mohammad-safakhou/newser/internal/agent/config"
+	"github.com/mohammad-safakhou/newser/config"
 	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
 )
 

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
-	"github.com/mohammad-safakhou/newser/internal/agent/config"
+	"github.com/mohammad-safakhou/newser/config"
 	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
 )
 
@@ -72,18 +72,18 @@ func NewAgents(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetry
 
 // NewSourceProviders creates all available source providers
 func NewSourceProviders(cfg config.SourcesConfig) ([]SourceProvider, error) {
-    httpc := NewHTTPClient(15*time.Second, 2, 300*time.Millisecond)
-    var providers []SourceProvider
-    if cfg.NewsAPI.APIKey != "" {
-        providers = append(providers, &NewsAPIClient{ cfg: cfg.NewsAPI, http: httpc })
-    }
-    if cfg.WebSearch.BraveAPIKey != "" {
-        providers = append(providers, &BraveClient{ cfg: cfg.WebSearch, http: httpc })
-    }
-    if cfg.WebSearch.SerperAPIKey != "" {
-        providers = append(providers, &SerperClient{ cfg: cfg.WebSearch, http: httpc })
-    }
-    return providers, nil
+	httpc := NewHTTPClient(15*time.Second, 2, 300*time.Millisecond)
+	var providers []SourceProvider
+	if cfg.NewsAPI.APIKey != "" {
+		providers = append(providers, &NewsAPIClient{cfg: cfg.NewsAPI, http: httpc})
+	}
+	if cfg.WebSearch.BraveAPIKey != "" {
+		providers = append(providers, &BraveClient{cfg: cfg.WebSearch, http: httpc})
+	}
+	if cfg.WebSearch.SerperAPIKey != "" {
+		providers = append(providers, &SerperClient{cfg: cfg.WebSearch, http: httpc})
+	}
+	return providers, nil
 }
 
 // NewStorage creates a new storage instance
@@ -115,7 +115,7 @@ func NewOpenAIProvider(cfg config.LLMProvider) *OpenAIProvider {
 		config:    cfg,
 		models:    make(map[string]ModelInfo),
 		rawModels: cfg.Models,
-		client:   &http.Client{Timeout: cfg.Timeout},
+		client:    &http.Client{Timeout: cfg.Timeout},
 	}
 
 	// Initialize model information
@@ -174,10 +174,10 @@ func (p *OpenAIProvider) GenerateWithTokens(ctx context.Context, prompt string, 
 		Content string `json:"content"`
 	}
 	type chatReq struct {
-		Model       string   `json:"model"`
+		Model       string    `json:"model"`
 		Messages    []chatMsg `json:"messages"`
-		Temperature float64  `json:"temperature,omitempty"`
-		MaxTokens   int      `json:"max_tokens,omitempty"`
+		Temperature float64   `json:"temperature,omitempty"`
+		MaxTokens   int       `json:"max_tokens,omitempty"`
 	}
 
 	body, err := json.Marshal(chatReq{
@@ -412,33 +412,45 @@ func (s *RedisStorage) DeleteHighlight(ctx context.Context, highlightID string) 
 
 // PostgresStorage implements Storage using PostgreSQL
 type PostgresStorage struct {
-    db *sql.DB
+	db *sql.DB
 }
 
 func NewPostgresStorage(cfg config.PostgresConfig) (*PostgresStorage, error) {
-    dsn := cfg.URL
-    if dsn == "" {
-        host := cfg.Host
-        port := cfg.Port
-        user := cfg.User
-        pass := cfg.Password
-        dbname := cfg.DBName
-        ssl := cfg.SSLMode
-        if host == "" { host = "localhost" }
-        if port == 0 { port = 5432 }
-        if ssl == "" { ssl = "disable" }
-        dsn = fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s", user, pass, host, port, dbname, ssl)
-    }
-    db, err := sql.Open("postgres", dsn)
-    if err != nil { return nil, err }
-    if err := db.Ping(); err != nil { return nil, err }
-    ps := &PostgresStorage{ db: db }
-    if err := ps.ensureSchema(); err != nil { return nil, err }
-    return ps, nil
+	dsn := cfg.URL
+	if dsn == "" {
+		host := cfg.Host
+		port := cfg.Port
+		user := cfg.User
+		pass := cfg.Password
+		dbname := cfg.DBName
+		ssl := cfg.SSLMode
+		if host == "" {
+			host = "localhost"
+		}
+		if port == "" {
+			port = "5432"
+		}
+		if ssl == "" {
+			ssl = "disable"
+		}
+		dsn = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, dbname, ssl)
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(); err != nil {
+		return nil, err
+	}
+	ps := &PostgresStorage{db: db}
+	if err := ps.ensureSchema(); err != nil {
+		return nil, err
+	}
+	return ps, nil
 }
 
 func (s *PostgresStorage) ensureSchema() error {
-    _, err := s.db.Exec(`
+	_, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS processing_results (
     id TEXT PRIMARY KEY,
     user_thought JSONB NOT NULL,
@@ -457,20 +469,20 @@ CREATE TABLE IF NOT EXISTS processing_results (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 `)
-    return err
+	return err
 }
 
 func (s *PostgresStorage) SaveProcessingResult(ctx context.Context, result ProcessingResult) error {
-    toJSON := func(v interface{}) ([]byte, error) { return json.Marshal(v) }
-    userThought, _ := toJSON(result.UserThought)
-    sources, _ := toJSON(result.Sources)
-    highlights, _ := toJSON(result.Highlights)
-    conflicts, _ := toJSON(result.Conflicts)
-    agents, _ := toJSON(result.AgentsUsed)
-    models, _ := toJSON(result.LLMModelsUsed)
-    metadata, _ := toJSON(result.Metadata)
+	toJSON := func(v interface{}) ([]byte, error) { return json.Marshal(v) }
+	userThought, _ := toJSON(result.UserThought)
+	sources, _ := toJSON(result.Sources)
+	highlights, _ := toJSON(result.Highlights)
+	conflicts, _ := toJSON(result.Conflicts)
+	agents, _ := toJSON(result.AgentsUsed)
+	models, _ := toJSON(result.LLMModelsUsed)
+	metadata, _ := toJSON(result.Metadata)
 
-    _, err := s.db.ExecContext(ctx, `
+	_, err := s.db.ExecContext(ctx, `
 INSERT INTO processing_results (
   id, user_thought, summary, detailed_report, sources, highlights, conflicts,
   confidence, processing_time, cost_estimate, tokens_used, agents_used, llm_models_used, metadata, created_at
@@ -493,82 +505,99 @@ ON CONFLICT (id) DO UPDATE SET
   llm_models_used = EXCLUDED.llm_models_used,
   metadata = EXCLUDED.metadata;
 `,
-        result.ID, userThought, result.Summary, result.DetailedReport, sources, highlights, conflicts,
-        result.Confidence, int64(result.ProcessingTime), result.CostEstimate, result.TokensUsed, agents, models, metadata,
-    )
-    return err
+		result.ID, userThought, result.Summary, result.DetailedReport, sources, highlights, conflicts,
+		result.Confidence, int64(result.ProcessingTime), result.CostEstimate, result.TokensUsed, agents, models, metadata,
+	)
+	return err
 }
 
 func (s *PostgresStorage) GetProcessingResult(ctx context.Context, thoughtID string) (ProcessingResult, error) {
-    row := s.db.QueryRowContext(ctx, `SELECT user_thought, summary, detailed_report, sources, highlights, conflicts,
+	row := s.db.QueryRowContext(ctx, `SELECT user_thought, summary, detailed_report, sources, highlights, conflicts,
         confidence, processing_time, cost_estimate, tokens_used, agents_used, llm_models_used, metadata, created_at
         FROM processing_results WHERE id = $1`, thoughtID)
 
-    var (
-        userThoughtB, sourcesB, highlightsB, conflictsB, agentsB, modelsB, metadataB []byte
-        res ProcessingResult
-        processingTime int64
-    )
-    res.ID = thoughtID
-    if err := row.Scan(&userThoughtB, &res.Summary, &res.DetailedReport, &sourcesB, &highlightsB, &conflictsB,
-        &res.Confidence, &processingTime, &res.CostEstimate, &res.TokensUsed, &agentsB, &modelsB, &metadataB, &res.CreatedAt); err != nil {
-        return ProcessingResult{}, err
-    }
-    _ = json.Unmarshal(userThoughtB, &res.UserThought)
-    _ = json.Unmarshal(sourcesB, &res.Sources)
-    _ = json.Unmarshal(highlightsB, &res.Highlights)
-    _ = json.Unmarshal(conflictsB, &res.Conflicts)
-    _ = json.Unmarshal(agentsB, &res.AgentsUsed)
-    _ = json.Unmarshal(modelsB, &res.LLMModelsUsed)
-    if len(metadataB) > 0 { _ = json.Unmarshal(metadataB, &res.Metadata) }
-    res.ProcessingTime = time.Duration(processingTime)
-    return res, nil
+	var (
+		userThoughtB, sourcesB, highlightsB, conflictsB, agentsB, modelsB, metadataB []byte
+		res                                                                          ProcessingResult
+		processingTime                                                               int64
+	)
+	res.ID = thoughtID
+	if err := row.Scan(&userThoughtB, &res.Summary, &res.DetailedReport, &sourcesB, &highlightsB, &conflictsB,
+		&res.Confidence, &processingTime, &res.CostEstimate, &res.TokensUsed, &agentsB, &modelsB, &metadataB, &res.CreatedAt); err != nil {
+		return ProcessingResult{}, err
+	}
+	_ = json.Unmarshal(userThoughtB, &res.UserThought)
+	_ = json.Unmarshal(sourcesB, &res.Sources)
+	_ = json.Unmarshal(highlightsB, &res.Highlights)
+	_ = json.Unmarshal(conflictsB, &res.Conflicts)
+	_ = json.Unmarshal(agentsB, &res.AgentsUsed)
+	_ = json.Unmarshal(modelsB, &res.LLMModelsUsed)
+	if len(metadataB) > 0 {
+		_ = json.Unmarshal(metadataB, &res.Metadata)
+	}
+	res.ProcessingTime = time.Duration(processingTime)
+	return res, nil
 }
 
 func (s *PostgresStorage) GetKnowledgeGraph(ctx context.Context, topic string) (KnowledgeGraph, error) {
-    var nodesB, edgesB, metaB []byte
-    var kg KnowledgeGraph
-    err := s.db.QueryRowContext(ctx, `SELECT id, nodes, edges, metadata, last_updated FROM knowledge_graphs WHERE topic=$1 ORDER BY last_updated DESC LIMIT 1`, topic).Scan(&kg.ID, &nodesB, &edgesB, &metaB, &kg.LastUpdated)
-    if err != nil { return KnowledgeGraph{}, err }
-    kg.Topic = topic
-    _ = json.Unmarshal(nodesB, &kg.Nodes)
-    _ = json.Unmarshal(edgesB, &kg.Edges)
-    if len(metaB) > 0 { _ = json.Unmarshal(metaB, &kg.Metadata) }
-    return kg, nil
+	var nodesB, edgesB, metaB []byte
+	var kg KnowledgeGraph
+	err := s.db.QueryRowContext(ctx, `SELECT id, nodes, edges, metadata, last_updated FROM knowledge_graphs WHERE topic=$1 ORDER BY last_updated DESC LIMIT 1`, topic).Scan(&kg.ID, &nodesB, &edgesB, &metaB, &kg.LastUpdated)
+	if err != nil {
+		return KnowledgeGraph{}, err
+	}
+	kg.Topic = topic
+	_ = json.Unmarshal(nodesB, &kg.Nodes)
+	_ = json.Unmarshal(edgesB, &kg.Edges)
+	if len(metaB) > 0 {
+		_ = json.Unmarshal(metaB, &kg.Metadata)
+	}
+	return kg, nil
 }
 func (s *PostgresStorage) SaveKnowledgeGraph(ctx context.Context, graph KnowledgeGraph) error {
-    nodesB, _ := json.Marshal(graph.Nodes)
-    edgesB, _ := json.Marshal(graph.Edges)
-    metaB, _ := json.Marshal(graph.Metadata)
-    _, err := s.db.ExecContext(ctx, `INSERT INTO knowledge_graphs (id, topic, nodes, edges, metadata, last_updated) VALUES ($1,$2,$3,$4,$5,NOW()) ON CONFLICT (id) DO UPDATE SET nodes=EXCLUDED.nodes, edges=EXCLUDED.edges, metadata=EXCLUDED.metadata, last_updated=NOW()`, graph.ID, graph.Topic, nodesB, edgesB, metaB)
-    return err
+	nodesB, _ := json.Marshal(graph.Nodes)
+	edgesB, _ := json.Marshal(graph.Edges)
+	metaB, _ := json.Marshal(graph.Metadata)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO knowledge_graphs (id, topic, nodes, edges, metadata, last_updated) VALUES ($1,$2,$3,$4,$5,NOW()) ON CONFLICT (id) DO UPDATE SET nodes=EXCLUDED.nodes, edges=EXCLUDED.edges, metadata=EXCLUDED.metadata, last_updated=NOW()`, graph.ID, graph.Topic, nodesB, edgesB, metaB)
+	return err
 }
 func (s *PostgresStorage) SaveHighlight(ctx context.Context, h Highlight) error {
-    sourcesB, _ := json.Marshal(h.Sources)
-    _, err := s.db.ExecContext(ctx, `INSERT INTO highlights (id, topic, title, content, type, priority, sources, is_pinned, created_at, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,NOW()),$10) ON CONFLICT (id) DO UPDATE SET title=EXCLUDED.title, content=EXCLUDED.content, type=EXCLUDED.type, priority=EXCLUDED.priority, sources=EXCLUDED.sources, is_pinned=EXCLUDED.is_pinned, expires_at=EXCLUDED.expires_at`, h.ID, graphTopicFromSources(h.Sources), h.Title, h.Content, h.Type, h.Priority, sourcesB, h.IsPinned, h.CreatedAt, h.ExpiresAt)
-    return err
+	sourcesB, _ := json.Marshal(h.Sources)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO highlights (id, topic, title, content, type, priority, sources, is_pinned, created_at, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,NOW()),$10) ON CONFLICT (id) DO UPDATE SET title=EXCLUDED.title, content=EXCLUDED.content, type=EXCLUDED.type, priority=EXCLUDED.priority, sources=EXCLUDED.sources, is_pinned=EXCLUDED.is_pinned, expires_at=EXCLUDED.expires_at`, h.ID, graphTopicFromSources(h.Sources), h.Title, h.Content, h.Type, h.Priority, sourcesB, h.IsPinned, h.CreatedAt, h.ExpiresAt)
+	return err
 }
 func (s *PostgresStorage) GetHighlights(ctx context.Context, topic string) ([]Highlight, error) {
-    rows, err := s.db.QueryContext(ctx, `SELECT id, title, content, type, priority, sources, is_pinned, created_at, expires_at FROM highlights WHERE topic=$1 ORDER BY created_at DESC`, topic)
-    if err != nil { return nil, err }
-    defer rows.Close()
-    var out []Highlight
-    for rows.Next() {
-        var h Highlight
-        var sourcesB []byte
-        if err := rows.Scan(&h.ID, &h.Title, &h.Content, &h.Type, &h.Priority, &sourcesB, &h.IsPinned, &h.CreatedAt, &h.ExpiresAt); err != nil { return nil, err }
-        _ = json.Unmarshal(sourcesB, &h.Sources)
-        out = append(out, h)
-    }
-    return out, rows.Err()
+	rows, err := s.db.QueryContext(ctx, `SELECT id, title, content, type, priority, sources, is_pinned, created_at, expires_at FROM highlights WHERE topic=$1 ORDER BY created_at DESC`, topic)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Highlight
+	for rows.Next() {
+		var h Highlight
+		var sourcesB []byte
+		if err := rows.Scan(&h.ID, &h.Title, &h.Content, &h.Type, &h.Priority, &sourcesB, &h.IsPinned, &h.CreatedAt, &h.ExpiresAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(sourcesB, &h.Sources)
+		out = append(out, h)
+	}
+	return out, rows.Err()
 }
-func (s *PostgresStorage) UpdateHighlight(ctx context.Context, h Highlight) error { return s.SaveHighlight(ctx, h) }
+func (s *PostgresStorage) UpdateHighlight(ctx context.Context, h Highlight) error {
+	return s.SaveHighlight(ctx, h)
+}
 func (s *PostgresStorage) DeleteHighlight(ctx context.Context, highlightID string) error {
-    _, err := s.db.ExecContext(ctx, `DELETE FROM highlights WHERE id=$1`, highlightID)
-    return err
+	_, err := s.db.ExecContext(ctx, `DELETE FROM highlights WHERE id=$1`, highlightID)
+	return err
 }
 
-func graphTopicFromSources(srcs []string) string { if len(srcs) > 0 { return srcs[0] }; return "general" }
+func graphTopicFromSources(srcs []string) string {
+	if len(srcs) > 0 {
+		return srcs[0]
+	}
+	return "general"
+}
 
 // Helper function
 func min(a, b int) int {
