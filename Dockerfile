@@ -4,7 +4,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/newser ./cmd/
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/newser .
 
 # Build WebUI with Node (optional). If webui exists, build it.
 ## UI build removed; frontend is a separate service
@@ -13,7 +13,6 @@ FROM gcr.io/distroless/base-debian12
 WORKDIR /app
 COPY --from=gobuild /out/newser /usr/local/bin/newser
 COPY --from=gobuild /src/config /app/config
-COPY docs /app/docs
 COPY migrations /app/migrations
 # Copy built WebUI to the dist path expected by the server
 # no UI assets copied; served by separate webui container

@@ -112,9 +112,7 @@ func Run(cfg *config.Config) error {
 	// protected group example
 	me := api.Group("/me")
 	me.Use(func(next echo.HandlerFunc) echo.HandlerFunc { return withAuth(next, auth.Secret) })
-	me.GET("", func(c echo.Context) error {
-		return c.JSON(200, map[string]string{"user_id": c.Get("user_id").(string)})
-	})
+	me.GET("", meHandler)
 
 	th := &TopicsHandler{Store: auth.Store, LLM: llmProvider, Model: cfg.LLM.Routing.Chatting}
 	th.Register(api.Group("/topics"), auth.Secret)
@@ -167,3 +165,16 @@ func Run(cfg *config.Config) error {
 }
 
 func toInt(s string) int { var n int; fmt.Sscanf(s, "%d", &n); return n }
+
+// meHandler returns the authenticated user id.
+//
+//	@Summary	Current user
+//	@Tags		auth
+//	@Security	BearerAuth
+//	@Security	CookieAuth
+//	@Produce	json
+//	@Success	200	{object}	MeResponse
+//	@Router		/me [get]
+func meHandler(c echo.Context) error {
+	return c.JSON(200, map[string]string{"user_id": c.Get("user_id").(string)})
+}

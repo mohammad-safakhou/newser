@@ -36,6 +36,18 @@ func (h *RunsHandler) Register(g *echo.Group, secret []byte) {
 	g.GET("/:topic_id/latest_result", h.latest)
 }
 
+// Trigger a new run for a topic
+//
+//	@Summary	Trigger run
+//	@Tags		runs
+//	@Security	BearerAuth
+//	@Security	CookieAuth
+//	@Param		topic_id	path	string	true	"Topic ID"
+//	@Produce	json
+//	@Success	202	{object}	IDResponse	"Run accepted"
+//	@Failure	404	{object}	HTTPError
+//	@Failure	500	{object}	HTTPError
+//	@Router		/topics/{topic_id}/trigger [post]
 func (h *RunsHandler) trigger(c echo.Context) error {
 	userID := c.Get("user_id").(string)
 	topicID := c.Param("topic_id")
@@ -96,6 +108,18 @@ func (h *RunsHandler) trigger(c echo.Context) error {
 	return c.JSON(http.StatusAccepted, map[string]string{"run_id": runID})
 }
 
+// List runs of a topic
+//
+//	@Summary	List runs
+//	@Tags		runs
+//	@Security	BearerAuth
+//	@Security	CookieAuth
+//	@Param		topic_id	path	string	true	"Topic ID"
+//	@Produce	json
+//	@Success	200	{array}		store.Run
+//	@Failure	404	{object}	HTTPError
+//	@Failure	500	{object}	HTTPError
+//	@Router		/topics/{topic_id}/runs [get]
 func (h *RunsHandler) list(c echo.Context) error {
 	userID := c.Get("user_id").(string)
 	topicID := c.Param("topic_id")
@@ -109,6 +133,17 @@ func (h *RunsHandler) list(c echo.Context) error {
 	return c.JSON(http.StatusOK, items)
 }
 
+// Get the latest processing result for a topic
+//
+//	@Summary	Latest processing result
+//	@Tags		runs
+//	@Security	BearerAuth
+//	@Security	CookieAuth
+//	@Param		topic_id	path	string	true	"Topic ID"
+//	@Produce	json
+//	@Success	200	{object}	map[string]interface{}
+//	@Failure	404	{object}	HTTPError
+//	@Router		/topics/{topic_id}/latest_result [get]
 func (h *RunsHandler) latest(c echo.Context) error {
 	userID := c.Get("user_id").(string)
 	topicID := c.Param("topic_id")

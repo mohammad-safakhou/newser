@@ -1,4 +1,21 @@
-package main
+// Package main bootstraps the CLI and HTTP server.
+//
+// Swagger general API metadata
+//
+//	@title						Newser API
+//	@version					0.1.0
+//	@description				API for Newser service
+//	@schemes					http https
+//	@BasePath					/api
+//
+//	@securityDefinitions.apikey	BearerAuth
+//	@in							header
+//	@name						Authorization
+//
+//	@securityDefinitions.apikey	CookieAuth
+//	@in							cookie
+//	@name						auth
+package cmd
 
 import (
 	"os"
@@ -6,7 +23,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func main() {
+func Execute() {
 	var root = &cobra.Command{Use: "newser"}
 
 	root.AddCommand(serveCMD(), migrateCMD())

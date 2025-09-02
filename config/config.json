@@ -6,7 +6,7 @@
     "default_timeout": "30s"
   },
   "server": {
-    "address": ":10002",
+    "address": ":10001",
     "jwt_secret": "your_jwt_secret"
   },
   "llm": {

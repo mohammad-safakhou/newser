@@ -1,36 +1,19 @@
 package server
 
 import (
-    "net/http"
+	"github.com/labstack/echo/v4"
+	echoSwagger "github.com/swaggo/echo-swagger"
 
-    "github.com/labstack/echo/v4"
+	// Blank-import the generated Swagger docs package. A minimal stub is provided
+	// at internal/server/swagger so builds succeed before generation. After
+	// running `make swagger`, this will register the spec at runtime.
+	_ "github.com/mohammad-safakhou/newser/internal/server/swagger"
 )
 
-// registerDocs registers OpenAPI spec and docs UI endpoints.
+// registerDocs registers API documentation endpoints.
+//
+// - Swagger UI:   /api/swagger/index.html
 func registerDocs(e *echo.Echo) {
-    // Serve the OpenAPI yaml
-    e.File("/api/openapi.yaml", "docs/openapi.yaml")
-
-    // Simple ReDoc page
-    e.GET("/api/docs", func(c echo.Context) error {
-        html := `<!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Newser API Docs</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <style>body{margin:0;padding:0;} .redoc-wrap{height:100vh;}</style>
-  </head>
-  <body>
-    <div id="redoc-container" class="redoc-wrap"></div>
-    <script src="https://cdn.jsdelivr.net/npm/redoc/bundles/redoc.standalone.js"></script>
-    <script>
-      Redoc.init('/api/openapi.yaml', {}, document.getElementById('redoc-container'))
-    </script>
-  </body>
-  </html>`
-        return c.HTML(http.StatusOK, html)
-    })
+	// Swagger UI backed by swag-generated docs
+	e.GET("/api/swagger/*", echoSwagger.WrapHandler)
 }
-
-

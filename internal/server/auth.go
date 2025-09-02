@@ -25,6 +25,19 @@ func (a *AuthHandler) Register(g *echo.Group) {
 	g.POST("/logout", a.logout)
 }
 
+// Signup
+//
+//	@Summary		User signup
+//	@Description	Create a new user account
+//	@Tags			auth
+//	@Accept			json
+//	@Produce		json
+//	@Param			payload	body		AuthSignupRequest	true	"Signup payload"
+//	@Success		201		{string}	string				"Created"
+//	@Failure		400		{object}	HTTPError
+//	@Failure		409		{object}	HTTPError
+//	@Failure		500		{object}	HTTPError
+//	@Router			/auth/signup [post]
 func (a *AuthHandler) signup(c echo.Context) error {
 	var req struct{ Email, Password string }
 	if err := c.Bind(&req); err != nil {
@@ -46,6 +59,19 @@ func (a *AuthHandler) signup(c echo.Context) error {
 // naive in-memory limiter per process
 var lastLoginAttempt = time.Time{}
 
+// Login
+//
+//	@Summary		Login
+//	@Description	Returns JWT in cookie and body; supports Bearer flows
+//	@Tags			auth
+//	@Accept			json
+//	@Produce		json
+//	@Param			payload	body		AuthLoginRequest	true	"Login payload"
+//	@Success		200		{object}	TokenResponse
+//	@Failure		400		{object}	HTTPError
+//	@Failure		401		{object}	HTTPError
+//	@Failure		500		{object}	HTTPError
+//	@Router			/auth/login [post]
 func (a *AuthHandler) login(c echo.Context) error {
 	// basic rate limit: at most 1 attempt per 300ms per instance
 	if time.Since(lastLoginAttempt) < 300*time.Millisecond {
@@ -90,6 +116,13 @@ func (a *AuthHandler) login(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"token": signed})
 }
 
+// Logout
+//
+//	@Summary	Logout
+//	@Tags		auth
+//	@Produce	json
+//	@Success	200	{string}	string	"OK"
+//	@Router		/auth/logout [post]
 func (a *AuthHandler) logout(c echo.Context) error {
 	cookie := new(http.Cookie)
 	cookie.Name = "auth"

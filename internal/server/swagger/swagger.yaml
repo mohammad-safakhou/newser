@@ -1,0 +1,451 @@
+definitions:
+  server.AssistRequest:
+    properties:
+      message:
+        type: string
+      name:
+        type: string
+      preferences:
+        additionalProperties: true
+        type: object
+      schedule_cron:
+        type: string
+    type: object
+  server.AssistResponse:
+    properties:
+      message:
+        type: string
+      topic:
+        additionalProperties: true
+        type: object
+    type: object
+  server.AuthLoginRequest:
+    properties:
+      email:
+        type: string
+      password:
+        type: string
+    type: object
+  server.AuthSignupRequest:
+    properties:
+      email:
+        type: string
+      password:
+        type: string
+    type: object
+  server.ChatRequest:
+    properties:
+      message:
+        type: string
+    type: object
+  server.ChatResponse:
+    properties:
+      message:
+        type: string
+      topic:
+        additionalProperties: true
+        type: object
+    type: object
+  server.CreateTopicRequest:
+    properties:
+      name:
+        type: string
+      preferences:
+        additionalProperties: true
+        type: object
+      schedule_cron:
+        type: string
+    type: object
+  server.HTTPError:
+    properties:
+      error:
+        type: string
+    type: object
+  server.IDResponse:
+    properties:
+      id:
+        type: string
+    type: object
+  server.MeResponse:
+    properties:
+      user_id:
+        type: string
+    type: object
+  server.TokenResponse:
+    properties:
+      token:
+        type: string
+    type: object
+  server.TopicDetailResponse:
+    properties:
+      id:
+        type: string
+      name:
+        type: string
+      preferences:
+        additionalProperties: true
+        type: object
+      schedule_cron:
+        type: string
+    type: object
+  store.Run:
+    properties:
+      error:
+        type: string
+      finishedAt:
+        type: string
+      id:
+        type: string
+      startedAt:
+        type: string
+      status:
+        type: string
+    type: object
+  store.Topic:
+    properties:
+      createdAt:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      scheduleCron:
+        type: string
+      userID:
+        type: string
+    type: object
+info:
+  contact: {}
+paths:
+  /auth/login:
+    post:
+      consumes:
+      - application/json
+      description: Returns JWT in cookie and body; supports Bearer flows
+      parameters:
+      - description: Login payload
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/server.AuthLoginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/server.TokenResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+      summary: Login
+      tags:
+      - auth
+  /auth/logout:
+    post:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: string
+      summary: Logout
+      tags:
+      - auth
+  /auth/signup:
+    post:
+      consumes:
+      - application/json
+      description: Create a new user account
+      parameters:
+      - description: Signup payload
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/server.AuthSignupRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+      summary: User signup
+      tags:
+      - auth
+  /me:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/server.MeResponse'
+      security:
+      - BearerAuth: []
+      - CookieAuth: []
+      summary: Current user
+      tags:
+      - auth
+  /topics:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/store.Topic'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+      security:
+      - BearerAuth: []
+      - CookieAuth: []
+      summary: List topics
+      tags:
+      - topics
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: New topic
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/server.CreateTopicRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/server.IDResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+      security:
+      - BearerAuth: []
+      - CookieAuth: []
+      summary: Create topic
+      tags:
+      - topics
+  /topics/{id}:
+    get:
+      parameters:
+      - description: Topic ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/server.TopicDetailResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+      security:
+      - BearerAuth: []
+      - CookieAuth: []
+      summary: Get topic
+      tags:
+      - topics
+  /topics/{id}/chat:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Topic ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Chat message
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/server.ChatRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/server.ChatResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+      security:
+      - BearerAuth: []
+      - CookieAuth: []
+      summary: Chat with topic assistant
+      tags:
+      - topics
+  /topics/{topic_id}/latest_result:
+    get:
+      parameters:
+      - description: Topic ID
+        in: path
+        name: topic_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+      security:
+      - BearerAuth: []
+      - CookieAuth: []
+      summary: Latest processing result
+      tags:
+      - runs
+  /topics/{topic_id}/runs:
+    get:
+      parameters:
+      - description: Topic ID
+        in: path
+        name: topic_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/store.Run'
+            type: array
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+      security:
+      - BearerAuth: []
+      - CookieAuth: []
+      summary: List runs
+      tags:
+      - runs
+  /topics/{topic_id}/trigger:
+    post:
+      parameters:
+      - description: Topic ID
+        in: path
+        name: topic_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Run accepted
+          schema:
+            $ref: '#/definitions/server.IDResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+      security:
+      - BearerAuth: []
+      - CookieAuth: []
+      summary: Trigger run
+      tags:
+      - runs
+  /topics/assist/chat:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Assist request
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/server.AssistRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/server.AssistResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/server.HTTPError'
+      security:
+      - BearerAuth: []
+      - CookieAuth: []
+      summary: Draft a new topic with LLM
+      tags:
+      - topics
+swagger: "2.0"

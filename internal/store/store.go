@@ -13,37 +13,37 @@ import (
 )
 
 type Store struct {
-    DB *sql.DB
+	DB *sql.DB
 }
 
 func New(ctx context.Context) (*Store, error) {
-    dsn := os.Getenv("DATABASE_URL")
-    if dsn == "" {
-        host := getenvDefault("POSTGRES_HOST", "localhost")
-        port := getenvDefault("POSTGRES_PORT", "5432")
-        user := os.Getenv("POSTGRES_USER")
-        pass := os.Getenv("POSTGRES_PASSWORD")
-        db := os.Getenv("POSTGRES_DB")
-        ssl := getenvDefault("POSTGRES_SSLMODE", "disable")
-        dsn = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, db, ssl)
-    }
-    return NewWithDSN(ctx, dsn)
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		host := getenvDefault("POSTGRES_HOST", "localhost")
+		port := getenvDefault("POSTGRES_PORT", "5432")
+		user := os.Getenv("POSTGRES_USER")
+		pass := os.Getenv("POSTGRES_PASSWORD")
+		db := os.Getenv("POSTGRES_DB")
+		ssl := getenvDefault("POSTGRES_SSLMODE", "disable")
+		dsn = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, db, ssl)
+	}
+	return NewWithDSN(ctx, dsn)
 }
 
 // NewWithDSN constructs the Store using an explicit Postgres DSN
 func NewWithDSN(ctx context.Context, dsn string) (*Store, error) {
-    db, err := sql.Open("postgres", dsn)
-    if err != nil {
-        return nil, err
-    }
-    if err := db.PingContext(ctx); err != nil {
-        return nil, err
-    }
-    s := &Store{DB: db}
-    if err := s.ensureSchema(ctx); err != nil {
-        return nil, err
-    }
-    return s, nil
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.PingContext(ctx); err != nil {
+		return nil, err
+	}
+	s := &Store{DB: db}
+	if err := s.ensureSchema(ctx); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 func getenvDefault(k, def string) string {

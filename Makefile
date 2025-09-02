@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: up down logs fmt build test tidy serve cli migrate webui-install webui-build webui-clean serve-all
+.PHONY: up down logs fmt build test tidy serve cli migrate webui-install webui-build webui-clean serve-all swagger-install swagger swagger-clean
 
 up:
 	docker compose up -d
@@ -23,11 +23,8 @@ build:
 test:
 	go test ./... -run . -count=1
 
-serve:
-	go run ./cmd/newserd
-
-cli:
-	go run ./cmd/newser
+run:
+	go run ./
 
 migrate:
 	go run ./cmd/newser migrate --direction up
@@ -46,3 +43,19 @@ serve-all: webui-build
 
 webui-dev:
 	cd webui && npm run dev
+
+# -----------------------------
+# Swagger docs generation
+# -----------------------------
+swagger-install:
+	GO111MODULE=on go install github.com/swaggo/swag/cmd/swag@latest
+
+# Generate swagger docs from annotations
+swagger:
+	swag init -o ./internal/server/swagger --parseDependency --parseInternal
+	swag fmt -d ./internal/server/swagger
+
+swagger-clean:
+	rm -rf ./internal/server/swagger
+	mkdir -p ./internal/server/swagger
+	echo "package swagger" > ./internal/server/swagger/doc.go
