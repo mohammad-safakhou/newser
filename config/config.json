@@ -49,6 +49,7 @@
       }
     },
     "routing": {
+      "chatting": "gpt-5",
       "planning": "gpt-5",
       "analysis": "gpt-5",
       "synthesis": "gpt-5",

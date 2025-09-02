@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/mohammad-safakhou/newser/config"
+	agenttele "github.com/mohammad-safakhou/newser/internal/agent/telemetry"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
@@ -20,6 +23,42 @@ import (
 	"github.com/mohammad-safakhou/newser/internal/server"
 	"github.com/mohammad-safakhou/newser/internal/store"
 )
+
+var (
+	cfg  *config.Config
+	orch *core.Orchestrator
+)
+
+func locateConfigFile() string {
+	if p := os.Getenv("NEWSER_CONFIG_PATH"); p != "" {
+		return p
+	}
+	cwd, _ := os.Getwd()
+	for i := 0; i < 8; i++ {
+		candidate := filepath.Join(cwd, "config", "config.json")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+		parent := filepath.Dir(cwd)
+		if parent == cwd {
+			break
+		}
+		cwd = parent
+	}
+	return "./config/config.json"
+}
+
+func init() {
+	var err error
+	cfgPath := locateConfigFile()
+	cfg = config.LoadConfig(cfgPath)
+	tele := agenttele.NewTelemetry(cfg.Telemetry)
+	orchLogger := log.New(log.Writer(), "[ORCH] ", log.LstdFlags)
+	orch, err = core.NewOrchestrator(cfg, orchLogger, tele)
+	if err != nil {
+		panic(err)
+	}
+}
 
 func startPostgres(t *testing.T, ctx context.Context) (testcontainers.Container, string) {
 	t.Helper()
@@ -96,7 +135,7 @@ func newServer(t *testing.T, ctx context.Context) (*httptest.Server, *store.Stor
 	th := &server.TopicsHandler{Store: st}
 	th.Register(api.Group("/topics"), secret)
 
-	rh := &server.runsHandler{store: st}
+	rh := server.NewRunsHandler(cfg, st, orch)
 	rh.Register(api.Group("/topics"), secret)
 
 	srv := httptest.NewServer(e)

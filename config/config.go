@@ -66,6 +66,7 @@ type LLMModel struct {
 // LLMRoutingConfig defines which model to use for different tasks
 type LLMRoutingConfig struct {
 	Planning  string `mapstructure:"planning"`  // Use for complex planning tasks
+	Chatting  string `mapstructure:"chatting"`  // Use for complex chatting tasks
 	Analysis  string `mapstructure:"analysis"`  // Use for content analysis
 	Synthesis string `mapstructure:"synthesis"` // Use for content synthesis
 	Research  string `mapstructure:"research"`  // Use for research tasks

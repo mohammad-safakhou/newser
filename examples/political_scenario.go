@@ -16,10 +16,7 @@ func main() {
 	logger := log.New(os.Stdout, "[POLITICAL] ", log.LstdFlags|log.Lshortfile)
 	logger.Println("=== POLITICAL NEWS AGENT (single scenario) ===")
 
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		logger.Fatalf("config load: %v", err)
-	}
+	cfg := config.LoadConfig("")
 
 	tele := telemetry.NewTelemetry(cfg.Telemetry)
 	defer tele.Shutdown()

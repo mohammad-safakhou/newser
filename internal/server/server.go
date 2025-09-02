@@ -22,40 +22,6 @@ import (
 )
 
 func Run(cfg *config.Config) error {
-	e := echo.New()
-	e.HideBanner = true
-	e.Use(middleware.Recover())
-	// Unified HTTP error handler with structured JSON and logging
-	baseLogger := log.New(log.Writer(), "[HTTP] ", log.LstdFlags)
-	e.HTTPErrorHandler = func(err error, c echo.Context) {
-		code := http.StatusInternalServerError
-		msg := err.Error()
-		if he, ok := err.(*echo.HTTPError); ok {
-			code = he.Code
-			if he.Message != nil {
-				msg = fmt.Sprint(he.Message)
-			}
-		}
-		req := c.Request()
-		baseLogger.Printf("%d %s %s from %s: %v", code, req.Method, req.URL.Path, c.RealIP(), err)
-		if !c.Response().Committed {
-			_ = c.JSON(code, map[string]interface{}{"error": msg})
-		}
-	}
-	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins:     []string{"*"},
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Content-Type", "Cookie"},
-		AllowCredentials: true,
-	}))
-
-	e.GET("/healthz", func(c echo.Context) error { return c.String(200, "ok") })
-	registerDocs(e)
-	e.GET("/metrics", echo.WrapHandler(promhttp.Handler()))
-
-	// Unified config (single source of truth)
-	_ = Migrate("file://migrations", "", "up", 0)
-
 	// Initialize shared dependencies (top-level DI)
 	ctx := context.Background()
 	// Build Postgres DSN from AppConfig
@@ -97,6 +63,39 @@ func Run(cfg *config.Config) error {
 		return err
 	}
 
+	// Echo instance
+	e := echo.New()
+	e.HideBanner = true
+	e.Use(middleware.Recover())
+	// Unified HTTP error handler with structured JSON and logging
+	baseLogger := log.New(log.Writer(), "[HTTP] ", log.LstdFlags)
+	e.HTTPErrorHandler = func(err error, c echo.Context) {
+		code := http.StatusInternalServerError
+		msg := err.Error()
+		var he *echo.HTTPError
+		if errors.As(err, &he) {
+			code = he.Code
+			if he.Message != nil {
+				msg = fmt.Sprint(he.Message)
+			}
+		}
+		req := c.Request()
+		baseLogger.Printf("%d %s %s from %s: %v", code, req.Method, req.URL.Path, c.RealIP(), err)
+		if !c.Response().Committed {
+			_ = c.JSON(code, map[string]interface{}{"error": msg})
+		}
+	}
+	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins:     []string{"*"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Content-Type", "Cookie"},
+		AllowCredentials: true,
+	}))
+
+	e.GET("/healthz", func(c echo.Context) error { return c.String(200, "ok") })
+	registerDocs(e)
+	e.GET("/metrics", echo.WrapHandler(promhttp.Handler()))
+
 	// init auth and routes
 	secret := cfg.Server.JWTSecret
 	if secret == "" {
@@ -117,15 +116,7 @@ func Run(cfg *config.Config) error {
 		return c.JSON(200, map[string]string{"user_id": c.Get("user_id").(string)})
 	})
 
-	// choose a model from routing for chat/assist
-	chatModel := cfg.LLM.Routing.Analysis
-	if chatModel == "" {
-		chatModel = cfg.LLM.Routing.Planning
-	}
-	if chatModel == "" {
-		chatModel = cfg.LLM.Routing.Fallback
-	}
-	th := &TopicsHandler{Store: auth.Store, LLM: llmProvider, Model: chatModel}
+	th := &TopicsHandler{Store: auth.Store, LLM: llmProvider, Model: cfg.LLM.Routing.Chatting}
 	th.Register(api.Group("/topics"), auth.Secret)
 
 	rh := NewRunsHandler(cfg, auth.Store, orch)

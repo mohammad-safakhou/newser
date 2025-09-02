@@ -15,28 +15,28 @@ import (
 	"github.com/mohammad-safakhou/newser/internal/store"
 )
 
-type runsHandler struct {
+type RunsHandler struct {
 	store *store.Store
 	orch  *core.Orchestrator
 	cfg   *config.Config
 }
 
-func NewRunsHandler(cfg *config.Config, store *store.Store, orch *core.Orchestrator) *runsHandler {
-	return &runsHandler{
+func NewRunsHandler(cfg *config.Config, store *store.Store, orch *core.Orchestrator) *RunsHandler {
+	return &RunsHandler{
 		store: store,
 		orch:  orch,
 		cfg:   cfg,
 	}
 }
 
-func (h *runsHandler) Register(g *echo.Group, secret []byte) {
+func (h *RunsHandler) Register(g *echo.Group, secret []byte) {
 	g.Use(func(next echo.HandlerFunc) echo.HandlerFunc { return withAuth(next, secret) })
 	g.POST("/:topic_id/trigger", h.trigger)
 	g.GET("/:topic_id/runs", h.list)
 	g.GET("/:topic_id/latest_result", h.latest)
 }
 
-func (h *runsHandler) trigger(c echo.Context) error {
+func (h *RunsHandler) trigger(c echo.Context) error {
 	userID := c.Get("user_id").(string)
 	topicID := c.Param("topic_id")
 	name, prefsB, _, err := h.store.GetTopicByID(c.Request().Context(), topicID, userID)
@@ -96,7 +96,7 @@ func (h *runsHandler) trigger(c echo.Context) error {
 	return c.JSON(http.StatusAccepted, map[string]string{"run_id": runID})
 }
 
-func (h *runsHandler) list(c echo.Context) error {
+func (h *RunsHandler) list(c echo.Context) error {
 	userID := c.Get("user_id").(string)
 	topicID := c.Param("topic_id")
 	if _, _, _, err := h.store.GetTopicByID(c.Request().Context(), topicID, userID); err != nil {
@@ -109,7 +109,7 @@ func (h *runsHandler) list(c echo.Context) error {
 	return c.JSON(http.StatusOK, items)
 }
 
-func (h *runsHandler) latest(c echo.Context) error {
+func (h *RunsHandler) latest(c echo.Context) error {
 	userID := c.Get("user_id").(string)
 	topicID := c.Param("topic_id")
 	if _, _, _, err := h.store.GetTopicByID(c.Request().Context(), topicID, userID); err != nil {
