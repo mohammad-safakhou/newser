@@ -792,20 +792,27 @@ func (a *SimpleAgent) GetEstimatedTime(task AgentTask) time.Duration {
 // Agent execution methods
 
 func (a *SimpleAgent) executeResearch(ctx context.Context, task AgentTask) AgentResult {
-	query, _ := task.Parameters["query"].(string)
-	if query == "" {
-		query = "general topic"
-	}
+    query, _ := task.Parameters["query"].(string)
+    if query == "" {
+        query = "general topic"
+    }
 
-	providers, _ := NewSourceProviders(a.config.Sources)
-	ctx2, cancel := context.WithTimeout(ctx, a.config.General.DefaultTimeout)
-	defer cancel()
-	var sourcesList []Source
-	for _, p := range providers {
-		if res, err := p.Search(ctx2, query, map[string]interface{}{"query": query}); err == nil {
-			sourcesList = append(sourcesList, res...)
-		}
-	}
+    providers, _ := NewSourceProviders(a.config.Sources)
+    ctx2, cancel := context.WithTimeout(ctx, a.config.General.DefaultTimeout)
+    defer cancel()
+    var sourcesList []Source
+    // Build incremental options from context
+    opts := map[string]interface{}{"query": query}
+    if cm, ok := task.Parameters["context"].(map[string]interface{}); ok {
+        if s, ok := cm["last_run_time"].(string); ok && s != "" { opts["since"] = s }
+        if ku, ok := cm["known_urls"].([]string); ok && len(ku) > 0 { opts["exclude_urls"] = ku }
+        if ku2, ok := cm["known_urls"].([]interface{}); ok && len(ku2) > 0 { opts["exclude_urls"] = ku2 }
+    }
+    for _, p := range providers {
+        if res, err := p.Search(ctx2, query, opts); err == nil {
+            sourcesList = append(sourcesList, res...)
+        }
+    }
 	// de-duplicate
 	sourcesList = DeduplicateSources(sourcesList)
 

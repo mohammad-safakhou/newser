@@ -306,3 +306,28 @@ func (s *Store) SaveHighlights(ctx context.Context, topic string, hs []core.High
 	}
 	return nil
 }
+
+// GetKnowledgeGraph retrieves the most recent knowledge graph for a given topic
+func (s *Store) GetKnowledgeGraph(ctx context.Context, topic string) (core.KnowledgeGraph, error) {
+    var (
+        id        string
+        nodesB    []byte
+        edgesB    []byte
+        metaB     []byte
+        updatedAt time.Time
+    )
+    err := s.DB.QueryRowContext(ctx, `SELECT id, nodes, edges, metadata, last_updated FROM knowledge_graphs WHERE topic=$1 ORDER BY last_updated DESC LIMIT 1`, topic).Scan(&id, &nodesB, &edgesB, &metaB, &updatedAt)
+    if err != nil {
+        return core.KnowledgeGraph{}, err
+    }
+    var kg core.KnowledgeGraph
+    kg.ID = id
+    kg.Topic = topic
+    kg.LastUpdated = updatedAt
+    _ = json.Unmarshal(nodesB, &kg.Nodes)
+    _ = json.Unmarshal(edgesB, &kg.Edges)
+    if len(metaB) > 0 {
+        _ = json.Unmarshal(metaB, &kg.Metadata)
+    }
+    return kg, nil
+}

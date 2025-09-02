@@ -1,15 +1,15 @@
 package server
 
 import (
-	"context"
-	"encoding/json"
-	"net/http"
-	"time"
+    "context"
+    "encoding/json"
+    "net/http"
+    "time"
 
-	"github.com/labstack/echo/v4"
-	"github.com/mohammad-safakhou/newser/config"
-	"github.com/mohammad-safakhou/newser/internal/agent/core"
-	"github.com/mohammad-safakhou/newser/internal/store"
+    "github.com/labstack/echo/v4"
+    "github.com/mohammad-safakhou/newser/config"
+    core "github.com/mohammad-safakhou/newser/internal/agent/core"
+    "github.com/mohammad-safakhou/newser/internal/store"
 )
 
 type RunsHandler struct {
@@ -62,20 +62,37 @@ func (h *RunsHandler) trigger(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	// launch background processing (use injected orchestrator)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-		defer cancel()
+    // launch background processing (use injected orchestrator)
+    go func() {
+        ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+        defer cancel()
 
-		// construct thought from topic name/preferences
-		thought := core.UserThought{
-			ID:          runID,
-			Content:     name,
-			Preferences: prefs,
-			Timestamp:   time.Now(),
-		}
-		// optional: pass preferences map into thought
-		_ = prefsB
+        // Build context from previous runs and knowledge graph
+        ctxMap := map[string]interface{}{}
+        if ts, _ := h.store.LatestRunTime(ctx, topicID); ts != nil {
+            ctxMap["last_run_time"] = ts.UTC().Format(time.RFC3339)
+        }
+        if rid, _ := h.store.GetLatestRunID(ctx, topicID); rid != "" {
+            if prev, err := h.store.GetProcessingResultByID(ctx, rid); err == nil {
+                ctxMap["prev_summary"] = prev["summary"]
+                // Extract known URLs
+                var known []string
+                if sl, ok := prev["sources"].([]interface{}); ok {
+                    for _, it := range sl {
+                        if m, ok := it.(map[string]interface{}); ok {
+                            if u, ok := m["url"].(string); ok && u != "" { known = append(known, u) }
+                        }
+                    }
+                }
+                if len(known) > 0 { ctxMap["known_urls"] = known }
+            }
+        }
+        if kg, err := h.store.GetKnowledgeGraph(ctx, name); err == nil {
+            ctxMap["knowledge_graph"] = map[string]interface{}{"nodes": kg.Nodes, "edges": kg.Edges, "last_updated": kg.LastUpdated}
+        }
+
+        // construct thought from topic name/preferences with context
+        thought := core.UserThought{ID: runID, Content: name, Preferences: prefs, Timestamp: time.Now(), Context: ctxMap}
 
 		result, err := h.orch.ProcessThought(ctx, thought)
 		if err != nil {
@@ -85,11 +102,10 @@ func (h *RunsHandler) trigger(c echo.Context) error {
 
 		// Persist the result using the same runID as key in app DB
 		_ = h.store.UpsertProcessingResult(ctx, result)
-		// Persist highlights and knowledge graph for topic name (as a simple key)
-		if len(result.Highlights) > 0 {
-			_ = h.store.SaveHighlights(ctx, name, result.Highlights)
-		}
-		_ = h.store.SaveKnowledgeGraphFromMetadata(ctx, name, result.Metadata)
+        // Persist highlights and knowledge graph for topic name (as a simple key)
+        if len(result.Highlights) > 0 { _ = h.store.SaveHighlights(ctx, name, result.Highlights) }
+        // Always attempt to persist knowledge graph metadata, even if empty
+        _ = h.store.SaveKnowledgeGraphFromMetadata(ctx, name, result.Metadata)
 		_ = h.store.FinishRun(ctx, runID, "succeeded", nil)
 	}()
 

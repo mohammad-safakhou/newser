@@ -181,10 +181,10 @@ func (o *Orchestrator) ProcessThought(ctx context.Context, thought UserThought) 
 
 // executeTasks executes all planned tasks in the correct order
 func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, plan PlanningResult, status *ProcessingStatus) ([]AgentResult, error) {
-    var results []AgentResult
-    var mu sync.Mutex
-    // Keep a map of completed results by task ID to feed dependent tasks
-    resultsByID := make(map[string]AgentResult)
+	var results []AgentResult
+	var mu sync.Mutex
+	// Keep a map of completed results by task ID to feed dependent tasks
+	resultsByID := make(map[string]AgentResult)
 
 	// Create a map for quick task lookup
 	taskMap := make(map[string]AgentTask)
@@ -225,10 +225,10 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 		var wg sync.WaitGroup
 		errors := make(chan error, len(readyTasks))
 
-        for _, task := range readyTasks {
-            wg.Add(1)
-            go func(t AgentTask) {
-                defer wg.Done()
+		for _, task := range readyTasks {
+			wg.Add(1)
+			go func(t AgentTask) {
+				defer wg.Done()
 
 				// Find the appropriate agent for this task
 				agent := o.findBestAgent(t)
@@ -237,32 +237,41 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 					return
 				}
 
-                // Enrich the task with dependency results and aggregated sources
-                enriched := t
-                params := make(map[string]interface{}, len(t.Parameters)+2)
-                for k, v := range t.Parameters { params[k] = v }
-                var inputs []AgentResult
-                var aggSources []Source
-                for _, depID := range t.DependsOn {
-                    mu.Lock()
-                    if r, ok := resultsByID[depID]; ok {
-                        inputs = append(inputs, r)
-                        if len(r.Sources) > 0 { aggSources = append(aggSources, r.Sources...) }
-                    }
-                    mu.Unlock()
-                }
-                if len(inputs) > 0 { params["inputs"] = inputs }
-                if _, ok := params["sources"]; !ok && len(aggSources) > 0 {
-                    params["sources"] = DeduplicateSources(aggSources)
-                }
-                enriched.Parameters = params
+				// Enrich the task with dependency results and aggregated sources
+				enriched := t
+				params := make(map[string]interface{}, len(t.Parameters)+3)
+				for k, v := range t.Parameters {
+					params[k] = v
+				}
+				if thought.Context != nil {
+					params["context"] = thought.Context
+				}
+				var inputs []AgentResult
+				var aggSources []Source
+				for _, depID := range t.DependsOn {
+					mu.Lock()
+					if r, ok := resultsByID[depID]; ok {
+						inputs = append(inputs, r)
+						if len(r.Sources) > 0 {
+							aggSources = append(aggSources, r.Sources...)
+						}
+					}
+					mu.Unlock()
+				}
+				if len(inputs) > 0 {
+					params["inputs"] = inputs
+				}
+				if _, ok := params["sources"]; !ok && len(aggSources) > 0 {
+					params["sources"] = DeduplicateSources(aggSources)
+				}
+				enriched.Parameters = params
 
-                // Execute the task
-                result, err := agent.Execute(ctx, enriched)
-                if err != nil {
-                    errors <- fmt.Errorf("task %s failed: %w", t.ID, err)
-                    return
-                }
+				// Execute the task
+				result, err := agent.Execute(ctx, enriched)
+				if err != nil {
+					errors <- fmt.Errorf("task %s failed: %w", t.ID, err)
+					return
+				}
 
 				// Record agent event
 				agentEvent := telemetry.AgentEvent{
@@ -281,15 +290,15 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 				o.telemetry.RecordAgentEvent(ctx, agentEvent)
 
 				// Add result to results slice
-                mu.Lock()
-                results = append(results, result)
-                executed[t.ID] = true
-                resultsByID[t.ID] = result
-                status.CompletedTasks++
-                status.Progress = float64(status.CompletedTasks) / float64(status.TotalTasks)
-                status.CurrentTask = t.Description
-                status.LastUpdated = time.Now()
-                mu.Unlock()
+				mu.Lock()
+				results = append(results, result)
+				executed[t.ID] = true
+				resultsByID[t.ID] = result
+				status.CompletedTasks++
+				status.Progress = float64(status.CompletedTasks) / float64(status.TotalTasks)
+				status.CurrentTask = t.Description
+				status.LastUpdated = time.Now()
+				mu.Unlock()
 
 				o.logger.Printf("Completed task: %s (%s) in %v", t.ID, t.Description, result.ProcessingTime)
 			}(task)
@@ -355,30 +364,17 @@ func (o *Orchestrator) synthesizeResults(ctx context.Context, thought UserThough
 		}
 	}
 
-	// Use synthesis agent to create final report
-	synthesisTask := AgentTask{
-		ID:          uuid.New().String(),
-		Type:        "synthesis",
-		Description: "Synthesize all research and analysis into a comprehensive report",
-		Priority:    1,
-		Parameters: map[string]interface{}{
-			"user_thought": thought.Content,
-			"all_data":     allData,
-			"sources":      allSources,
-			"results":      results,
-		},
-		Timeout:   o.config.Agents.AgentTimeout,
-		CreatedAt: time.Now(),
+	// Find a synthesis result from planned tasks (prefer the last one)
+	var synthesisResult *AgentResult
+	for i := len(results) - 1; i >= 0; i-- {
+		if results[i].AgentType == "synthesis" && results[i].Success {
+			r := results[i]
+			synthesisResult = &r
+			break
+		}
 	}
-
-	synthesisAgent := o.findBestAgent(synthesisTask)
-	if synthesisAgent == nil {
-		return ProcessingResult{}, fmt.Errorf("no synthesis agent available")
-	}
-
-	synthesisResult, err := synthesisAgent.Execute(ctx, synthesisTask)
-	if err != nil {
-		return ProcessingResult{}, fmt.Errorf("synthesis failed: %w", err)
+	if synthesisResult == nil {
+		return ProcessingResult{}, fmt.Errorf("no synthesis result available (planner must include a final synthesis task)")
 	}
 
 	// Extract synthesis data
@@ -388,7 +384,7 @@ func (o *Orchestrator) synthesizeResults(ctx context.Context, thought UserThough
 	conflicts, _ := synthesisResult.Data["conflicts"].([]Conflict)
 	confidence, _ := synthesisResult.Data["confidence"].(float64)
 
-	// Add synthesis costs
+	// Include synthesis costs
 	totalCost += synthesisResult.Cost
 	totalTokens += synthesisResult.TokensUsed
 
@@ -409,14 +405,14 @@ func (o *Orchestrator) synthesizeResults(ctx context.Context, thought UserThough
 		LLMModelsUsed:  modelsUsed,
 		CreatedAt:      time.Now(),
 	}
-	if len(kgNodes) > 0 || len(kgEdges) > 0 {
-		if result.Metadata == nil {
-			result.Metadata = make(map[string]interface{})
-		}
-		result.Metadata["knowledge_graph"] = map[string]interface{}{
-			"nodes": kgNodes,
-			"edges": kgEdges,
-		}
+	// Always include knowledge graph in metadata, even if empty
+	if result.Metadata == nil {
+		result.Metadata = make(map[string]interface{})
+	}
+	result.Metadata["knowledge_graph"] = map[string]interface{}{
+		"nodes": kgNodes,
+		"edges": kgEdges,
+		"topic": thought.Content,
 	}
 
 	return result, nil

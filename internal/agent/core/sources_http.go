@@ -38,21 +38,42 @@ func (n *NewsAPIClient) Search(ctx context.Context, query string, options map[st
 	if mq, ok := options["query"].(string); ok && mq != "" {
 		q = mq
 	}
-	url := fmt.Sprintf("%s?q=%s&language=en&sortBy=publishedAt&pageSize=%d", endpoint, escapeQuery(q), max1(n.cfg.MaxResults, 20))
+    url := fmt.Sprintf("%s?q=%s&language=en&sortBy=publishedAt&pageSize=%d", endpoint, escapeQuery(q), max1(n.cfg.MaxResults, 20))
+    // Optional since filter
+    if sv, ok := options["since"]; ok {
+        var t time.Time
+        switch v := sv.(type) {
+        case time.Time:
+            t = v
+        case string:
+            if tt, e := time.Parse(time.RFC3339, v); e == nil { t = tt }
+        }
+        if !t.IsZero() {
+            url += "&from=" + t.UTC().Format(time.RFC3339)
+        }
+    }
 	if err := n.http.DoJSON(ctx, "GET", url, headers, nil, &resp); err != nil {
 		return nil, err
 	}
-	var out []Source
-	for _, a := range resp.Articles {
-		ts, _ := time.Parse(time.RFC3339, a.PublishedAt)
-		out = append(out, Source{
-			ID: uuid.NewString(), Title: a.Title, URL: a.URL, Type: "news",
-			Credibility: 0.8, PublishedAt: ts, ExtractedAt: time.Now(),
-			Content: strings.TrimSpace(a.Content), Summary: strings.TrimSpace(a.Description),
-			Tags: []string{"newsapi"},
-		})
-	}
-	return out, nil
+    // Exclusion list of known URLs
+    exclude := map[string]bool{}
+    if arr, ok := options["exclude_urls"].([]string); ok {
+        for _, u := range arr { if u != "" { exclude[u] = true } }
+    } else if ai, ok := options["exclude_urls"].([]interface{}); ok {
+        for _, it := range ai { if s, ok := it.(string); ok && s != "" { exclude[s] = true } }
+    }
+    var out []Source
+    for _, a := range resp.Articles {
+        ts, _ := time.Parse(time.RFC3339, a.PublishedAt)
+        if exclude[a.URL] { continue }
+        out = append(out, Source{
+            ID: uuid.NewString(), Title: a.Title, URL: a.URL, Type: "news",
+            Credibility: 0.8, PublishedAt: ts, ExtractedAt: time.Now(),
+            Content: strings.TrimSpace(a.Content), Summary: strings.TrimSpace(a.Description),
+            Tags: []string{"newsapi"},
+        })
+    }
+    return out, nil
 }
 
 func (n *NewsAPIClient) GetSource(ctx context.Context, id string) (Source, error) {
@@ -82,11 +103,19 @@ func (b *BraveClient) Search(ctx context.Context, query string, options map[stri
 	if err := b.http.DoJSON(ctx, "GET", url, headers, nil, &resp); err != nil {
 		return nil, err
 	}
-	var out []Source
-	for _, r := range resp.Web.Results {
-		out = append(out, Source{ID: uuid.NewString(), Title: r.Title, URL: r.URL, Type: "web", Credibility: 0.6, ExtractedAt: time.Now(), Summary: r.Description, Tags: []string{"brave"}})
-	}
-	return out, nil
+    // Exclusion list of known URLs
+    exclude := map[string]bool{}
+    if arr, ok := options["exclude_urls"].([]string); ok {
+        for _, u := range arr { if u != "" { exclude[u] = true } }
+    } else if ai, ok := options["exclude_urls"].([]interface{}); ok {
+        for _, it := range ai { if s, ok := it.(string); ok && s != "" { exclude[s] = true } }
+    }
+    var out []Source
+    for _, r := range resp.Web.Results {
+        if exclude[r.URL] { continue }
+        out = append(out, Source{ID: uuid.NewString(), Title: r.Title, URL: r.URL, Type: "web", Credibility: 0.6, ExtractedAt: time.Now(), Summary: r.Description, Tags: []string{"brave"}})
+    }
+    return out, nil
 }
 func (b *BraveClient) GetSource(ctx context.Context, id string) (Source, error) {
 	return Source{}, fmt.Errorf("not implemented")
@@ -112,11 +141,19 @@ func (s *SerperClient) Search(ctx context.Context, query string, options map[str
 	if err := s.http.DoJSON(ctx, "POST", "https://google.serper.dev/search", headers, body, &resp); err != nil {
 		return nil, err
 	}
-	var out []Source
-	for _, r := range resp.Organic {
-		out = append(out, Source{ID: uuid.NewString(), Title: r.Title, URL: r.Link, Type: "web", Credibility: 0.65, ExtractedAt: time.Now(), Summary: r.Snippet, Tags: []string{"serper"}})
-	}
-	return out, nil
+    // Exclusion list of known URLs
+    exclude := map[string]bool{}
+    if arr, ok := options["exclude_urls"].([]string); ok {
+        for _, u := range arr { if u != "" { exclude[u] = true } }
+    } else if ai, ok := options["exclude_urls"].([]interface{}); ok {
+        for _, it := range ai { if s, ok := it.(string); ok && s != "" { exclude[s] = true } }
+    }
+    var out []Source
+    for _, r := range resp.Organic {
+        if exclude[r.Link] { continue }
+        out = append(out, Source{ID: uuid.NewString(), Title: r.Title, URL: r.Link, Type: "web", Credibility: 0.65, ExtractedAt: time.Now(), Summary: r.Snippet, Tags: []string{"serper"}})
+    }
+    return out, nil
 }
 func (s *SerperClient) GetSource(ctx context.Context, id string) (Source, error) {
 	return Source{}, fmt.Errorf("not implemented")

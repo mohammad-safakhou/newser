@@ -79,7 +79,27 @@ func (p *Planner) Plan(ctx context.Context, thought UserThought) (PlanningResult
 
 // createPlanningPrompt creates a comprehensive prompt for planning
 func (p *Planner) createPlanningPrompt(thought UserThought) string {
-	return fmt.Sprintf(`You are an intelligent planning agent that creates execution plans for news research and analysis.
+    // Render prior context for incremental planning
+    ctxBlock := ""
+    if thought.Context != nil {
+        if v, ok := thought.Context["last_run_time"].(string); ok && v != "" {
+            ctxBlock += fmt.Sprintf("Last run time: %s\n", v)
+        }
+        if v, ok := thought.Context["prev_summary"].(string); ok && v != "" {
+            if len(v) > 800 { v = v[:800] + "..." }
+            ctxBlock += fmt.Sprintf("Previous summary: %s\n", v)
+        }
+        if arr, ok := thought.Context["known_urls"].([]string); ok && len(arr) > 0 {
+            ctxBlock += fmt.Sprintf("Known URLs: %d (avoid duplicates)\n", len(arr))
+        }
+        if kg, ok := thought.Context["knowledge_graph"].(map[string]interface{}); ok {
+            if nodes, ok := kg["nodes"].([]interface{}); ok { ctxBlock += fmt.Sprintf("KG nodes: %d\n", len(nodes)) }
+            if edges, ok := kg["edges"].([]interface{}); ok { ctxBlock += fmt.Sprintf("KG edges: %d\n", len(edges)) }
+        }
+    }
+    if ctxBlock != "" { ctxBlock = "\nPRIOR CONTEXT:\n" + ctxBlock }
+
+    return fmt.Sprintf(`You are an intelligent planning agent that creates execution plans for news research and analysis.%s
 
 USER THOUGHT: %s
 
@@ -89,6 +109,7 @@ AVAILABLE AGENTS:
 - Synthesis Agent: Combines and summarizes information into coherent reports
 - Conflict Detection Agent: Identifies and resolves conflicting information
 - Highlight Agent: Identifies and manages key highlights and pinned information
+ - Knowledge Graph Agent: Extracts entities/relations into a knowledge graph
 
 AVAILABLE SOURCES:
 - News APIs (NewsAPI, etc.)
@@ -113,6 +134,10 @@ PLANNING REQUIREMENTS:
 5. Consider user preferences and context
 6. Plan for conflict detection and resolution
 7. Include highlight management for ongoing topics
+8. You MUST include at least one final "synthesis" task at the end that depends on all prior tasks so the results are coherent.
+9. You MUST include a "knowledge_graph" task (it can be lightweight if little is known). It should depend on research/analysis results so it can extract entities/relations.
+10. If helpful, you MAY include intermediate synthesis steps, but still include a final synthesis as the last step.
+11. Keep agents intelligent about effort: for low-information cases, set narrower parameters or scope; for rich topics, broaden depth.
 
 OUTPUT FORMAT (JSON):
 {
@@ -141,7 +166,7 @@ OUTPUT FORMAT (JSON):
   "reasoning": "Explanation of why this plan was chosen"
 }
 
-Create a comprehensive plan that will effectively address the user's thought. Focus on accuracy and relevance over speed.`, thought.Content)
+Create a comprehensive plan that will effectively address the user's thought. Focus on accuracy and relevance over speed. Ensure the final synthesis is last and knowledge_graph is present.`, ctxBlock, thought.Content)
 
 }
 
@@ -296,9 +321,9 @@ func (p *Planner) parsePlanningResponse(response string) (PlanningResult, error)
 
 // ValidatePlan validates if a plan is feasible
 func (p *Planner) ValidatePlan(plan PlanningResult) error {
-	if len(plan.Tasks) == 0 {
-		return fmt.Errorf("plan has no tasks")
-	}
+    if len(plan.Tasks) == 0 {
+        return fmt.Errorf("plan has no tasks")
+    }
 
 	// Check for circular dependencies
 	if err := p.checkCircularDependencies(plan.Tasks); err != nil {
@@ -310,12 +335,26 @@ func (p *Planner) ValidatePlan(plan PlanningResult) error {
 		return fmt.Errorf("missing dependencies: %w", err)
 	}
 
-	// Validate task types
-	for _, task := range plan.Tasks {
-		if !p.isValidTaskType(task.Type) {
-			return fmt.Errorf("invalid task type: %s", task.Type)
-		}
-	}
+    // Validate task types
+    for _, task := range plan.Tasks {
+        if !p.isValidTaskType(task.Type) {
+            return fmt.Errorf("invalid task type: %s", task.Type)
+        }
+    }
+
+    // Ensure mandatory phases are present
+    hasSynth := false
+    hasKG := false
+    for _, t := range plan.Tasks {
+        if t.Type == "synthesis" { hasSynth = true }
+        if t.Type == "knowledge_graph" { hasKG = true }
+    }
+    if !hasSynth {
+        return fmt.Errorf("plan must include a final synthesis task")
+    }
+    if !hasKG {
+        return fmt.Errorf("plan must include a knowledge_graph task")
+    }
 
 	// Check cost and time estimates
 	if plan.EstimatedCost > 20.0 {
