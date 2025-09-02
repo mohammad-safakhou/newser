@@ -11,6 +11,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 	"github.com/mohammad-safakhou/newser/config"
 	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
@@ -822,195 +823,526 @@ func (a *SimpleAgent) executeResearch(ctx context.Context, task AgentTask) Agent
 	}
 }
 
+type analysisParseResult struct {
+	Relevance        float64  `json:"relevance_score"`
+	Credibility      float64  `json:"credibility_score"`
+	Importance       float64  `json:"importance_score"`
+	Sentiment        string   `json:"sentiment"`
+	KeyTopics        []string `json:"key_topics"`
+	ContentQuality   string   `json:"content_quality"`
+	InformationDepth string   `json:"information_depth"`
+	Confidence       float64  `json:"confidence"`
+}
+
 func (a *SimpleAgent) executeAnalysis(ctx context.Context, task AgentTask) AgentResult {
-	// Generic analysis for any topic
+	// Use LLM to assess relevance/credibility/importance from the task context
+	model := a.config.LLM.Routing.Analysis
+	if model == "" {
+		model = a.config.LLM.Routing.Fallback
+	}
+
+	// Build analysis context
+	query, _ := task.Parameters["query"].(string)
+	if query == "" {
+		query = task.Description
+	}
+	// Optional: include brief source summaries if provided
+	var sources []Source
+	if v, ok := task.Parameters["sources"].([]Source); ok {
+		sources = v
+	} else if vi, ok := task.Parameters["sources"].([]interface{}); ok {
+		for _, it := range vi {
+			if m, ok := it.(map[string]interface{}); ok {
+				s := Source{}
+				if t, _ := m["title"].(string); t != "" {
+					s.Title = t
+				}
+				if u, _ := m["url"].(string); u != "" {
+					s.URL = u
+				}
+				if ty, _ := m["type"].(string); ty != "" {
+					s.Type = ty
+				}
+				sources = append(sources, s)
+			}
+		}
+	}
+	srcCtx := ""
+	for i, s := range sources {
+		if i >= 5 {
+			break
+		}
+		srcCtx += fmt.Sprintf("- %s (%s) %s\n", s.Title, s.Type, s.URL)
+	}
+	prompt := fmt.Sprintf(`You are an assistant analyzing relevance and credibility for a research task.
+TASK: %s
+TOP CONTEXT SOURCES (may be empty):
+%s
+Respond ONLY as strict JSON with keys:
+{"relevance_score": number 0..1, "credibility_score": number 0..1, "importance_score": number 0..1, "sentiment": string one of [positive, neutral, negative], "key_topics": [string], "content_quality": string, "information_depth": string, "confidence": number 0..1}
+`, query, srcCtx)
+
+	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.2, "max_tokens": 800})
+	if err != nil {
+		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
+	}
+	var parsed analysisParseResult
+	// lenient JSON extraction
+	if e := json.Unmarshal([]byte(extractFirstJSON(out)), &parsed); e != nil {
+		// fallback minimal
+		parsed = analysisParseResult{
+			Relevance: 0.7, Credibility: 0.6, Importance: 0.65, Sentiment: "neutral", KeyTopics: []string{}, ContentQuality: "unknown", InformationDepth: "unknown", Confidence: 0.6,
+		}
+	}
+
+	cost := a.llmProvider.CalculateCost(inTok, outTok, model)
 	return AgentResult{
 		Data: map[string]interface{}{
-			"relevance_score":   0.85,
-			"credibility_score": 0.78,
-			"importance_score":  0.72,
-			"sentiment":         "neutral",
-			"key_topics":        []string{"topic1", "topic2", "topic3"},
-			"content_quality":   "high",
-			"information_depth": "comprehensive",
+			"relevance_score":   parsed.Relevance,
+			"credibility_score": parsed.Credibility,
+			"importance_score":  parsed.Importance,
+			"sentiment":         parsed.Sentiment,
+			"key_topics":        parsed.KeyTopics,
+			"content_quality":   parsed.ContentQuality,
+			"information_depth": parsed.InformationDepth,
+			"confidence":        parsed.Confidence,
 		},
-		Confidence: 0.8,
-		Cost:       0.3,
-		TokensUsed: 300,
-		ModelUsed:  "gpt-5",
+		Confidence: parsed.Confidence,
+		Cost:       cost,
+		TokensUsed: inTok + outTok,
+		ModelUsed:  model,
 	}
 }
 
 func (a *SimpleAgent) executeSynthesis(ctx context.Context, task AgentTask) AgentResult {
 	userThought, _ := task.Parameters["user_thought"].(string)
 	if userThought == "" {
-		userThought = "general topic"
+		userThought = task.Description
 	}
 
-	// Create generic synthesis (domain-agnostic)
-	summary := fmt.Sprintf("Comprehensive analysis of %s based on multiple sources and perspectives. The information has been analyzed for relevance, credibility, and importance.", userThought)
-
-	detailedReport := fmt.Sprintf(`
-COMPREHENSIVE ANALYSIS REPORT
-
-EXECUTIVE SUMMARY:
-Analysis of %s has been completed using multiple sources and analytical approaches. The information has been synthesized to provide a balanced and comprehensive view.
-
-KEY FINDINGS:
-- Multiple sources provide different perspectives on the topic
-- Information has been verified and analyzed for credibility
-- Conflicts and contradictions have been identified and resolved
-- Highlights have been extracted for quick reference
-
-METHODOLOGY:
-- Multi-source research across different types of information providers
-- Credibility assessment and bias detection
-- Conflict analysis and resolution
-- Synthesis of findings into coherent narrative
-
-QUALITY ASSESSMENT:
-The analysis provides comprehensive coverage while maintaining accuracy and objectivity.`, userThought)
-
-	highlights := []Highlight{
-		{
-			ID:        "key_development",
-			Title:     "Key Development Identified",
-			Content:   "Important development requiring attention",
-			Type:      "important",
-			Priority:  1,
-			Sources:   []string{"news_source_1"},
-			CreatedAt: time.Now(),
-			IsPinned:  false,
-		},
-		{
-			ID:        "ongoing_situation",
-			Title:     "Ongoing Situation",
-			Content:   "Situation that requires continued monitoring",
-			Type:      "ongoing",
-			Priority:  2,
-			Sources:   []string{"analysis_source_2"},
-			CreatedAt: time.Now(),
-			IsPinned:  true,
-		},
+	// Collect sources from parameters
+	var sources []Source
+	if v, ok := task.Parameters["sources"].([]Source); ok {
+		sources = v
+	} else if vi, ok := task.Parameters["sources"].([]interface{}); ok {
+		for _, it := range vi {
+			if m, ok := it.(map[string]interface{}); ok {
+				s := Source{}
+				if t, _ := m["title"].(string); t != "" {
+					s.Title = t
+				}
+				if u, _ := m["url"].(string); u != "" {
+					s.URL = u
+				}
+				if ty, _ := m["type"].(string); ty != "" {
+					s.Type = ty
+				}
+				if c, ok2 := m["content"].(string); ok2 {
+					s.Content = c
+				}
+				if sm, ok2 := m["summary"].(string); ok2 {
+					s.Summary = sm
+				}
+				sources = append(sources, s)
+			}
+		}
 	}
 
-	conflicts := []Conflict{
-		{
-			ID:          "minor_discrepancy",
-			Description: "Minor discrepancies found between sources regarding specific details",
-			Resolution:  "Discrepancies resolved through cross-referencing with authoritative sources",
-			Severity:    "low",
-			CreatedAt:   time.Now(),
-		},
+	// Build source context for the LLM
+	ctxBuf := &bytes.Buffer{}
+	max := 10
+	for i, s := range sources {
+		if i >= max {
+			break
+		}
+		fmt.Fprintf(ctxBuf, "- Title: %s\n  URL: %s\n  Type: %s\n  Summary: %s\n", s.Title, s.URL, s.Type, s.Summary)
 	}
 
+	model := a.config.LLM.Routing.Synthesis
+	if model == "" {
+		model = a.config.LLM.Routing.Fallback
+	}
+	prompt := fmt.Sprintf(`You are a synthesis agent creating a report from multiple sources.
+USER THOUGHT: %s
+SOURCES (top %d):
+%s
+Return ONLY strict JSON with keys:
+{
+  "summary": string,
+  "detailed_report": string,
+  "highlights": [ { "title": string, "content": string, "type": string, "priority": number 1..5, "source_urls": [string] } ],
+  "conflicts": [ { "description": string, "severity": "low|medium|high|critical", "resolution": string, "source_urls": [string] } ],
+  "confidence": number 0..1
+}
+`, userThought, max, ctxBuf.String())
+
+	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.2, "max_tokens": 1400})
+	if err != nil {
+		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
+	}
+
+	// Parse JSON
+	var parsed struct {
+		Summary    string  `json:"summary"`
+		Detailed   string  `json:"detailed_report"`
+		Confidence float64 `json:"confidence"`
+		Highlights []struct {
+			Title, Content, Type string
+			Priority             int
+			SourceURLs           []string `json:"source_urls"`
+		} `json:"highlights"`
+		Conflicts []struct {
+			Description, Severity, Resolution string
+			SourceURLs                        []string `json:"source_urls"`
+		} `json:"conflicts"`
+	}
+	raw := extractFirstJSON(out)
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		// Fallback: use whole text as summary
+		parsed.Summary = out
+		parsed.Detailed = out
+		parsed.Confidence = 0.6
+	}
+
+	// Map to internal types
+	now := time.Now()
+	var highlights []Highlight
+	for _, h := range parsed.Highlights {
+		hl := Highlight{ID: uuid.NewString(), Title: h.Title, Content: h.Content, Type: h.Type, Priority: h.Priority, CreatedAt: now, IsPinned: false}
+		if len(h.SourceURLs) == 0 {
+			// attach first 1-2 known source URLs
+			n := 0
+			for _, s := range sources {
+				if s.URL != "" {
+					hl.Sources = append(hl.Sources, s.URL)
+					n++
+					if n >= 2 {
+						break
+					}
+				}
+			}
+		} else {
+			hl.Sources = h.SourceURLs
+		}
+		highlights = append(highlights, hl)
+	}
+	var conflicts []Conflict
+	for _, c := range parsed.Conflicts {
+		conflicts = append(conflicts, Conflict{ID: uuid.NewString(), Description: c.Description, Resolution: c.Resolution, Severity: c.Severity, CreatedAt: now})
+	}
+
+	cost := a.llmProvider.CalculateCost(inTok, outTok, model)
 	return AgentResult{
 		Data: map[string]interface{}{
-			"summary":                  summary,
-			"detailed_report":          detailedReport,
-			"highlights":               highlights,
-			"conflicts":                conflicts,
-			"analysis_quality":         "high",
-			"information_completeness": 0.85,
+			"summary":         parsed.Summary,
+			"detailed_report": parsed.Detailed,
+			"highlights":      highlights,
+			"conflicts":       conflicts,
+			"confidence":      parsed.Confidence,
 		},
-		Confidence: 0.85,
-		Cost:       1.2,
-		TokensUsed: 1200,
-		ModelUsed:  "gpt-5",
+		Sources:    sources,
+		Confidence: parsed.Confidence,
+		Cost:       cost,
+		TokensUsed: inTok + outTok,
+		ModelUsed:  model,
 	}
 }
 
 func (a *SimpleAgent) executeConflictDetection(ctx context.Context, task AgentTask) AgentResult {
-	// Generic conflict detection for any topic
-	conflicts := []Conflict{
-		{
-			ID:          "source_discrepancy",
-			Description: "Different sources report slightly different details about the same event",
-			Resolution:  "Cross-referenced with authoritative sources to determine most accurate information",
-			Severity:    "low",
-			CreatedAt:   time.Now(),
-		},
+	// Gather sources either from parameters or dependency inputs
+	var sources []Source
+	if v, ok := task.Parameters["sources"].([]Source); ok {
+		sources = v
+	} else if vi, ok := task.Parameters["sources"].([]interface{}); ok {
+		for _, it := range vi {
+			if m, ok := it.(map[string]interface{}); ok {
+				s := Source{}
+				if t, _ := m["title"].(string); t != "" {
+					s.Title = t
+				}
+				if u, _ := m["url"].(string); u != "" {
+					s.URL = u
+				}
+				if ty, _ := m["type"].(string); ty != "" {
+					s.Type = ty
+				}
+				if sm, ok2 := m["summary"].(string); ok2 {
+					s.Summary = sm
+				}
+				sources = append(sources, s)
+			}
+		}
 	}
+	if inputs, ok := task.Parameters["inputs"].([]AgentResult); ok && len(sources) == 0 {
+		for _, r := range inputs {
+			if len(r.Sources) > 0 {
+				sources = append(sources, r.Sources...)
+			}
+		}
+	}
+	sources = DeduplicateSources(sources)
+	// Build statements from sources
+	buf := &bytes.Buffer{}
+	max := 12
+	for i, s := range sources {
+		if i >= max {
+			break
+		}
+		fmt.Fprintf(buf, "- %s :: %s\n", s.Title, s.Summary)
+	}
+	model := a.config.LLM.Routing.Analysis
+	if model == "" {
+		model = a.config.LLM.Routing.Fallback
+	}
+	prompt := fmt.Sprintf(`You are a conflict detection assistant.
+Given the following statements extracted from different sources, find conflicting claims.
+List concise conflicts with severity and a suggested resolution.
+STATEMENTS:\n%s\n
+Return ONLY strict JSON: { "conflicts": [ { "description": string, "severity": "low|medium|high|critical", "resolution": string } ], "confidence": number 0..1 }`, buf.String())
 
+	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.2, "max_tokens": 800})
+	if err != nil {
+		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
+	}
+	var parsed struct {
+		Conflicts  []struct{ Description, Severity, Resolution string } `json:"conflicts"`
+		Confidence float64                                              `json:"confidence"`
+	}
+	if e := json.Unmarshal([]byte(extractFirstJSON(out)), &parsed); e != nil {
+		parsed.Conflicts = nil
+		parsed.Confidence = 0.5
+	}
+	now := time.Now()
+	var conflicts []Conflict
+	for _, c := range parsed.Conflicts {
+		conflicts = append(conflicts, Conflict{ID: uuid.NewString(), Description: c.Description, Resolution: c.Resolution, Severity: c.Severity, CreatedAt: now})
+	}
+	cost := a.llmProvider.CalculateCost(inTok, outTok, model)
 	return AgentResult{
 		Data: map[string]interface{}{
 			"conflicts":      conflicts,
 			"conflict_count": len(conflicts),
-			"severity_breakdown": map[string]int{
-				"low":      1,
-				"medium":   0,
-				"high":     0,
-				"critical": 0,
-			},
-			"resolution_rate":    1.0,
-			"conflicts_resolved": true,
+			"confidence":     parsed.Confidence,
 		},
-		Confidence: 0.8,
-		Cost:       0.2,
-		TokensUsed: 200,
-		ModelUsed:  "gpt-5",
+		Sources:    sources,
+		Confidence: parsed.Confidence,
+		Cost:       cost,
+		TokensUsed: inTok + outTok,
+		ModelUsed:  model,
 	}
 }
 
 func (a *SimpleAgent) executeHighlightManagement(ctx context.Context, task AgentTask) AgentResult {
+	// Use LLM to extract key highlights from sources
+	var sources []Source
+	if v, ok := task.Parameters["sources"].([]Source); ok {
+		sources = v
+	}
+	if vi, ok := task.Parameters["sources"].([]interface{}); ok && len(sources) == 0 {
+		for _, it := range vi {
+			if m, ok := it.(map[string]interface{}); ok {
+				s := Source{}
+				if t, _ := m["title"].(string); t != "" {
+					s.Title = t
+				}
+				if u, _ := m["url"].(string); u != "" {
+					s.URL = u
+				}
+				if sm, ok2 := m["summary"].(string); ok2 {
+					s.Summary = sm
+				}
+				sources = append(sources, s)
+			}
+		}
+	}
+	if inputs, ok := task.Parameters["inputs"].([]AgentResult); ok && len(sources) == 0 {
+		for _, r := range inputs {
+			if len(r.Sources) > 0 {
+				sources = append(sources, r.Sources...)
+			}
+		}
+	}
+	sources = DeduplicateSources(sources)
+	buf := &bytes.Buffer{}
+	max := 12
+	for i, s := range sources {
+		if i >= max {
+			break
+		}
+		fmt.Fprintf(buf, "- %s :: %s (%s)\n", s.Title, s.Summary, s.URL)
+	}
+	model := a.config.LLM.Routing.Analysis
+	if model == "" {
+		model = a.config.LLM.Routing.Fallback
+	}
+	prompt := fmt.Sprintf(`Extract the most important highlights from the following source snippets.
+Return ONLY strict JSON: { "highlights": [ { "title": string, "content": string, "type": "breaking|important|ongoing|general", "priority": 1|2|3|4|5, "source_urls": [string] } ], "confidence": number 0..1 }
+SOURCES:\n%s`, buf.String())
+	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.3, "max_tokens": 900})
+	if err != nil {
+		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
+	}
+	var parsed struct {
+		Highlights []struct {
+			Title, Content, Type string
+			Priority             int
+			SourceURLs           []string `json:"source_urls"`
+		}
+		Confidence float64
+	}
+	_ = json.Unmarshal([]byte(extractFirstJSON(out)), &parsed)
+	now := time.Now()
+	var highs []Highlight
+	for _, h := range parsed.Highlights {
+		hl := Highlight{ID: uuid.NewString(), Title: h.Title, Content: h.Content, Type: h.Type, Priority: h.Priority, CreatedAt: now, IsPinned: h.Priority <= 2}
+		if len(h.SourceURLs) == 0 {
+			// attach one source if none specified
+			for _, s := range sources {
+				if s.URL != "" {
+					hl.Sources = []string{s.URL}
+					break
+				}
+			}
+		} else {
+			hl.Sources = h.SourceURLs
+		}
+		highs = append(highs, hl)
+	}
+	cost := a.llmProvider.CalculateCost(inTok, outTok, model)
 	return AgentResult{
 		Data: map[string]interface{}{
-			"highlights": []Highlight{
-				{
-					ID:        "highlight1",
-					Title:     "Breaking Political News",
-					Content:   "Major political development requiring attention",
-					Type:      "breaking",
-					Priority:  1,
-					IsPinned:  true,
-					CreatedAt: time.Now(),
-				},
-			},
-			"highlight_count": 1,
+			"highlights":      highs,
+			"highlight_count": len(highs),
+			"confidence":      parsed.Confidence,
 		},
-		Confidence: 0.85,
-		Cost:       0.15,
-		TokensUsed: 150,
-		ModelUsed:  "gpt-5",
+		Sources:    sources,
+		Confidence: parsed.Confidence,
+		Cost:       cost,
+		TokensUsed: inTok + outTok,
+		ModelUsed:  model,
 	}
 }
 
 func (a *SimpleAgent) executeKnowledgeGraph(ctx context.Context, task AgentTask) AgentResult {
+	// Build context from sources and prior results
 	topic, _ := task.Parameters["topic"].(string)
 	if topic == "" {
 		topic = "General Topic"
 	}
-
+	var sources []Source
+	if v, ok := task.Parameters["sources"].([]Source); ok {
+		sources = v
+	}
+	if vi, ok := task.Parameters["sources"].([]interface{}); ok && len(sources) == 0 {
+		for _, it := range vi {
+			if m, ok := it.(map[string]interface{}); ok {
+				s := Source{}
+				if t, _ := m["title"].(string); t != "" {
+					s.Title = t
+				}
+				if u, _ := m["url"].(string); u != "" {
+					s.URL = u
+				}
+				if sm, ok2 := m["summary"].(string); ok2 {
+					s.Summary = sm
+				}
+				sources = append(sources, s)
+			}
+		}
+	}
+	if inputs, ok := task.Parameters["inputs"].([]AgentResult); ok && len(sources) == 0 {
+		for _, r := range inputs {
+			if len(r.Sources) > 0 {
+				sources = append(sources, r.Sources...)
+			}
+		}
+	}
+	sources = DeduplicateSources(sources)
+	buf := &bytes.Buffer{}
+	max := 10
+	for i, s := range sources {
+		if i >= max {
+			break
+		}
+		fmt.Fprintf(buf, "- %s :: %s\n", s.Title, s.Summary)
+	}
+	model := a.config.LLM.Routing.Analysis
+	if model == "" {
+		model = a.config.LLM.Routing.Fallback
+	}
+	prompt := fmt.Sprintf(`Extract entities and relationships for a knowledge graph about "%s" from the notes below.
+Return ONLY strict JSON:
+{ "nodes": [ { "id": string, "type": string, "label": string, "description": string, "confidence": number 0..1 } ],
+  "edges": [ { "id": string, "from": string, "to": string, "type": string, "weight": number 0..1, "confidence": number 0..1 } ],
+  "confidence": number 0..1 } 
+NOTES:\n%s`, topic, buf.String())
+	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.2, "max_tokens": 900})
+	if err != nil {
+		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
+	}
+	var parsed struct {
+		Nodes []struct {
+			ID, Type, Label, Description string
+			Confidence                   float64
+		} `json:"nodes"`
+		Edges []struct {
+			ID, From, To, Type string
+			Weight, Confidence float64
+		} `json:"edges"`
+		Confidence float64 `json:"confidence"`
+	}
+	_ = json.Unmarshal([]byte(extractFirstJSON(out)), &parsed)
+	now := time.Now()
+	var nodes []KnowledgeNode
+	for _, n := range parsed.Nodes {
+		id := n.ID
+		if id == "" {
+			id = uuid.NewString()
+		}
+		nodes = append(nodes, KnowledgeNode{ID: id, Type: n.Type, Label: n.Label, Description: n.Description, Confidence: n.Confidence, CreatedAt: now, UpdatedAt: now})
+	}
+	var edges []KnowledgeEdge
+	for _, e := range parsed.Edges {
+		id := e.ID
+		if id == "" {
+			id = uuid.NewString()
+		}
+		edges = append(edges, KnowledgeEdge{ID: id, From: e.From, To: e.To, Type: e.Type, Weight: e.Weight, Confidence: e.Confidence, CreatedAt: now})
+	}
+	cost := a.llmProvider.CalculateCost(inTok, outTok, model)
 	return AgentResult{
 		Data: map[string]interface{}{
-			"nodes": []KnowledgeNode{
-				{
-					ID:          "main_concept",
-					Type:        "concept",
-					Label:       topic,
-					Description: fmt.Sprintf("Main concept related to %s", topic),
-					Confidence:  0.9,
-					CreatedAt:   time.Now(),
-					UpdatedAt:   time.Now(),
-				},
-			},
-			"edges": []KnowledgeEdge{
-				{
-					ID:         "relationship_1",
-					From:       "main_concept",
-					To:         "main_concept",
-					Type:       "relates_to",
-					Weight:     0.8,
-					Confidence: 0.85,
-					CreatedAt:  time.Now(),
-				},
-			},
-			"graph_updated": true,
-			"topic":         topic,
+			"nodes":      nodes,
+			"edges":      edges,
+			"topic":      topic,
+			"confidence": parsed.Confidence,
 		},
-		Confidence: 0.8,
-		Cost:       0.25,
-		TokensUsed: 250,
-		ModelUsed:  "gpt-5",
+		Sources:    sources,
+		Confidence: parsed.Confidence,
+		Cost:       cost,
+		TokensUsed: inTok + outTok,
+		ModelUsed:  model,
 	}
+}
+
+// extractFirstJSON attempts to find the first top-level JSON object in a string
+func extractFirstJSON(s string) string {
+	start := -1
+	depth := 0
+	for i, ch := range s {
+		if ch == '{' {
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		} else if ch == '}' {
+			if depth > 0 {
+				depth--
+			}
+			if depth == 0 && start != -1 {
+				return s[start : i+1]
+			}
+		}
+	}
+	return s
 }
