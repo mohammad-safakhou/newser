@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -85,10 +86,14 @@ func Run(cfg *config.Config) error {
 			_ = c.JSON(code, map[string]interface{}{"error": msg})
 		}
 	}
+	allowed := os.Getenv("CORS_ALLOW_ORIGINS")
+	if allowed == "" {
+		allowed = "http://localhost:3000"
+	}
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins:     []string{"*"},
+		AllowOrigins:     strings.Split(allowed, ","),
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Content-Type", "Cookie"},
+		AllowHeaders:     []string{"Content-Type", "Cookie", "Authorization"},
 		AllowCredentials: true,
 	}))
 
@@ -174,7 +179,7 @@ func toInt(s string) int { var n int; fmt.Sscanf(s, "%d", &n); return n }
 //	@Security	CookieAuth
 //	@Produce	json
 //	@Success	200	{object}	MeResponse
-//	@Router		/me [get]
+//	@Router		/api/me [get]
 func meHandler(c echo.Context) error {
 	return c.JSON(200, map[string]string{"user_id": c.Get("user_id").(string)})
 }

@@ -65,6 +65,7 @@ services:
         condition: service_completed_successfully
     environment:
       NEWSER_HTTP_ADDR: ":10001"
+      CORS_ALLOW_ORIGINS: "http://localhost:3000"
       NEWSER_STORAGE_POSTGRES_HOST: postgres
       NEWSER_STORAGE_POSTGRES_PORT: "5432"
       NEWSER_STORAGE_POSTGRES_USER: newser
@@ -84,6 +85,8 @@ services:
     build:
       context: ./webui
       dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:10001}
     image: newser-webui:latest
     depends_on:
       - app

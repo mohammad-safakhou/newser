@@ -4,10 +4,16 @@ export type Run = { ID: string; Status: string; StartedAt: string; FinishedAt?: 
 export type ChatMessage = { role: 'user' | 'assistant'; content: string }
 
 // Enhanced request with abort support
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '')
+
 export async function apiRequest<T = any>(path: string, options: RequestInit & { signal?: AbortSignal } = {}): Promise<T> {
-  const res = await fetch(path, {
+  const url = /^https?:\/\//i.test(path)
+    ? path
+    : `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`
+  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('auth_token') : null
+  const res = await fetch(url, {
     credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(options.headers || {}) },
     ...options,
   })
   let data: any = null
@@ -26,7 +32,17 @@ export async function apiRequest<T = any>(path: string, options: RequestInit & {
 export const api2 = {
   me: () => apiRequest<Me>('/api/me'),
   signup: (email: string, password: string) => apiRequest('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email, password }) }),
-  login: (email: string, password: string) => apiRequest('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  login: async (email: string, password: string) => {
+    const res = await apiRequest<{ token?: string }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
+    if (res && (res as any).token) {
+      try { localStorage.setItem('auth_token', (res as any).token) } catch {}
+    }
+    return res
+  },
+  logout: async () => {
+    try { await apiRequest('/api/auth/logout', { method: 'POST' }) } catch {}
+    try { localStorage.removeItem('auth_token') } catch {}
+  },
   topics: () => apiRequest<Topic[]>('/api/topics'),
   createTopic: (name: string) => apiRequest('/api/topics', { method: 'POST', body: JSON.stringify({ name, preferences: { bias_detection: true }, schedule_cron: '@daily' }) }),
   createTopicFull: (name: string, preferences: Record<string, any>, scheduleCron: string) => apiRequest('/api/topics', { method: 'POST', body: JSON.stringify({ name, preferences, schedule_cron: scheduleCron }) }),

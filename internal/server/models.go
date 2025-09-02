@@ -32,19 +32,21 @@ type MeResponse struct {
 	UserID string `json:"user_id"`
 }
 
+type Preferences map[string]interface{}
+
 // CreateTopicRequest represents a new topic payload.
 type CreateTopicRequest struct {
-	Name         string                 `json:"name"`
-	Preferences  map[string]interface{} `json:"preferences"`
-	ScheduleCron string                 `json:"schedule_cron"`
+	Name         string      `json:"name"`
+	Preferences  Preferences `json:"preferences"`
+	ScheduleCron string      `json:"schedule_cron"`
 }
 
 // TopicDetailResponse is a detailed topic view.
 type TopicDetailResponse struct {
-	ID           string                 `json:"id"`
-	Name         string                 `json:"name"`
-	ScheduleCron string                 `json:"schedule_cron"`
-	Preferences  map[string]interface{} `json:"preferences"`
+	ID           string      `json:"id"`
+	Name         string      `json:"name"`
+	ScheduleCron string      `json:"schedule_cron"`
+	Preferences  Preferences `json:"preferences"`
 }
 
 // ChatRequest is the request body for topic chat endpoints.
@@ -60,10 +62,10 @@ type ChatResponse struct {
 
 // AssistRequest is the request for LLM assist endpoint.
 type AssistRequest struct {
-	Message      string                 `json:"message"`
-	Name         string                 `json:"name"`
-	Preferences  map[string]interface{} `json:"preferences"`
-	ScheduleCron string                 `json:"schedule_cron"`
+	Message      string      `json:"message"`
+	Name         string      `json:"name"`
+	Preferences  Preferences `json:"preferences"`
+	ScheduleCron string      `json:"schedule_cron"`
 }
 
 // AssistResponse mirrors ChatResponse shape.

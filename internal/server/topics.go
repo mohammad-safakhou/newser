@@ -38,7 +38,7 @@ func (h *TopicsHandler) Register(g *echo.Group, secret []byte) {
 //	@Produce	json
 //	@Success	200	{array}		store.Topic
 //	@Failure	500	{object}	HTTPError
-//	@Router		/topics [get]
+//	@Router		/api/topics [get]
 func (h *TopicsHandler) list(c echo.Context) error {
 	userID := c.Get("user_id").(string)
 	items, err := h.Store.ListTopics(c.Request().Context(), userID)
@@ -60,14 +60,10 @@ func (h *TopicsHandler) list(c echo.Context) error {
 //	@Success	201		{object}	IDResponse
 //	@Failure	400		{object}	HTTPError
 //	@Failure	500		{object}	HTTPError
-//	@Router		/topics [post]
+//	@Router		/api/topics [post]
 func (h *TopicsHandler) create(c echo.Context) error {
 	userID := c.Get("user_id").(string)
-	var req struct {
-		Name         string                 `json:"name"`
-		Preferences  map[string]interface{} `json:"preferences"`
-		ScheduleCron string                 `json:"schedule_cron"`
-	}
+	var req CreateTopicRequest
 	if err := c.Bind(&req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
@@ -79,7 +75,7 @@ func (h *TopicsHandler) create(c echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	return c.JSON(http.StatusCreated, map[string]string{"id": id})
+	return c.JSON(http.StatusCreated, IDResponse{ID: id})
 }
 
 // get returns detailed topic with preferences
@@ -92,7 +88,7 @@ func (h *TopicsHandler) create(c echo.Context) error {
 //	@Produce	json
 //	@Success	200	{object}	TopicDetailResponse
 //	@Failure	404	{object}	HTTPError
-//	@Router		/topics/{id} [get]
+//	@Router		/api/topics/{id} [get]
 func (h *TopicsHandler) get(c echo.Context) error {
 	userID := c.Get("user_id").(string)
 	topicID := c.Param("id")
@@ -102,11 +98,11 @@ func (h *TopicsHandler) get(c echo.Context) error {
 	}
 	var prefs map[string]interface{}
 	_ = json.Unmarshal(prefsB, &prefs)
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"id":            topicID,
-		"name":          name,
-		"schedule_cron": cron,
-		"preferences":   prefs,
+	return c.JSON(http.StatusOK, TopicDetailResponse{
+		ID:           topicID,
+		Name:         name,
+		ScheduleCron: cron,
+		Preferences:  prefs,
 	})
 }
 
@@ -124,7 +120,7 @@ func (h *TopicsHandler) get(c echo.Context) error {
 //	@Failure	400		{object}	HTTPError
 //	@Failure	404		{object}	HTTPError
 //	@Failure	503		{object}	HTTPError
-//	@Router		/topics/{id}/chat [post]
+//	@Router		/api/topics/{id}/chat [post]
 func (h *TopicsHandler) chat(c echo.Context) error {
 	if h.LLM == nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "LLM not configured")
@@ -137,9 +133,7 @@ func (h *TopicsHandler) chat(c echo.Context) error {
 	}
 	var prefs map[string]interface{}
 	_ = json.Unmarshal(prefsB, &prefs)
-	var req struct {
-		Message string `json:"message"`
-	}
+	var req ChatRequest
 	if err := c.Bind(&req); err != nil || req.Message == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "message required")
 	}
@@ -157,7 +151,11 @@ func (h *TopicsHandler) chat(c echo.Context) error {
 		log.Printf("update topic prefs error: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": reply, "topic": map[string]interface{}{"Title": name, "Preferences": newPrefs, "CronSpec": newCron}})
+	return c.JSON(http.StatusOK, ChatResponse{
+		Message: reply,
+		Topic: map[string]interface{}{
+			"Title": name, "Preferences": newPrefs, "CronSpec": newCron},
+	})
 }
 
 // assist provides LLM guidance for drafting a new topic before persistence
@@ -172,17 +170,12 @@ func (h *TopicsHandler) chat(c echo.Context) error {
 //	@Success	200		{object}	AssistResponse
 //	@Failure	400		{object}	HTTPError
 //	@Failure	503		{object}	HTTPError
-//	@Router		/topics/assist/chat [post]
+//	@Router		/api/topics/assist/chat [post]
 func (h *TopicsHandler) assist(c echo.Context) error {
 	if h.LLM == nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "LLM not configured")
 	}
-	var req struct {
-		Message      string                 `json:"message"`
-		Name         string                 `json:"name"`
-		Preferences  map[string]interface{} `json:"preferences"`
-		ScheduleCron string                 `json:"schedule_cron"`
-	}
+	var req AssistRequest
 	if err := c.Bind(&req); err != nil || req.Message == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "message required")
 	}
@@ -190,7 +183,7 @@ func (h *TopicsHandler) assist(c echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": reply, "topic": map[string]interface{}{"Title": req.Name, "Preferences": newPrefs, "CronSpec": newCron}})
+	return c.JSON(http.StatusOK, AssistResponse{Message: reply, Topic: map[string]interface{}{"Title": req.Name, "Preferences": newPrefs, "CronSpec": newCron}})
 }
 
 // llmRefineTopic crafts a prompt and parses a strict JSON response to update preferences/cron

@@ -15,7 +15,7 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
-        "/auth/login": {
+        "/api/auth/login": {
             "post": {
                 "description": "Returns JWT in cookie and body; supports Bearer flows",
                 "consumes": [
@@ -67,7 +67,7 @@ const docTemplate = `{
                 }
             }
         },
-        "/auth/logout": {
+        "/api/auth/logout": {
             "post": {
                 "produces": [
                     "application/json"
@@ -86,7 +86,7 @@ const docTemplate = `{
                 }
             }
         },
-        "/auth/signup": {
+        "/api/auth/signup": {
             "post": {
                 "description": "Create a new user account",
                 "consumes": [
@@ -138,7 +138,7 @@ const docTemplate = `{
                 }
             }
         },
-        "/me": {
+        "/api/me": {
             "get": {
                 "security": [
                     {
@@ -165,7 +165,7 @@ const docTemplate = `{
                 }
             }
         },
-        "/topics": {
+        "/api/topics": {
             "get": {
                 "security": [
                     {
@@ -252,7 +252,7 @@ const docTemplate = `{
                 }
             }
         },
-        "/topics/assist/chat": {
+        "/api/topics/assist/chat": {
             "post": {
                 "security": [
                     {
@@ -305,7 +305,7 @@ const docTemplate = `{
                 }
             }
         },
-        "/topics/{id}": {
+        "/api/topics/{id}": {
             "get": {
                 "security": [
                     {
@@ -347,7 +347,7 @@ const docTemplate = `{
                 }
             }
         },
-        "/topics/{id}/chat": {
+        "/api/topics/{id}/chat": {
             "post": {
                 "security": [
                     {
@@ -413,7 +413,7 @@ const docTemplate = `{
                 }
             }
         },
-        "/topics/{topic_id}/latest_result": {
+        "/api/topics/{topic_id}/latest_result": {
             "get": {
                 "security": [
                     {
@@ -456,7 +456,7 @@ const docTemplate = `{
                 }
             }
         },
-        "/topics/{topic_id}/runs": {
+        "/api/topics/{topic_id}/runs": {
             "get": {
                 "security": [
                     {
@@ -507,7 +507,7 @@ const docTemplate = `{
                 }
             }
         },
-        "/topics/{topic_id}/trigger": {
+        "/api/topics/{topic_id}/trigger": {
             "post": {
                 "security": [
                     {

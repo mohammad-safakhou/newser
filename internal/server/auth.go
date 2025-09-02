@@ -37,9 +37,9 @@ func (a *AuthHandler) Register(g *echo.Group) {
 //	@Failure		400		{object}	HTTPError
 //	@Failure		409		{object}	HTTPError
 //	@Failure		500		{object}	HTTPError
-//	@Router			/auth/signup [post]
+//	@Router			/api/auth/signup [post]
 func (a *AuthHandler) signup(c echo.Context) error {
-	var req struct{ Email, Password string }
+	var req AuthSignupRequest
 	if err := c.Bind(&req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
@@ -56,9 +56,6 @@ func (a *AuthHandler) signup(c echo.Context) error {
 	return c.NoContent(http.StatusCreated)
 }
 
-// naive in-memory limiter per process
-var lastLoginAttempt = time.Time{}
-
 // Login
 //
 //	@Summary		Login
@@ -71,15 +68,9 @@ var lastLoginAttempt = time.Time{}
 //	@Failure		400		{object}	HTTPError
 //	@Failure		401		{object}	HTTPError
 //	@Failure		500		{object}	HTTPError
-//	@Router			/auth/login [post]
+//	@Router			/api/auth/login [post]
 func (a *AuthHandler) login(c echo.Context) error {
-	// basic rate limit: at most 1 attempt per 300ms per instance
-	if time.Since(lastLoginAttempt) < 300*time.Millisecond {
-		return echo.NewHTTPError(http.StatusTooManyRequests, "too many requests")
-	}
-	lastLoginAttempt = time.Now()
-
-	var req struct{ Email, Password string }
+	var req AuthLoginRequest
 	if err := c.Bind(&req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
@@ -122,7 +113,7 @@ func (a *AuthHandler) login(c echo.Context) error {
 //	@Tags		auth
 //	@Produce	json
 //	@Success	200	{string}	string	"OK"
-//	@Router		/auth/logout [post]
+//	@Router		/api/auth/logout [post]
 func (a *AuthHandler) logout(c echo.Context) error {
 	cookie := new(http.Cookie)
 	cookie.Name = "auth"

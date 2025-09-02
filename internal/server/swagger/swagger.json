@@ -4,7 +4,7 @@
         "contact": {}
     },
     "paths": {
-        "/auth/login": {
+        "/api/auth/login": {
             "post": {
                 "description": "Returns JWT in cookie and body; supports Bearer flows",
                 "consumes": [
@@ -56,7 +56,7 @@
                 }
             }
         },
-        "/auth/logout": {
+        "/api/auth/logout": {
             "post": {
                 "produces": [
                     "application/json"
@@ -75,7 +75,7 @@
                 }
             }
         },
-        "/auth/signup": {
+        "/api/auth/signup": {
             "post": {
                 "description": "Create a new user account",
                 "consumes": [
@@ -127,7 +127,7 @@
                 }
             }
         },
-        "/me": {
+        "/api/me": {
             "get": {
                 "security": [
                     {
@@ -154,7 +154,7 @@
                 }
             }
         },
-        "/topics": {
+        "/api/topics": {
             "get": {
                 "security": [
                     {
@@ -241,7 +241,7 @@
                 }
             }
         },
-        "/topics/assist/chat": {
+        "/api/topics/assist/chat": {
             "post": {
                 "security": [
                     {
@@ -294,7 +294,7 @@
                 }
             }
         },
-        "/topics/{id}": {
+        "/api/topics/{id}": {
             "get": {
                 "security": [
                     {
@@ -336,7 +336,7 @@
                 }
             }
         },
-        "/topics/{id}/chat": {
+        "/api/topics/{id}/chat": {
             "post": {
                 "security": [
                     {
@@ -402,7 +402,7 @@
                 }
             }
         },
-        "/topics/{topic_id}/latest_result": {
+        "/api/topics/{topic_id}/latest_result": {
             "get": {
                 "security": [
                     {
@@ -445,7 +445,7 @@
                 }
             }
         },
-        "/topics/{topic_id}/runs": {
+        "/api/topics/{topic_id}/runs": {
             "get": {
                 "security": [
                     {
@@ -496,7 +496,7 @@
                 }
             }
         },
-        "/topics/{topic_id}/trigger": {
+        "/api/topics/{topic_id}/trigger": {
             "post": {
                 "security": [
                     {

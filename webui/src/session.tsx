@@ -36,7 +36,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     try { await api2.signup(email, password); await login(email, password) } catch (e:any) { setError(e.message); throw e }
   }, [login])
 
-  const logout = useCallback(async () => { setUser(null) }, []) // server currently has no logout endpoint
+  const logout = useCallback(async () => { await api2.logout(); setUser(null) }, [])
 
   const refresh = load
 
@@ -48,4 +48,3 @@ export function useSession() {
   if (!ctx) throw new Error('useSession outside provider')
   return ctx
 }
-

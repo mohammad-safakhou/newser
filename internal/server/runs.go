@@ -2,16 +2,13 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"time"
-
-	"log"
-	"os"
 
 	"github.com/labstack/echo/v4"
 	"github.com/mohammad-safakhou/newser/config"
 	"github.com/mohammad-safakhou/newser/internal/agent/core"
-	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
 	"github.com/mohammad-safakhou/newser/internal/store"
 )
 
@@ -47,7 +44,7 @@ func (h *RunsHandler) Register(g *echo.Group, secret []byte) {
 //	@Success	202	{object}	IDResponse	"Run accepted"
 //	@Failure	404	{object}	HTTPError
 //	@Failure	500	{object}	HTTPError
-//	@Router		/topics/{topic_id}/trigger [post]
+//	@Router		/api/topics/{topic_id}/trigger [post]
 func (h *RunsHandler) trigger(c echo.Context) error {
 	userID := c.Get("user_id").(string)
 	topicID := c.Param("topic_id")
@@ -55,6 +52,9 @@ func (h *RunsHandler) trigger(c echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
 	}
+
+	var prefs Preferences
+	err = json.Unmarshal(prefsB, &prefs)
 
 	// create run
 	runID, err := h.store.CreateRun(c.Request().Context(), topicID, "running")
@@ -67,29 +67,17 @@ func (h *RunsHandler) trigger(c echo.Context) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
 
-		orch := h.orch
-		if orch == nil {
-			// Fallback: create once if not provided (should not happen)
-			tele := telemetry.NewTelemetry(h.cfg.Telemetry)
-			defer tele.Shutdown()
-			logger := log.New(os.Stdout, "[ORCH] ", log.LstdFlags)
-			orch, err = core.NewOrchestrator(h.cfg, logger, tele)
-			if err != nil {
-				_ = h.store.FinishRun(ctx, runID, "failed", strPtr(err.Error()))
-				return
-			}
-		}
-
 		// construct thought from topic name/preferences
 		thought := core.UserThought{
-			ID:        runID,
-			Content:   name,
-			Timestamp: time.Now(),
+			ID:          runID,
+			Content:     name,
+			Preferences: prefs,
+			Timestamp:   time.Now(),
 		}
 		// optional: pass preferences map into thought
 		_ = prefsB
 
-		result, err := orch.ProcessThought(ctx, thought)
+		result, err := h.orch.ProcessThought(ctx, thought)
 		if err != nil {
 			_ = h.store.FinishRun(ctx, runID, "failed", strPtr(err.Error()))
 			return
@@ -105,7 +93,7 @@ func (h *RunsHandler) trigger(c echo.Context) error {
 		_ = h.store.FinishRun(ctx, runID, "succeeded", nil)
 	}()
 
-	return c.JSON(http.StatusAccepted, map[string]string{"run_id": runID})
+	return c.JSON(http.StatusAccepted, IDResponse{ID: runID})
 }
 
 // List runs of a topic
@@ -119,7 +107,7 @@ func (h *RunsHandler) trigger(c echo.Context) error {
 //	@Success	200	{array}		store.Run
 //	@Failure	404	{object}	HTTPError
 //	@Failure	500	{object}	HTTPError
-//	@Router		/topics/{topic_id}/runs [get]
+//	@Router		/api/topics/{topic_id}/runs [get]
 func (h *RunsHandler) list(c echo.Context) error {
 	userID := c.Get("user_id").(string)
 	topicID := c.Param("topic_id")
@@ -143,7 +131,7 @@ func (h *RunsHandler) list(c echo.Context) error {
 //	@Produce	json
 //	@Success	200	{object}	map[string]interface{}
 //	@Failure	404	{object}	HTTPError
-//	@Router		/topics/{topic_id}/latest_result [get]
+//	@Router		/api/topics/{topic_id}/latest_result [get]
 func (h *RunsHandler) latest(c echo.Context) error {
 	userID := c.Get("user_id").(string)
 	topicID := c.Param("topic_id")

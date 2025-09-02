@@ -2,3 +2,4 @@ bin
 runs
 .idea/
 .cursor
+config/local.config.json

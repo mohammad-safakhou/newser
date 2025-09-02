@@ -117,7 +117,7 @@ definitions:
 info:
   contact: {}
 paths:
-  /auth/login:
+  /api/auth/login:
     post:
       consumes:
       - application/json
@@ -151,7 +151,7 @@ paths:
       summary: Login
       tags:
       - auth
-  /auth/logout:
+  /api/auth/logout:
     post:
       produces:
       - application/json
@@ -163,7 +163,7 @@ paths:
       summary: Logout
       tags:
       - auth
-  /auth/signup:
+  /api/auth/signup:
     post:
       consumes:
       - application/json
@@ -197,7 +197,7 @@ paths:
       summary: User signup
       tags:
       - auth
-  /me:
+  /api/me:
     get:
       produces:
       - application/json
@@ -212,7 +212,7 @@ paths:
       summary: Current user
       tags:
       - auth
-  /topics:
+  /api/topics:
     get:
       produces:
       - application/json
@@ -264,7 +264,7 @@ paths:
       summary: Create topic
       tags:
       - topics
-  /topics/{id}:
+  /api/topics/{id}:
     get:
       parameters:
       - description: Topic ID
@@ -289,7 +289,7 @@ paths:
       summary: Get topic
       tags:
       - topics
-  /topics/{id}/chat:
+  /api/topics/{id}/chat:
     post:
       consumes:
       - application/json
@@ -330,7 +330,7 @@ paths:
       summary: Chat with topic assistant
       tags:
       - topics
-  /topics/{topic_id}/latest_result:
+  /api/topics/{topic_id}/latest_result:
     get:
       parameters:
       - description: Topic ID
@@ -356,7 +356,7 @@ paths:
       summary: Latest processing result
       tags:
       - runs
-  /topics/{topic_id}/runs:
+  /api/topics/{topic_id}/runs:
     get:
       parameters:
       - description: Topic ID
@@ -387,7 +387,7 @@ paths:
       summary: List runs
       tags:
       - runs
-  /topics/{topic_id}/trigger:
+  /api/topics/{topic_id}/trigger:
     post:
       parameters:
       - description: Topic ID
@@ -416,7 +416,7 @@ paths:
       summary: Trigger run
       tags:
       - runs
-  /topics/assist/chat:
+  /api/topics/assist/chat:
     post:
       consumes:
       - application/json

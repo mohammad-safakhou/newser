@@ -6,7 +6,7 @@
 //	@version					0.1.0
 //	@description				API for Newser service
 //	@schemes					http https
-//	@BasePath					/api
+//	@BasePath					/
 //
 //	@securityDefinitions.apikey	BearerAuth
 //	@in							header
