@@ -114,6 +114,12 @@ func (s *Store) UpdateTopicPrefsAndCron(ctx context.Context, topicID string, use
 	return err
 }
 
+// UpdateTopicName updates only the topic name (user-driven rename)
+func (s *Store) UpdateTopicName(ctx context.Context, topicID string, userID string, name string) error {
+    _, err := s.DB.ExecContext(ctx, `UPDATE topics SET name=$1 WHERE id=$2 AND user_id=$3`, name, topicID, userID)
+    return err
+}
+
 func (s *Store) ListAllTopics(ctx context.Context) ([]Topic, error) {
 	rows, err := s.DB.QueryContext(ctx, `SELECT id, user_id, name, schedule_cron, created_at FROM topics`)
 	if err != nil {

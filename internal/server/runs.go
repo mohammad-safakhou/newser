@@ -100,18 +100,19 @@ func (h *RunsHandler) trigger(c echo.Context) error {
 				}
 			}
 		}
-		if kg, err := h.store.GetKnowledgeGraph(ctx, name); err == nil {
-			ctxMap["knowledge_graph"] = map[string]interface{}{"nodes": kg.Nodes, "edges": kg.Edges, "last_updated": kg.LastUpdated}
-		}
+    if kg, err := h.store.GetKnowledgeGraph(ctx, topicID); err == nil {
+        ctxMap["knowledge_graph"] = map[string]interface{}{"nodes": kg.Nodes, "edges": kg.Edges, "last_updated": kg.LastUpdated}
+    }
 
-		// construct thought from topic name/preferences with context
-		thought := core.UserThought{
-			ID:          runID,
-			Content:     name,
-			Preferences: prefs,
-			Timestamp:   time.Now(),
-			Context:     ctxMap,
-		}
+        // construct thought from preferences (not user-defined name)
+        content := deriveThoughtContentFromPrefs(map[string]interface{}(prefs))
+        thought := core.UserThought{
+            ID:          runID,
+            Content:     content,
+            Preferences: prefs,
+            Timestamp:   time.Now(),
+            Context:     ctxMap,
+        }
 
 		result, err := h.orch.ProcessThought(ctx, thought)
 		if err != nil {
@@ -121,12 +122,12 @@ func (h *RunsHandler) trigger(c echo.Context) error {
 
 		// Persist the result using the same runID as key in app DB
         _ = h.store.UpsertProcessingResult(ctx, result)
-        // Persist highlights and knowledge graph for topic name (as a simple key)
+        // Persist highlights and knowledge graph keyed by topic ID (not name)
         if len(result.Highlights) > 0 {
-            _ = h.store.SaveHighlights(ctx, name, result.Highlights)
+            _ = h.store.SaveHighlights(ctx, topicID, result.Highlights)
         }
         // Always attempt to persist knowledge graph metadata, even if empty
-        _ = h.store.SaveKnowledgeGraphFromMetadata(ctx, name, result.Metadata)
+        _ = h.store.SaveKnowledgeGraphFromMetadata(ctx, topicID, result.Metadata)
         // Generate and persist Markdown artifact for this run
         if resJSON, err := h.store.GetProcessingResultByID(ctx, runID); err == nil {
             if md := renderMarkdownReport(name, resJSON); md != "" {

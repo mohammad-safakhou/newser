@@ -57,6 +57,7 @@ export const api2 = {
     apiRequest<{ markdown: string }>(`/api/topics/${topicId}/runs/${runId}/expand_all`, { method: 'POST', body: JSON.stringify(payload) }),
   chat: (id: string, message: string) => apiRequest<{ message: string; topic: any }>(`/api/topics/${id}/chat`, { method: 'POST', body: JSON.stringify({ message }) }),
   getTopic: (id: string) => apiRequest<any>(`/api/topics/${id}`),
+  updateTopicName: (id: string, name: string) => apiRequest(`/api/topics/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   assistChat: (payload: { message: string; name?: string; preferences?: Record<string, any>; schedule_cron?: string }) => apiRequest<{ message: string; topic: any }>(`/api/topics/assist/chat`, { method: 'POST', body: JSON.stringify(payload) }),
 }
 

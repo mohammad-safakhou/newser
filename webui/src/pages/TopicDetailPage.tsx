@@ -7,6 +7,7 @@ import { useToast } from '../components/Toasts'
 import ConfidenceGauge from '../components/ConfidenceGauge'
 import HighlightsList from '../components/HighlightsList'
 import KnowledgeGraph from '../components/KnowledgeGraph'
+import MarkdownView from '../components/MarkdownView'
 
 function RunDetailModal({ topicId, runId, onClose }: { topicId: string; runId: string; onClose: () => void }) {
   const [data, setData] = useState<any | null>(null)
@@ -19,6 +20,8 @@ function RunDetailModal({ topicId, runId, onClose }: { topicId: string; runId: s
   useEffect(()=>{
     let mounted = true
     api2.runResult(topicId, runId).then(d => { if (mounted) setData(d) }).catch(e => { if (mounted) setError(e.message) })
+    // auto-load the primary markdown report on open
+    api2.runMarkdown(topicId, runId).then(text => { if (mounted) { setMd(text); setMdOpen(true) } }).catch(()=>{})
     return ()=>{ mounted = false }
   }, [topicId, runId])
   const doExpand = async (idx: number) => {
@@ -73,20 +76,11 @@ function RunDetailModal({ topicId, runId, onClose }: { topicId: string; runId: s
         {data && (
           <div className="p-5 space-y-5">
             {mdOpen && (
-              <div className="bg-slate-900/60 border border-slate-800 rounded p-3 text-[13px] whitespace-pre-wrap max-h-64 overflow-auto">
-                {mdLoading ? 'Generating…' : (md ?? '—')}
+              <div className="bg-slate-900/60 border border-slate-800 rounded p-3 max-h-80 overflow-auto">
+                {mdLoading ? <div className="text-xs text-slate-400">Generating…</div> : (md ? <MarkdownView markdown={md} /> : <div className="text-xs text-slate-500">—</div>)}
               </div>
             )}
-            <div>
-              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Summary</h4>
-              <div className="text-sm text-slate-200 whitespace-pre-wrap">{data.summary || '—'}</div>
-            </div>
-            <div>
-              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Detailed Report</h4>
-              <div className="prose prose-invert max-w-none text-sm">
-                <pre className="whitespace-pre-wrap text-slate-200">{data.detailed_report || '—'}</pre>
-              </div>
-            </div>
+            {/* Keep highlights and KG in the details modal only */}
             {Array.isArray(data.highlights) && data.highlights.length>0 && (
               <div>
                 <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Highlights ({data.highlights.length})</h4>
@@ -156,6 +150,9 @@ export default function TopicDetailPage() {
   const latestQ = useQuery({ queryKey: ['latest', id], queryFn: () => api2.latestResult(id!), enabled: !!id, staleTime: 10_000 })
   const topicQ = useQuery({ queryKey: ['topic', id], queryFn: () => api2.getTopic(id!), enabled: !!id })
   const topicName = qc.getQueryData<any>(['topics'])?.find?.((t: any)=>t.ID===id)?.Name
+  const [editingName, setEditingName] = useState(false)
+  const [newName, setNewName] = useState<string>('')
+  const renameMut = useMutation({ mutationFn: (name: string) => api2.updateTopicName(id!, name), onSuccess: ()=>{ qc.invalidateQueries({ queryKey: ['topics'] }); setEditingName(false); toast.success('Topic renamed') }, onError: (e:any)=> toast.error(e.message || 'Rename failed') })
 
   const triggerMut = useMutation({ mutationFn: () => api2.triggerRun(id!), onSuccess: () => { qc.invalidateQueries({ queryKey: ['runs', id] }); toast.success('Run triggered') }, onError: (e:any) => toast.error(e.message || 'Trigger failed') })
   const chatMut = useMutation({ mutationFn: (msg: string) => api2.chat(id!, msg), onSuccess: (resp, msg) => {
@@ -166,6 +163,7 @@ export default function TopicDetailPage() {
       const newPrefs = (updated && updated.preferences) || updated?.Preferences || {}
       setDiffs(computeDiff(lastPrefs || (topicQ.data?.preferences || {}), newPrefs))
       setLastPrefs(newPrefs)
+      qc.invalidateQueries({ queryKey: ['topic', id] })
     } catch {}
     toast.success('Updated preferences')
   }, onError: (e:any) => { setOptimisticReply(false); toast.error((e && e.message) || 'Chat failed') } })
@@ -191,9 +189,20 @@ export default function TopicDetailPage() {
 
   return (
     <div className="h-full flex flex-col">
-      <header className="px-6 py-3 border-b border-slate-800 flex items-center gap-4">
+      <header className="px-6 py-3 border-b border-slate-800 flex items-center gap-3">
         <Link to="/topics" className="text-xs text-slate-400 hover:text-brand-400">← Topics</Link>
-        <h2 className="text-lg font-semibold flex-1 truncate">{topicName || 'Topic'}</h2>
+        {!editingName ? (
+          <>
+            <h2 className="text-lg font-semibold flex-1 truncate">{topicName || 'Topic'}</h2>
+            <button className="btn-secondary text-[11px] px-2" onClick={()=>{ setEditingName(true); setNewName(topicName || '') }}>Rename</button>
+          </>
+        ) : (
+          <div className="flex items-center gap-2 flex-1">
+            <input className="input text-sm flex-1" value={newName} onChange={e=>setNewName(e.target.value)} />
+            <button className="btn text-xs px-3" disabled={!newName.trim() || renameMut.isPending} onClick={()=>renameMut.mutate(newName.trim())}>{renameMut.isPending ? 'Saving…' : 'Save'}</button>
+            <button className="btn-secondary text-xs px-3" onClick={()=>setEditingName(false)}>Cancel</button>
+          </div>
+        )}
         <button className="btn-secondary text-xs px-3" disabled={triggerMut.isPending} onClick={()=>triggerMut.mutate()}>{triggerMut.isPending ? 'Triggering…' : 'Trigger Run'}</button>
       </header>
       <div className="flex-1 grid lg:grid-cols-2 gap-0 overflow-hidden">
@@ -224,33 +233,14 @@ export default function TopicDetailPage() {
           </div>
           <div className="flex-1 overflow-y-auto p-5 space-y-6">
             <div className="card space-y-2">
-              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center justify-between">Latest Result
-                {latestQ.data && <button onClick={()=>setShowDetail(s=>!s)} className="text-[10px] text-brand-300 hover:underline ml-2">{showDetail ? 'Hide' : 'Details'}</button>}
-              </h4>
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Latest Result</h4>
               {latestQ.isLoading && <div className="text-xs text-slate-500">Loading…</div>}
               {latestQ.isError && <div className="text-xs text-red-400">No result</div>}
               {latestQ.data && (
-                <div className="space-y-3 text-xs leading-relaxed">
-                  <div className="flex items-center gap-4">
-                    <div className="flex-1"><span className="text-slate-400">Summary:</span> {latestQ.data.summary || '—'}</div>
-                    <ConfidenceGauge value={typeof latestQ.data.confidence === 'number' ? latestQ.data.confidence : null} />
-                  </div>
-                  {showDetail && (
-                    <>
-                      <div className="space-y-1">
-                        <div className="text-slate-400">Detailed Report:</div>
-                        <div className="max-h-40 overflow-auto whitespace-pre-wrap bg-slate-900/50 p-2 rounded border border-slate-800 text-[11px]">{latestQ.data.detailed_report || '—'}</div>
-                      </div>
-                      <div className="space-y-1">
-                        <div className="text-slate-400">Sources ({Array.isArray(latestQ.data.sources)? latestQ.data.sources.length : 0}):</div>
-                        <ul className="max-h-32 overflow-auto space-y-1 text-[11px] list-disc pl-4">
-                          {Array.isArray(latestQ.data.sources) && latestQ.data.sources.map((s:any,i:number)=>(
-                            <li key={i} className="truncate" title={s.url || s.URL || s.title || s.Title}>{s.title || s.Title || s.url || s.URL || 'Source'}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    </>
-                  )}
+                <div className="flex items-center gap-4 text-xs">
+                  <div className="text-slate-400">Confidence:</div>
+                  <ConfidenceGauge value={typeof latestQ.data.confidence === 'number' ? latestQ.data.confidence : null} />
+                  <button className="btn-secondary text-xs ml-auto" onClick={()=>setShowDetail(true)}>View Details</button>
                 </div>
               )}
             </div>

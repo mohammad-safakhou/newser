@@ -1,9 +1,12 @@
 package server
 
 import (
-	"context"
-	"log"
-	"time"
+    "context"
+    "encoding/json"
+    "log"
+    "sort"
+    "strings"
+    "time"
 
 	"github.com/gorhill/cronexpr"
 	"github.com/mohammad-safakhou/newser/config"
@@ -74,7 +77,7 @@ func (s *Scheduler) tick() {
 			continue
 		}
 
-		go func(topic store.Topic, runID string) {
+        go func(topic store.Topic, runID string) {
 			// jitter to avoid stampedes
 			time.Sleep(time.Duration(250+int64(time.Now().UnixNano()%250)) * time.Millisecond)
 			orch := s.orch
@@ -89,15 +92,37 @@ func (s *Scheduler) tick() {
 					return
 				}
 			}
-			thought := core.UserThought{ID: topic.ID, Content: topic.Name, Timestamp: time.Now()}
-			_, err = orch.ProcessThought(ctx, thought)
+            // Derive content from preferences (not from user-defined name)
+            name, prefsB, _, _ := s.store.GetTopicByID(ctx, topic.ID, topic.UserID)
+            _ = name // do not use name for semantics
+            var prefs map[string]interface{}
+            _ = json.Unmarshal(prefsB, &prefs)
+            content := deriveThoughtContentFromPrefs(prefs)
+            thought := core.UserThought{ID: topic.ID, Content: content, Timestamp: time.Now(), Preferences: prefs}
+            _, err = orch.ProcessThought(ctx, thought)
 			if err != nil {
 				_ = s.store.FinishRun(ctx, runID, "failed", strPtr(err.Error()))
 				return
 			}
 			_ = s.store.FinishRun(ctx, runID, "succeeded", nil)
-		}(t, runID)
-	}
+        }(t, runID)
+    }
+}
+
+func deriveThoughtContentFromPrefs(prefs map[string]interface{}) string {
+    if prefs == nil { return "General news brief" }
+    if s, ok := prefs["context_summary"].(string); ok && strings.TrimSpace(s) != "" { return s }
+    if arr, ok := prefs["objectives"].([]interface{}); ok && len(arr) > 0 {
+        var out []string
+        for _, it := range arr { if str, ok := it.(string); ok { out = append(out, str) } }
+        if len(out) > 0 { return strings.Join(out, "; ") }
+    }
+    // fallback to a generic description based on keys
+    var keys []string
+    for k := range prefs { keys = append(keys, k) }
+    sort.Strings(keys)
+    if len(keys) > 0 { return "News brief with preferences: " + strings.Join(keys, ", ") }
+    return "General news brief"
 }
 
 // isDue determines if a topic with cronSpec should run now based on last run time.
