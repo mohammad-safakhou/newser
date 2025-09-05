@@ -49,6 +49,12 @@ export const api2 = {
   triggerRun: (id: string) => apiRequest(`/api/topics/${id}/trigger`, { method: 'POST' }),
   runs: (id: string) => apiRequest<Run[]>(`/api/topics/${id}/runs`),
   latestResult: (id: string) => apiRequest<any>(`/api/topics/${id}/latest_result`),
+  runResult: (topicId: string, runId: string) => apiRequest<any>(`/api/topics/${topicId}/runs/${runId}/result`),
+  runMarkdown: (topicId: string, runId: string) => apiRequest<string>(`/api/topics/${topicId}/runs/${runId}/markdown`),
+  expand: (topicId: string, runId: string, payload: { highlight_index?: number; source_url?: string; focus?: string }) =>
+    apiRequest<{ markdown: string }>(`/api/topics/${topicId}/runs/${runId}/expand`, { method: 'POST', body: JSON.stringify(payload) }),
+  expandAll: (topicId: string, runId: string, payload: { group_by?: 'type'|'domain'|'none'|'taxonomy'; focus?: string }) =>
+    apiRequest<{ markdown: string }>(`/api/topics/${topicId}/runs/${runId}/expand_all`, { method: 'POST', body: JSON.stringify(payload) }),
   chat: (id: string, message: string) => apiRequest<{ message: string; topic: any }>(`/api/topics/${id}/chat`, { method: 'POST', body: JSON.stringify({ message }) }),
   getTopic: (id: string) => apiRequest<any>(`/api/topics/${id}`),
   assistChat: (payload: { message: string; name?: string; preferences?: Record<string, any>; schedule_cron?: string }) => apiRequest<{ message: string; topic: any }>(`/api/topics/assist/chat`, { method: 'POST', body: JSON.stringify(payload) }),

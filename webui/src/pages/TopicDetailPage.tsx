@@ -8,6 +8,131 @@ import ConfidenceGauge from '../components/ConfidenceGauge'
 import HighlightsList from '../components/HighlightsList'
 import KnowledgeGraph from '../components/KnowledgeGraph'
 
+function RunDetailModal({ topicId, runId, onClose }: { topicId: string; runId: string; onClose: () => void }) {
+  const [data, setData] = useState<any | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [expanding, setExpanding] = useState<number | null>(null)
+  const [expansion, setExpansion] = useState<Record<number, string>>({})
+  const [md, setMd] = useState<string | null>(null)
+  const [mdOpen, setMdOpen] = useState(false)
+  const [mdLoading, setMdLoading] = useState(false)
+  useEffect(()=>{
+    let mounted = true
+    api2.runResult(topicId, runId).then(d => { if (mounted) setData(d) }).catch(e => { if (mounted) setError(e.message) })
+    return ()=>{ mounted = false }
+  }, [topicId, runId])
+  const doExpand = async (idx: number) => {
+    if (!data) return
+    try {
+      setExpanding(idx)
+      const resp = await api2.expand(topicId, runId, { highlight_index: idx })
+      setExpansion(prev => ({ ...prev, [idx]: resp.markdown }))
+    } catch (e:any) {
+      setExpansion(prev => ({ ...prev, [idx]: `Error: ${e.message || e}` }))
+    } finally {
+      setExpanding(null)
+    }
+  }
+  const loadMarkdown = async () => {
+    try {
+      setMdLoading(true)
+      const text = await api2.runMarkdown(topicId, runId)
+      setMd(text)
+      setMdOpen(true)
+    } catch (e:any) {
+      setMd(`Error: ${e.message || e}`)
+      setMdOpen(true)
+    }
+    finally { setMdLoading(false) }
+  }
+  const expandAll = async () => {
+    try {
+      setMdLoading(true)
+      const resp = await api2.expandAll(topicId, runId, { group_by: 'type' })
+      setMd(resp.markdown)
+      setMdOpen(true)
+    } catch (e:any) {
+      setMd(`Error: ${e.message || e}`)
+      setMdOpen(true)
+    } finally { setMdLoading(false) }
+  }
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-slate-950/80 backdrop-blur" onClick={onClose} />
+      <div className="relative w-full max-w-5xl card max-h-[90vh] overflow-y-auto">
+          <div className="flex items-center justify-between border-b border-slate-800 px-5 py-3">
+            <h3 className="text-sm font-semibold">Run Details</h3>
+            <div className="flex items-center gap-2">
+              <button className="btn-secondary text-xs px-3" onClick={loadMarkdown} disabled={mdLoading}>{mdLoading ? 'Loading…' : 'View Markdown'}</button>
+              <button className="btn-secondary text-xs px-3" onClick={expandAll} disabled={mdLoading}>{mdLoading ? 'Generating…' : 'Expand All'}</button>
+              <button className="btn-secondary text-xs px-3" onClick={onClose}>Close</button>
+            </div>
+          </div>
+        {!data && !error && <div className="p-4 text-xs text-slate-500">Loading…</div>}
+        {error && <div className="p-4 text-xs text-red-400">{error}</div>}
+        {data && (
+          <div className="p-5 space-y-5">
+            {mdOpen && (
+              <div className="bg-slate-900/60 border border-slate-800 rounded p-3 text-[13px] whitespace-pre-wrap max-h-64 overflow-auto">
+                {mdLoading ? 'Generating…' : (md ?? '—')}
+              </div>
+            )}
+            <div>
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Summary</h4>
+              <div className="text-sm text-slate-200 whitespace-pre-wrap">{data.summary || '—'}</div>
+            </div>
+            <div>
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Detailed Report</h4>
+              <div className="prose prose-invert max-w-none text-sm">
+                <pre className="whitespace-pre-wrap text-slate-200">{data.detailed_report || '—'}</pre>
+              </div>
+            </div>
+            {Array.isArray(data.highlights) && data.highlights.length>0 && (
+              <div>
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Highlights ({data.highlights.length})</h4>
+                <div className="text-sm">
+                  <ul className="space-y-2">
+                    {data.highlights.map((h:any, i:number) => (
+                      <li key={i} className="border border-slate-800 rounded p-2">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex-1">
+                            <div className="font-medium text-slate-200">{h.title || 'Highlight'}</div>
+                            <div className="text-slate-300 text-[13px] whitespace-pre-wrap">{h.content || ''}</div>
+                          </div>
+                          <button className="btn-secondary text-[10px] px-2 py-1" onClick={()=>doExpand(i)} disabled={expanding===i}>{expanding===i ? 'Expanding…' : 'Expand'}</button>
+                        </div>
+                        {expansion[i] && (
+                          <div className="mt-2 bg-slate-900/60 border border-slate-800 rounded p-2 text-[13px] whitespace-pre-wrap">
+                            {expansion[i]}
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            )}
+            {data.metadata && data.metadata.knowledge_graph && (
+              <div>
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Knowledge Graph</h4>
+                <KnowledgeGraph nodes={data.metadata.knowledge_graph.nodes || []} edges={data.metadata.knowledge_graph.edges || []} />
+              </div>
+            )}
+            {Array.isArray(data.sources) && data.sources.length>0 && (
+              <div>
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Sources ({data.sources.length})</h4>
+                <ul className="text-xs space-y-1">
+                  {data.sources.map((s:any, i:number)=>(<li key={i}><a className="text-brand-300 hover:underline" href={s.url} target="_blank" rel="noreferrer">{s.title || s.url}</a></li>))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function TopicDetailPage() {
   const { id } = useParams<{ id: string }>()
   const qc = useQueryClient()
@@ -163,13 +288,19 @@ export default function TopicDetailPage() {
 
 function RunRow({ run }: { run: Run }) {
   const color = run.Status === 'succeeded' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' : run.Status === 'failed' ? 'bg-red-500/20 text-red-300 border-red-500/30' : 'bg-slate-600/20 text-slate-300 border-slate-500/30'
+  const [open, setOpen] = useState(false)
+  const topicId = (useParams() as any).id as string
   return (
-    <li className="flex items-start gap-3 p-2 rounded border border-slate-800 bg-slate-900/40">
-      <div className={`px-2 py-0.5 rounded-full text-[10px] font-medium border ${color}`}>{run.Status}</div>
-      <div className="flex-1 leading-tight">
-        <div className="text-slate-300">{formatDate(run.StartedAt)}</div>
-        {run.Error && <div className="text-[10px] text-red-400 mt-1">{run.Error}</div>}
+    <li className="flex flex-col gap-2 p-2 rounded border border-slate-800 bg-slate-900/40">
+      <div className="flex items-start gap-3">
+        <div className={`px-2 py-0.5 rounded-full text-[10px] font-medium border ${color}`}>{run.Status}</div>
+        <div className="flex-1 leading-tight">
+          <div className="text-slate-300">{formatDate(run.StartedAt)}</div>
+          {run.Error && <div className="text-[10px] text-red-400 mt-1">{run.Error}</div>}
+        </div>
+        <button className="btn-secondary text-[10px] px-2 py-1" onClick={()=>setOpen(true)}>Details</button>
       </div>
+      {open && topicId && <RunDetailModal topicId={topicId} runId={run.ID} onClose={()=>setOpen(false)} />}
     </li>
   )
 }

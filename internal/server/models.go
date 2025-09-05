@@ -70,3 +70,22 @@ type AssistRequest struct {
 
 // AssistResponse mirrors ChatResponse shape.
 type AssistResponse = ChatResponse
+
+// ExpandRequest asks server to generate deeper details for a run item
+type ExpandRequest struct {
+    HighlightIndex *int   `json:"highlight_index,omitempty"`
+    SourceURL       string `json:"source_url,omitempty"`
+    Focus           string `json:"focus,omitempty"`
+}
+
+type ExpandResponse struct {
+    Markdown string `json:"markdown"`
+}
+
+// ExpandAllRequest asks to generate a deep-dive markdown for the whole run
+type ExpandAllRequest struct {
+    GroupBy string `json:"group_by,omitempty"` // "type" (highlight type), "domain", "none", or "taxonomy"
+    Focus   string `json:"focus,omitempty"`
+}
+
+type ExpandAllResponse = ExpandResponse

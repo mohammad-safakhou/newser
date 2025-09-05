@@ -42,8 +42,8 @@ func (p *Planner) Plan(ctx context.Context, thought UserThought) (PlanningResult
 
 	// Generate plan using LLM
 	response, err := p.llmProvider.Generate(ctx, prompt, model, map[string]interface{}{
-		"temperature": 0.3, // Lower temperature for more consistent planning
-		"max_tokens":  2000,
+		"temperature": 0.2,
+		"max_tokens":  1800,
 	})
 	if err != nil {
 		return PlanningResult{}, fmt.Errorf("failed to generate plan: %w", err)
@@ -60,114 +60,160 @@ func (p *Planner) Plan(ctx context.Context, thought UserThought) (PlanningResult
 		return PlanningResult{}, fmt.Errorf("plan validation failed: %w", err)
 	}
 
-	// Optimize the plan
-	optimizedPlan, err := p.OptimizePlan(plan, map[string]interface{}{
-		"max_cost": 10.0, // $10 max cost
-		"max_time": 5 * time.Minute,
-		"quality":  "high",
-	})
-	if err != nil {
-		p.logger.Printf("Warning: plan optimization failed: %v, using original plan", err)
-		optimizedPlan = plan
+	// Normalize dependencies: final synthesis depends on all prior tasks; KG depends on research/analysis
+	if len(plan.Tasks) > 0 {
+		// final synthesis
+		synthIndex := -1
+		for i := range plan.Tasks {
+			if plan.Tasks[i].Type == "synthesis" {
+				synthIndex = i
+			}
+		}
+		if synthIndex >= 0 {
+			var others []string
+			for i := range plan.Tasks {
+				if i != synthIndex {
+					others = append(others, plan.Tasks[i].ID)
+				}
+			}
+			deps := append([]string{}, plan.Tasks[synthIndex].DependsOn...)
+			have := map[string]bool{}
+			for _, d := range deps {
+				have[d] = true
+			}
+			for _, id := range others {
+				if !have[id] {
+					deps = append(deps, id)
+				}
+			}
+			plan.Tasks[synthIndex].DependsOn = deps
+		}
+		// KG depends on research/analysis
+		var ra []string
+		for i := range plan.Tasks {
+			if plan.Tasks[i].Type == "research" || plan.Tasks[i].Type == "analysis" {
+				ra = append(ra, plan.Tasks[i].ID)
+			}
+		}
+		for i := range plan.Tasks {
+			if plan.Tasks[i].Type != "knowledge_graph" {
+				continue
+			}
+			deps := append([]string{}, plan.Tasks[i].DependsOn...)
+			have := map[string]bool{}
+			for _, d := range deps {
+				have[d] = true
+			}
+			for _, id := range ra {
+				if !have[id] {
+					deps = append(deps, id)
+				}
+			}
+			plan.Tasks[i].DependsOn = deps
+		}
 	}
 
 	processingTime := time.Since(startTime)
-	p.logger.Printf("Planning completed in %v with %d tasks", processingTime, len(optimizedPlan.Tasks))
+	p.logger.Printf("Planning completed in %v with %d tasks", processingTime, len(plan.Tasks))
 
-	return optimizedPlan, nil
+	return plan, nil
 }
 
 // createPlanningPrompt creates a comprehensive prompt for planning
 func (p *Planner) createPlanningPrompt(thought UserThought) string {
-    // Render prior context for incremental planning
-    ctxBlock := ""
-    if thought.Context != nil {
-        if v, ok := thought.Context["last_run_time"].(string); ok && v != "" {
-            ctxBlock += fmt.Sprintf("Last run time: %s\n", v)
-        }
-        if v, ok := thought.Context["prev_summary"].(string); ok && v != "" {
-            if len(v) > 800 { v = v[:800] + "..." }
-            ctxBlock += fmt.Sprintf("Previous summary: %s\n", v)
-        }
-        if arr, ok := thought.Context["known_urls"].([]string); ok && len(arr) > 0 {
-            ctxBlock += fmt.Sprintf("Known URLs: %d (avoid duplicates)\n", len(arr))
-        }
-        if kg, ok := thought.Context["knowledge_graph"].(map[string]interface{}); ok {
-            if nodes, ok := kg["nodes"].([]interface{}); ok { ctxBlock += fmt.Sprintf("KG nodes: %d\n", len(nodes)) }
-            if edges, ok := kg["edges"].([]interface{}); ok { ctxBlock += fmt.Sprintf("KG edges: %d\n", len(edges)) }
-        }
-    }
-    if ctxBlock != "" { ctxBlock = "\nPRIOR CONTEXT:\n" + ctxBlock }
+	// Prior context block
+	ctxBlock := ""
+	if thought.Context != nil {
+		if v, ok := thought.Context["last_run_time"].(string); ok && v != "" {
+			ctxBlock += fmt.Sprintf("- Last run time: %s\n", v)
+		}
+		if v, ok := thought.Context["prev_summary"].(string); ok && v != "" {
+			if len(v) > 800 {
+				v = v[:800] + "..."
+			}
+			ctxBlock += fmt.Sprintf("- Previous summary: %s\n", v)
+		}
+		if arr, ok := thought.Context["known_urls"].([]string); ok && len(arr) > 0 {
+			ctxBlock += fmt.Sprintf("- Known URLs (avoid duplicates): %d\n", len(arr))
+		}
+		if kg, ok := thought.Context["knowledge_graph"].(map[string]interface{}); ok {
+			if nodes, ok := kg["nodes"].([]interface{}); ok {
+				ctxBlock += fmt.Sprintf("- Existing KG nodes: %d\n", len(nodes))
+			}
+			if edges, ok := kg["edges"].([]interface{}); ok {
+				ctxBlock += fmt.Sprintf("- Existing KG edges: %d\n", len(edges))
+			}
+		}
+	}
+	if ctxBlock != "" {
+		ctxBlock = "\nPRIOR CONTEXT:\n" + ctxBlock
+	}
 
-    return fmt.Sprintf(`You are an intelligent planning agent that creates execution plans for news research and analysis.%s
+	// Preferences and objectives
+	prefBlock := ""
+	if thought.Preferences != nil && len(thought.Preferences) > 0 {
+		b, _ := json.MarshalIndent(thought.Preferences, "", "  ")
+		prefBlock = "\nPREFERENCES JSON:\n" + string(b)
+		if s, ok := thought.Preferences["context_summary"].(string); ok && s != "" {
+			if len(s) > 600 {
+				s = s[:600] + "..."
+			}
+			prefBlock += "\nCONVERSATION SUMMARY:\n" + s
+		}
+		if arr, ok := thought.Preferences["objectives"].([]string); ok && len(arr) > 0 {
+			prefBlock += "\nOBJECTIVES:\n"
+			for _, o := range arr {
+				prefBlock += "- " + o + "\n"
+			}
+		}
+	}
 
-USER THOUGHT: %s
+	return fmt.Sprintf(`ROLE: Senior news intelligence planner focused on accuracy and usefulness. Ignore money/time costs; minimize tasks while maximizing quality.
+
+USER THOUGHT / TOPIC:
+%s%s%s
 
 AVAILABLE AGENTS:
-- Research Agent: Searches for information from multiple sources (news APIs, web search, social media)
-- Analysis Agent: Analyzes content for relevance, credibility, and importance
-- Synthesis Agent: Combines and summarizes information into coherent reports
-- Conflict Detection Agent: Identifies and resolves conflicting information
-- Highlight Agent: Identifies and manages key highlights and pinned information
- - Knowledge Graph Agent: Extracts entities/relations into a knowledge graph
+- research: gather information from sources
+- analysis: evaluate relevance, credibility, importance
+- synthesis: produce coherent final report (MUST be last)
+- conflict_detection: find and resolve conflicting claims
+- highlight_management: extract key highlights
+- knowledge_graph: extract entities/relations (always include; can be light)
 
-AVAILABLE SOURCES:
-- News APIs (NewsAPI, etc.)
-- Web Search (Brave, Serper)
-- Social Media monitoring
-- Academic papers (if relevant)
-- Previous knowledge graph data
+PLANNING PRINCIPLES:
+1) Create the fewest, highest‑impact tasks.
+2) Set dependencies (research -> analysis -> downstream tasks).
+3) Always include FINAL synthesis last, depending on all prior tasks.
+4) Always include knowledge_graph after research/analysis (even if output is small).
+5) Use prior context: since last_run_time; avoid known_urls duplicates.
+6) Encode necessary parameters (query, filters, since, exclude_urls) in tasks.
+7) No cost/time estimation; avoid redundant steps.
 
-TASK TYPES:
-- research: Gather information from sources
-- analysis: Analyze content and relevance
-- synthesis: Combine information into reports
-- conflict_detection: Identify and resolve conflicts
-- highlight_management: Manage highlights and pinned content
-- knowledge_graph: Update knowledge graph
-
-PLANNING REQUIREMENTS:
-1. Break down the user's thought into specific, actionable tasks
-2. Consider dependencies between tasks (e.g., research must happen before analysis)
-3. Prioritize tasks based on importance and dependencies
-4. Estimate costs and time for each task
-5. Consider user preferences and context
-6. Plan for conflict detection and resolution
-7. Include highlight management for ongoing topics
-8. You MUST include at least one final "synthesis" task at the end that depends on all prior tasks so the results are coherent.
-9. You MUST include a "knowledge_graph" task (it can be lightweight if little is known). It should depend on research/analysis results so it can extract entities/relations.
-10. If helpful, you MAY include intermediate synthesis steps, but still include a final synthesis as the last step.
-11. Keep agents intelligent about effort: for low-information cases, set narrower parameters or scope; for rich topics, broaden depth.
-
-OUTPUT FORMAT (JSON):
+OUTPUT JSON:
 {
   "tasks": [
     {
       "id": "unique_task_id",
-      "type": "task_type",
-      "description": "Detailed description of what this task should do",
+      "type": "research|analysis|synthesis|conflict_detection|highlight_management|knowledge_graph",
+      "description": "what to do",
       "priority": 1-5,
       "parameters": {
-        "query": "search query",
-        "sources": ["source1", "source2"],
+        "query": "...",
         "filters": {},
-        "options": {}
+        "since": "RFC3339 if incremental",
+        "exclude_urls": ["..."]
       },
-      "depends_on": ["task_id1", "task_id2"],
-      "timeout": "2m",
-      "estimated_cost": 0.5,
-      "estimated_time": "30s"
+      "depends_on": ["task_id1"],
+      "timeout": "2m"
     }
   ],
-  "execution_order": ["task1", "task2", "task3"],
-  "estimated_total_cost": 2.5,
-  "estimated_total_time": "3m",
+  "execution_order": ["task1", "task2"],
   "confidence": 0.85,
-  "reasoning": "Explanation of why this plan was chosen"
+  "reasoning": "why this plan"
 }
 
-Create a comprehensive plan that will effectively address the user's thought. Focus on accuracy and relevance over speed. Ensure the final synthesis is last and knowledge_graph is present.`, ctxBlock, thought.Content)
-
+Return ONLY JSON. Ensure final synthesis is last and knowledge_graph is present.`, thought.Content, prefBlock, ctxBlock)
 }
 
 // parsePlanningResponse parses the LLM response into a PlanningResult
@@ -321,9 +367,9 @@ func (p *Planner) parsePlanningResponse(response string) (PlanningResult, error)
 
 // ValidatePlan validates if a plan is feasible
 func (p *Planner) ValidatePlan(plan PlanningResult) error {
-    if len(plan.Tasks) == 0 {
-        return fmt.Errorf("plan has no tasks")
-    }
+	if len(plan.Tasks) == 0 {
+		return fmt.Errorf("plan has no tasks")
+	}
 
 	// Check for circular dependencies
 	if err := p.checkCircularDependencies(plan.Tasks); err != nil {
@@ -335,35 +381,32 @@ func (p *Planner) ValidatePlan(plan PlanningResult) error {
 		return fmt.Errorf("missing dependencies: %w", err)
 	}
 
-    // Validate task types
-    for _, task := range plan.Tasks {
-        if !p.isValidTaskType(task.Type) {
-            return fmt.Errorf("invalid task type: %s", task.Type)
-        }
-    }
-
-    // Ensure mandatory phases are present
-    hasSynth := false
-    hasKG := false
-    for _, t := range plan.Tasks {
-        if t.Type == "synthesis" { hasSynth = true }
-        if t.Type == "knowledge_graph" { hasKG = true }
-    }
-    if !hasSynth {
-        return fmt.Errorf("plan must include a final synthesis task")
-    }
-    if !hasKG {
-        return fmt.Errorf("plan must include a knowledge_graph task")
-    }
-
-	// Check cost and time estimates
-	if plan.EstimatedCost > 20.0 {
-		return fmt.Errorf("estimated cost too high: $%.2f", plan.EstimatedCost)
+	// Validate task types
+	for _, task := range plan.Tasks {
+		if !p.isValidTaskType(task.Type) {
+			return fmt.Errorf("invalid task type: %s", task.Type)
+		}
 	}
 
-	if plan.EstimatedTime > 10*time.Minute {
-		return fmt.Errorf("estimated time too long: %v", plan.EstimatedTime)
+	// Ensure mandatory phases are present
+	hasSynth := false
+	hasKG := false
+	for _, t := range plan.Tasks {
+		if t.Type == "synthesis" {
+			hasSynth = true
+		}
+		if t.Type == "knowledge_graph" {
+			hasKG = true
+		}
 	}
+	if !hasSynth {
+		return fmt.Errorf("plan must include a final synthesis task")
+	}
+	if !hasKG {
+		return fmt.Errorf("plan must include a knowledge_graph task")
+	}
+
+	// No cost/time gating — focus on quality
 
 	return nil
 }

@@ -31,7 +31,8 @@ export default function NewTopicWizard({ onClose, onCreated }: Props) {
       const t = resp.topic || {}
       const newPrefs = t.preferences || t.Preferences || provisional.preferences
       const newCron = t.cron_spec || t.CronSpec || provisional.schedule_cron
-      setProvisional(p => ({ ...p, name: t.title || t.Title || name || p.name, preferences: newPrefs, schedule_cron: newCron }))
+      // Do NOT override user's chosen name from LLM suggestions
+      setProvisional(p => ({ ...p, preferences: newPrefs, schedule_cron: newCron }))
     }
   })
 
@@ -48,7 +49,7 @@ export default function NewTopicWizard({ onClose, onCreated }: Props) {
   })
 
   const createMut = useMutation({
-    mutationFn: () => api2.createTopicFull(provisional.name || name, provisional.preferences, scheduleCron),
+    mutationFn: () => api2.createTopicFull(name, provisional.preferences, scheduleCron),
     onSuccess: () => { onCreated() }
   })
 

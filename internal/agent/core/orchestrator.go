@@ -127,14 +127,14 @@ func (o *Orchestrator) ProcessThought(ctx context.Context, thought UserThought) 
 	o.logger.Printf("Starting processing for thought: %s", thought.ID)
 	o.updateStatus(status, "planning", 0.1, "Creating execution plan")
 
-	// Phase 1: Planning
-	plan, err := o.planner.Plan(ctx, thought)
-	if err != nil {
-		o.updateStatus(status, "failed", 0.0, fmt.Sprintf("Planning failed: %v", err))
-		processingEvent.Success = false
-		processingEvent.Error = err.Error()
-		return ProcessingResult{}, fmt.Errorf("planning failed: %w", err)
-	}
+    // Phase 1: Planning
+    plan, err := o.planner.Plan(ctx, thought)
+    if err != nil {
+        o.updateStatus(status, "failed", 0.0, fmt.Sprintf("Planning failed: %v", err))
+        processingEvent.Success = false
+        processingEvent.Error = err.Error()
+        return ProcessingResult{}, fmt.Errorf("planning failed: %w", err)
+    }
 
 	o.updateStatus(status, "executing", 0.2, "Executing planned tasks")
 	status.TotalTasks = len(plan.Tasks)
@@ -225,10 +225,10 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 		var wg sync.WaitGroup
 		errors := make(chan error, len(readyTasks))
 
-		for _, task := range readyTasks {
-			wg.Add(1)
-			go func(t AgentTask) {
-				defer wg.Done()
+        for _, task := range readyTasks {
+            wg.Add(1)
+            go func(t AgentTask) {
+                defer wg.Done()
 
 				// Find the appropriate agent for this task
 				agent := o.findBestAgent(t)
@@ -266,12 +266,12 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 				}
 				enriched.Parameters = params
 
-				// Execute the task
-				result, err := agent.Execute(ctx, enriched)
-				if err != nil {
-					errors <- fmt.Errorf("task %s failed: %w", t.ID, err)
-					return
-				}
+                // Execute the task
+                result, err := agent.Execute(ctx, enriched)
+                if err != nil {
+                    errors <- fmt.Errorf("task %s failed: %w", t.ID, err)
+                    return
+                }
 
 				// Record agent event
 				agentEvent := telemetry.AgentEvent{
@@ -297,12 +297,12 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 				status.CompletedTasks++
 				status.Progress = float64(status.CompletedTasks) / float64(status.TotalTasks)
 				status.CurrentTask = t.Description
-				status.LastUpdated = time.Now()
-				mu.Unlock()
+                status.LastUpdated = time.Now()
+                mu.Unlock()
 
-				o.logger.Printf("Completed task: %s (%s) in %v", t.ID, t.Description, result.ProcessingTime)
-			}(task)
-		}
+                o.logger.Printf("Completed task: %s (%s) in %v", t.ID, t.Description, result.ProcessingTime)
+            }(task)
+        }
 
 		wg.Wait()
 		close(errors)

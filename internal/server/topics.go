@@ -195,16 +195,18 @@ Current preferences (JSON): %s
 User request: %s
 
 Respond ONLY as strict JSON with keys:
-{"message": string, "preferences": object, "cron_spec": string}
+{"message": string, "preferences": object, "cron_spec": string, "context_summary": string, "objectives": [string]}
 `, name, cron, mustJSON(prefs), message)
 	out, err := llm.Generate(ctx, prompt, model, map[string]interface{}{})
 	if err != nil {
 		return "", nil, "", err
 	}
 	var parsed struct {
-		Message     string                 `json:"message"`
-		Preferences map[string]interface{} `json:"preferences"`
-		CronSpec    string                 `json:"cron_spec"`
+		Message        string                 `json:"message"`
+		Preferences    map[string]interface{} `json:"preferences"`
+		CronSpec       string                 `json:"cron_spec"`
+		ContextSummary string                 `json:"context_summary"`
+		Objectives     []string               `json:"objectives"`
 	}
 	if e := json.Unmarshal([]byte(out), &parsed); e != nil {
 		var tmp map[string]interface{}
@@ -222,6 +224,18 @@ Respond ONLY as strict JSON with keys:
 	}
 	if parsed.CronSpec == "" {
 		parsed.CronSpec = cron
+	}
+	if parsed.ContextSummary != "" {
+		if parsed.Preferences == nil {
+			parsed.Preferences = map[string]interface{}{}
+		}
+		parsed.Preferences["context_summary"] = parsed.ContextSummary
+	}
+	if len(parsed.Objectives) > 0 {
+		if parsed.Preferences == nil {
+			parsed.Preferences = map[string]interface{}{}
+		}
+		parsed.Preferences["objectives"] = parsed.Objectives
 	}
 	return parsed.Message, parsed.Preferences, parsed.CronSpec, nil
 }

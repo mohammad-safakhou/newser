@@ -15,7 +15,7 @@ export default function KnowledgeGraph({ nodes, edges }: Props) {
     const safeEdges = Array.isArray(edges) ? edges : []
     if (safeNodes.length === 0) return { nodes: [], edges: safeEdges }
     const placed = safeNodes.map((n, i) => {
-      const angle = (i / nodes.length) * Math.PI * 2
+      const angle = (i / safeNodes.length) * Math.PI * 2
       const radius = 140 + (i % 7) * 6
       return { ...n, x: Math.cos(angle) * radius, y: Math.sin(angle) * radius }
     })
@@ -39,30 +39,37 @@ export default function KnowledgeGraph({ nodes, edges }: Props) {
   useEffect(()=>{
     const canvas = canvasRef.current; if (!canvas) return
     const ctx = canvas.getContext('2d'); if (!ctx) return
-    const dpr = window.devicePixelRatio || 1
-    const width = canvas.clientWidth; const height = canvas.clientHeight
-    canvas.width = width * dpr; canvas.height = height * dpr
-    ctx.scale(dpr, dpr)
-    ctx.clearRect(0,0,width,height)
-    ctx.translate(width/2, height/2)
+    try {
+      const dpr = window.devicePixelRatio || 1
+      const width = canvas.clientWidth; const height = canvas.clientHeight
+      canvas.width = width * dpr; canvas.height = height * dpr
+      ctx.scale(dpr, dpr)
+      ctx.clearRect(0,0,width,height)
+      ctx.translate(width/2, height/2)
 
-    // draw edges
-    ctx.lineWidth = 1
-    ctx.strokeStyle = 'rgba(148,163,184,0.35)'
-    (layout.edges || []).forEach(e => {
-      const a = layout.nodes.find(n=>n.id===e.source)
-      const b = layout.nodes.find(n=>n.id===e.target)
-      if(!a||!b) return
-      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke()
-    })
+      // draw edges
+      ctx.lineWidth = 1
+      // slate-400 with ~35% alpha (#94a3b8 + alpha 0x59)
+      ctx.strokeStyle = '#94a3b859'
+      ;(layout.edges || []).forEach(e => {
+        const a = layout.nodes.find(n=>n.id===e.source)
+        const b = layout.nodes.find(n=>n.id===e.target)
+        if(!a||!b) return
+        ctx.beginPath(); ctx.moveTo((a as any).x, (a as any).y); ctx.lineTo((b as any).x, (b as any).y); ctx.stroke()
+      })
 
-    // draw nodes
-    layout.nodes.forEach(n => {
-      const deg = nodeDegree(layout.edges, n.id)
-      const r = 6 + Math.min(10, deg * 2)
-      const color = colorForGroup(n.group)
-      ctx.beginPath(); ctx.fillStyle = color; ctx.arc(n.x, n.y, r, 0, Math.PI*2); ctx.fill()
-    })
+      // draw nodes
+      layout.nodes.forEach(n => {
+        const deg = nodeDegree(layout.edges, n.id)
+        const r = 6 + Math.min(10, deg * 2)
+        const color = colorForGroup(n.group)
+        ctx.beginPath(); ctx.fillStyle = color; ctx.arc((n as any).x, (n as any).y, r, 0, Math.PI*2); ctx.fill()
+      })
+    } catch (e) {
+      // Avoid crashing the page if canvas API misbehaves; show a friendly fallback
+      // ErrorBoundary will also catch this if it propagates
+      console.error('KnowledgeGraph render error', e)
+    }
   }, [layout])
 
   // pointer handling for hover tooltips

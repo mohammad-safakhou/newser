@@ -969,10 +969,18 @@ func (a *SimpleAgent) executeSynthesis(ctx context.Context, task AgentTask) Agen
 	if model == "" {
 		model = a.config.LLM.Routing.Fallback
 	}
-	prompt := fmt.Sprintf(`You are a synthesis agent creating a report from multiple sources.
+    prompt := fmt.Sprintf(`You are a synthesis agent creating a comprehensive report from multiple sources.
 USER THOUGHT: %s
 SOURCES (top %d):
 %s
+
+Guidance:
+- Produce a coherent report that is directly useful; do not force the user to research basic facts.
+- If any item is significant (e.g., major release, critical event), include a deeper section with concrete details (what changed, why it matters, timeline, how-to, links).
+- Use clear section headings in detailed_report (e.g., Executive Summary, Key Developments, Deep Dives, Outlook).
+- Avoid speculation; cite facts from sources; prefer recency and credibility.
+ - Make the summary concise (max ~120 words, 2–3 sentences). Keep all deeper details in detailed_report with clear headings.
+
 Return ONLY strict JSON with keys:
 {
   "summary": string,
