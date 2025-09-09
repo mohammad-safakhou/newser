@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/mohammad-safakhou/newser/config"
 	core "github.com/mohammad-safakhou/newser/internal/agent/core"
+	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
 	"github.com/mohammad-safakhou/newser/internal/store"
 )
 
@@ -55,9 +57,9 @@ func (h *RunsHandler) Register(g *echo.Group, secret []byte) {
 //	@Failure	500	{object}	HTTPError
 //	@Router		/api/topics/{topic_id}/trigger [post]
 func (h *RunsHandler) trigger(c echo.Context) error {
-	userID := c.Get("user_id").(string)
-	topicID := c.Param("topic_id")
-	name, prefsB, _, err := h.store.GetTopicByID(c.Request().Context(), topicID, userID)
+    userID := c.Get("user_id").(string)
+    topicID := c.Param("topic_id")
+    _, prefsB, _, err := h.store.GetTopicByID(c.Request().Context(), topicID, userID)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
 	}
@@ -71,76 +73,14 @@ func (h *RunsHandler) trigger(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	// launch background processing (use injected orchestrator)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-		defer cancel()
-
-		// Build context from previous runs and knowledge graph
-		ctxMap := map[string]interface{}{}
-		if ts, _ := h.store.LatestRunTime(ctx, topicID); ts != nil {
-			ctxMap["last_run_time"] = ts.UTC().Format(time.RFC3339)
-		}
-		if rid, _ := h.store.GetLatestRunID(ctx, topicID); rid != "" {
-			if prev, err := h.store.GetProcessingResultByID(ctx, rid); err == nil {
-				ctxMap["prev_summary"] = prev["summary"]
-				// Extract known URLs
-				var known []string
-				if sl, ok := prev["sources"].([]interface{}); ok {
-					for _, it := range sl {
-						if m, ok := it.(map[string]interface{}); ok {
-							if u, ok := m["url"].(string); ok && u != "" {
-								known = append(known, u)
-							}
-						}
-					}
-				}
-				if len(known) > 0 {
-					ctxMap["known_urls"] = known
-				}
-			}
-		}
-		if kg, err := h.store.GetKnowledgeGraph(ctx, topicID); err == nil {
-			ctxMap["knowledge_graph"] = map[string]interface{}{"nodes": kg.Nodes, "edges": kg.Edges, "last_updated": kg.LastUpdated}
-		}
-
-		// construct thought from preferences (not user-defined name)
-		content := deriveThoughtContentFromPrefs(map[string]interface{}(prefs))
-		thought := core.UserThought{
-			ID:          runID,
-			Content:     content,
-			Preferences: prefs,
-			Timestamp:   time.Now(),
-			Context:     ctxMap,
-		}
-
-		result, err := h.orch.ProcessThought(ctx, thought)
-		if err != nil {
-			_ = h.store.FinishRun(ctx, runID, "failed", strPtr(err.Error()))
-			return
-		}
-
-		// Persist the result using the same runID as key in app DB
-		_ = h.store.UpsertProcessingResult(ctx, result)
-		// Persist highlights and knowledge graph keyed by topic ID (not name)
-		if len(result.Highlights) > 0 {
-			_ = h.store.SaveHighlights(ctx, topicID, result.Highlights)
-		}
-		// Always attempt to persist knowledge graph metadata, even if empty
-		_ = h.store.SaveKnowledgeGraphFromMetadata(ctx, topicID, result.Metadata)
-		// Generate FINAL report (blocking) using LLM deep-dive; persist as canonical markdown
-		if resJSON, err := h.store.GetProcessingResultByID(ctx, runID); err == nil {
-			// Attempt LLM-based deep dive; if it fails, mark the run as failed
-			if md, derr := h.generateFullReport(ctx, name, prefs, resJSON); derr == nil && md != "" {
-				_ = writeRunMarkdown(topicID, runID, md)
-				_ = h.store.FinishRun(ctx, runID, "succeeded", nil)
-			} else {
-				_ = h.store.FinishRun(ctx, runID, "failed", strPtr(fmt.Sprintf("full report generation failed: %v", derr)))
-			}
-		} else {
-			_ = h.store.FinishRun(ctx, runID, "failed", strPtr("processing result missing"))
-		}
-	}()
+    // launch background processing using shared pipeline
+    go func() {
+        ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+        defer cancel()
+        if err := processRun(ctx, h.cfg, h.store, h.orch, topicID, userID, runID); err != nil {
+            _ = h.store.FinishRun(ctx, runID, "failed", strPtr(err.Error()))
+        }
+    }()
 
 	return c.JSON(http.StatusAccepted, IDResponse{ID: runID})
 }
@@ -324,7 +264,7 @@ func firstN(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// ExpandAll: Generate a deep-dive markdown for the entire run, grouping by a category if requested.
+// ExpandAll: Deprecated. Returns stored final report.
 //
 //	@Summary  Expand an entire run to deep-dive markdown
 //	@Tags     runs
@@ -363,16 +303,80 @@ func (h *RunsHandler) expandAll(c echo.Context) error {
 	return c.JSON(http.StatusOK, ExpandAllResponse{Markdown: md})
 }
 
+// processRun executes the full run pipeline shared by HTTP trigger and scheduler
+func processRun(ctx context.Context, cfg *config.Config, st *store.Store, orch *core.Orchestrator, topicID string, userID string, runID string) error {
+    // Build context from previous runs and knowledge graph
+    ctxMap := map[string]interface{}{}
+    if ts, _ := st.LatestRunTime(ctx, topicID); ts != nil {
+        ctxMap["last_run_time"] = ts.UTC().Format(time.RFC3339)
+    }
+    if rid, _ := st.GetLatestRunID(ctx, topicID); rid != "" {
+        if prev, err := st.GetProcessingResultByID(ctx, rid); err == nil {
+            ctxMap["prev_summary"] = prev["summary"]
+            var known []string
+            if sl, ok := prev["sources"].([]interface{}); ok {
+                for _, it := range sl {
+                    if m, ok := it.(map[string]interface{}); ok {
+                        if u, ok := m["url"].(string); ok && u != "" { known = append(known, u) }
+                    }
+                }
+            }
+            if len(known) > 0 { ctxMap["known_urls"] = known }
+        }
+    }
+    if kg, err := st.GetKnowledgeGraph(ctx, topicID); err == nil {
+        ctxMap["knowledge_graph"] = map[string]interface{}{"nodes": kg.Nodes, "edges": kg.Edges, "last_updated": kg.LastUpdated}
+    }
+
+    // Fetch topic (name, preferences)
+    name, prefsB, _, err := st.GetTopicByID(ctx, topicID, userID)
+    if err != nil { return err }
+    var prefs Preferences
+    _ = json.Unmarshal(prefsB, &prefs)
+
+    // Construct thought from preferences (not user-defined name)
+    content := deriveThoughtContentFromPrefs(map[string]interface{}(prefs))
+    thought := core.UserThought{ ID: runID, Content: content, Preferences: prefs, Timestamp: time.Now(), Context: ctxMap }
+
+    // Ensure orchestrator exists
+    var o *core.Orchestrator = orch
+    if o == nil {
+        tele := telemetry.NewTelemetry(cfg.Telemetry)
+        defer tele.Shutdown()
+        logger := log.New(log.Writer(), "[RUN] ", log.LstdFlags)
+        var err2 error
+        o, err2 = core.NewOrchestrator(cfg, logger, tele)
+        if err2 != nil { return err2 }
+    }
+
+    result, err := o.ProcessThought(ctx, thought)
+    if err != nil { return err }
+
+    // Persist
+    _ = st.UpsertProcessingResult(ctx, result)
+    if len(result.Highlights) > 0 { _ = st.SaveHighlights(ctx, topicID, result.Highlights) }
+    _ = st.SaveKnowledgeGraphFromMetadata(ctx, topicID, result.Metadata)
+    if resJSON, err := st.GetProcessingResultByID(ctx, runID); err == nil {
+        if md, derr := generateFullReport(ctx, cfg, name, prefs, resJSON); derr == nil && md != "" {
+            _ = writeRunMarkdown(topicID, runID, md)
+            _ = st.FinishRun(ctx, runID, "succeeded", nil)
+        } else {
+            _ = st.FinishRun(ctx, runID, "failed", strPtr(fmt.Sprintf("full report generation failed: %v", derr)))
+        }
+    } else {
+        _ = st.FinishRun(ctx, runID, "failed", strPtr("processing result missing"))
+    }
+    return nil
+}
+
 // generateFullReport creates the final deep-dive Markdown for a run using the configured LLM provider.
-func (h *RunsHandler) generateFullReport(ctx context.Context, topicName string, prefs Preferences, res map[string]interface{}) (string, error) {
-	llm, err := core.NewLLMProvider(h.cfg.LLM)
-	if err != nil {
-		return "", err
-	}
-	model := h.cfg.LLM.Routing.Synthesis
-	if model == "" {
-		model = h.cfg.LLM.Routing.Chatting
-	}
+func generateFullReport(ctx context.Context, cfg *config.Config, topicName string, prefs Preferences, res map[string]interface{}) (string, error) {
+    llm, err := core.NewLLMProvider(cfg.LLM)
+    if err != nil {
+        return "", err
+    }
+    model := cfg.LLM.Routing.Synthesis
+    if model == "" { model = cfg.LLM.Routing.Chatting }
 
 	highlights := "[]"
 	if hs, ok := res["highlights"].([]interface{}); ok {
@@ -410,12 +414,12 @@ Guidance:
 - Keep the tone factual; avoid speculation; conclude with concise takeaways.
 - Return ONLY the Markdown content.`, topicName, summary, detailed, highlights, sources)
 
-	out, err := llm.Generate(ctx, prompt, model, map[string]interface{}{"temperature": 0.3})
-	if err != nil {
-		return "", err
-	}
+    out, err := llm.Generate(ctx, prompt, model, map[string]interface{}{"temperature": 0.3})
+    if err != nil {
+        return "", err
+    }
 
-	final, err := ExtractMarkdown(out)
+    final, err := ExtractMarkdown(out)
 	if err != nil {
 		return out, nil
 	}

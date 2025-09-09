@@ -2,8 +2,6 @@ package server
 
 import (
     "context"
-    "encoding/json"
-    "log"
     "sort"
     "strings"
     "time"
@@ -11,8 +9,7 @@ import (
 	"github.com/gorhill/cronexpr"
 	"github.com/mohammad-safakhou/newser/config"
 	"github.com/mohammad-safakhou/newser/internal/agent/core"
-	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
-	"github.com/mohammad-safakhou/newser/internal/store"
+    "github.com/mohammad-safakhou/newser/internal/store"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -78,33 +75,11 @@ func (s *Scheduler) tick() {
 		}
 
         go func(topic store.Topic, runID string) {
-			// jitter to avoid stampedes
-			time.Sleep(time.Duration(250+int64(time.Now().UnixNano()%250)) * time.Millisecond)
-			orch := s.orch
-			if orch == nil {
-				tele := telemetry.NewTelemetry(s.cfg.Telemetry)
-				defer tele.Shutdown()
-				logger := log.New(log.Writer(), "[SCHED] ", log.LstdFlags)
-				var err2 error
-				orch, err2 = core.NewOrchestrator(s.cfg, logger, tele)
-				if err2 != nil {
-					_ = s.store.FinishRun(ctx, runID, "failed", strPtr(err2.Error()))
-					return
-				}
-			}
-            // Derive content from preferences (not from user-defined name)
-            name, prefsB, _, _ := s.store.GetTopicByID(ctx, topic.ID, topic.UserID)
-            _ = name // do not use name for semantics
-            var prefs map[string]interface{}
-            _ = json.Unmarshal(prefsB, &prefs)
-            content := deriveThoughtContentFromPrefs(prefs)
-            thought := core.UserThought{ID: topic.ID, Content: content, Timestamp: time.Now(), Preferences: prefs}
-            _, err = orch.ProcessThought(ctx, thought)
-			if err != nil {
-				_ = s.store.FinishRun(ctx, runID, "failed", strPtr(err.Error()))
-				return
-			}
-			_ = s.store.FinishRun(ctx, runID, "succeeded", nil)
+            // jitter to avoid stampedes
+            time.Sleep(time.Duration(250+int64(time.Now().UnixNano()%250)) * time.Millisecond)
+            if err := processRun(ctx, s.cfg, s.store, s.orch, topic.ID, topic.UserID, runID); err != nil {
+                _ = s.store.FinishRun(ctx, runID, "failed", strPtr(err.Error()))
+            }
         }(t, runID)
     }
 }
