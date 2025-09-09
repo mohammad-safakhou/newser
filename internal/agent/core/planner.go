@@ -42,8 +42,7 @@ func (p *Planner) Plan(ctx context.Context, thought UserThought) (PlanningResult
 
 	// Generate plan using LLM
 	response, err := p.llmProvider.Generate(ctx, prompt, model, map[string]interface{}{
-		"temperature": 0.2,
-		"max_tokens":  1800,
+		"temperature": 0.1,
 	})
 	if err != nil {
 		return PlanningResult{}, fmt.Errorf("failed to generate plan: %w", err)
@@ -442,7 +441,6 @@ func (p *Planner) OptimizePlan(plan PlanningResult, constraints map[string]inter
 
 	response, err := p.llmProvider.Generate(ctx2, prompt, model, map[string]interface{}{
 		"temperature": 0.2,
-		"max_tokens":  1500,
 	})
 	if err != nil {
 		return plan, fmt.Errorf("failed to optimize plan: %w", err)

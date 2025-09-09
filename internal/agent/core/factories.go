@@ -15,6 +15,7 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/mohammad-safakhou/newser/config"
 	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
+	"github.com/mohammad-safakhou/newser/internal/helpers"
 )
 
 // NewLLMProvider creates a new LLM provider based on configuration
@@ -898,13 +899,19 @@ Respond ONLY as strict JSON with keys:
 {"relevance_score": number 0..1, "credibility_score": number 0..1, "importance_score": number 0..1, "sentiment": string one of [positive, neutral, negative], "key_topics": [string], "content_quality": string, "information_depth": string, "confidence": number 0..1}
 `, query, srcCtx)
 
-	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.2, "max_tokens": 800})
+	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.2})
 	if err != nil {
 		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
 	}
+	jOut, err := helpers.ExtractJSON(out)
+	if err != nil {
+		a.logger.Printf("Analysis agent JSON parse error: %v, raw output: %s", err, out)
+		return AgentResult{Data: map[string]interface{}{"error": "failed to parse analysis output"}, Success: false, AgentType: a.agentType, ModelUsed: model}
+	}
+
 	var parsed analysisParseResult
 	// lenient JSON extraction
-	if e := json.Unmarshal([]byte(extractFirstJSON(out)), &parsed); e != nil {
+	if e := json.Unmarshal([]byte(jOut), &parsed); e != nil {
 		// fallback minimal
 		parsed = analysisParseResult{
 			Relevance: 0.7, Credibility: 0.6, Importance: 0.65, Sentiment: "neutral", KeyTopics: []string{}, ContentQuality: "unknown", InformationDepth: "unknown", Confidence: 0.6,
@@ -1000,9 +1007,15 @@ Return ONLY strict JSON with keys:
 }
 `, userThought, max, ctxBuf.String())
 
-	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.2, "max_tokens": 1400})
+	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.2})
 	if err != nil {
 		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
+	}
+
+	jOut, err := helpers.ExtractJSON(out)
+	if err != nil {
+		a.logger.Printf("Analysis agent JSON parse error: %v, raw output: %s", err, out)
+		return AgentResult{Data: map[string]interface{}{"error": "failed to parse analysis output"}, Success: false, AgentType: a.agentType, ModelUsed: model}
 	}
 
 	// Parse JSON
@@ -1020,8 +1033,7 @@ Return ONLY strict JSON with keys:
 			SourceURLs                        []string `json:"source_urls"`
 		} `json:"conflicts"`
 	}
-	raw := extractFirstJSON(out)
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(jOut), &parsed); err != nil {
 		// Fallback: use whole text as summary
 		parsed.Summary = out
 		parsed.Detailed = out
@@ -1124,15 +1136,21 @@ List concise conflicts with severity and a suggested resolution.
 STATEMENTS:\n%s\n
 Return ONLY strict JSON: { "conflicts": [ { "description": string, "severity": "low|medium|high|critical", "resolution": string } ], "confidence": number 0..1 }`, buf.String())
 
-	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.2, "max_tokens": 800})
+	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.2})
 	if err != nil {
 		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
 	}
+	jOut, err := helpers.ExtractJSON(out)
+	if err != nil {
+		a.logger.Printf("Analysis agent JSON parse error: %v, raw output: %s", err, out)
+		return AgentResult{Data: map[string]interface{}{"error": "failed to parse analysis output"}, Success: false, AgentType: a.agentType, ModelUsed: model}
+	}
+
 	var parsed struct {
 		Conflicts  []struct{ Description, Severity, Resolution string } `json:"conflicts"`
 		Confidence float64                                              `json:"confidence"`
 	}
-	if e := json.Unmarshal([]byte(extractFirstJSON(out)), &parsed); e != nil {
+	if e := json.Unmarshal([]byte(jOut), &parsed); e != nil {
 		parsed.Conflicts = nil
 		parsed.Confidence = 0.5
 	}
@@ -1202,10 +1220,16 @@ func (a *SimpleAgent) executeHighlightManagement(ctx context.Context, task Agent
 	prompt := fmt.Sprintf(`Extract the most important highlights from the following source snippets.
 Return ONLY strict JSON: { "highlights": [ { "title": string, "content": string, "type": "breaking|important|ongoing|general", "priority": 1|2|3|4|5, "source_urls": [string] } ], "confidence": number 0..1 }
 SOURCES:\n%s`, buf.String())
-	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.3, "max_tokens": 900})
+	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.3})
 	if err != nil {
 		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
 	}
+	jOut, err := helpers.ExtractJSON(out)
+	if err != nil {
+		a.logger.Printf("Analysis agent JSON parse error: %v, raw output: %s", err, out)
+		return AgentResult{Data: map[string]interface{}{"error": "failed to parse analysis output"}, Success: false, AgentType: a.agentType, ModelUsed: model}
+	}
+
 	var parsed struct {
 		Highlights []struct {
 			Title, Content, Type string
@@ -1214,7 +1238,7 @@ SOURCES:\n%s`, buf.String())
 		}
 		Confidence float64
 	}
-	_ = json.Unmarshal([]byte(extractFirstJSON(out)), &parsed)
+	_ = json.Unmarshal([]byte(jOut), &parsed)
 	now := time.Now()
 	var highs []Highlight
 	for _, h := range parsed.Highlights {
@@ -1300,10 +1324,16 @@ Return ONLY strict JSON:
   "edges": [ { "id": string, "from": string, "to": string, "type": string, "weight": number 0..1, "confidence": number 0..1 } ],
   "confidence": number 0..1 } 
 NOTES:\n%s`, topic, buf.String())
-	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.2, "max_tokens": 900})
+	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.2})
 	if err != nil {
 		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
 	}
+	jOut, err := helpers.ExtractJSON(out)
+	if err != nil {
+		a.logger.Printf("Analysis agent JSON parse error: %v, raw output: %s", err, out)
+		return AgentResult{Data: map[string]interface{}{"error": "failed to parse analysis output"}, Success: false, AgentType: a.agentType, ModelUsed: model}
+	}
+
 	var parsed struct {
 		Nodes []struct {
 			ID, Type, Label, Description string
@@ -1315,7 +1345,7 @@ NOTES:\n%s`, topic, buf.String())
 		} `json:"edges"`
 		Confidence float64 `json:"confidence"`
 	}
-	_ = json.Unmarshal([]byte(extractFirstJSON(out)), &parsed)
+	_ = json.Unmarshal([]byte(jOut), &parsed)
 	now := time.Now()
 	var nodes []KnowledgeNode
 	for _, n := range parsed.Nodes {
@@ -1347,26 +1377,4 @@ NOTES:\n%s`, topic, buf.String())
 		TokensUsed: inTok + outTok,
 		ModelUsed:  model,
 	}
-}
-
-// extractFirstJSON attempts to find the first top-level JSON object in a string
-func extractFirstJSON(s string) string {
-	start := -1
-	depth := 0
-	for i, ch := range s {
-		if ch == '{' {
-			if depth == 0 {
-				start = i
-			}
-			depth++
-		} else if ch == '}' {
-			if depth > 0 {
-				depth--
-			}
-			if depth == 0 && start != -1 {
-				return s[start : i+1]
-			}
-		}
-	}
-	return s
 }
