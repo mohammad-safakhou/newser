@@ -2,6 +2,7 @@ export type Me = { user_id: string }
 export type Topic = { ID: string; Name: string; ScheduleCron: string }
 export type Run = { ID: string; Status: string; StartedAt: string; FinishedAt?: string; Error?: string }
 export type ChatMessage = { role: 'user' | 'assistant'; content: string }
+export type ChatLogMessage = { id: string; role: 'user'|'assistant'; content: string; created_at: string }
 
 // Enhanced request with abort support
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '')
@@ -56,6 +57,13 @@ export const api2 = {
   expandAll: (topicId: string, runId: string, payload: { group_by?: 'type'|'domain'|'none'|'taxonomy'; focus?: string }) =>
     apiRequest<{ markdown: string }>(`/api/topics/${topicId}/runs/${runId}/expand_all`, { method: 'POST', body: JSON.stringify(payload) }),
   chat: (id: string, message: string) => apiRequest<{ message: string; topic: any }>(`/api/topics/${id}/chat`, { method: 'POST', body: JSON.stringify({ message }) }),
+  chatHistory: (id: string, opts: { limit?: number; before?: string } = {}) => {
+    const p = new URLSearchParams()
+    if (opts.limit) p.set('limit', String(opts.limit))
+    if (opts.before) p.set('before', opts.before)
+    const qs = p.toString()
+    return apiRequest<ChatLogMessage[]>(`/api/topics/${id}/chat${qs ? `?${qs}` : ''}`)
+  },
   getTopic: (id: string) => apiRequest<any>(`/api/topics/${id}`),
   updateTopicName: (id: string, name: string) => apiRequest(`/api/topics/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   assistChat: (payload: { message: string; name?: string; preferences?: Record<string, any>; schedule_cron?: string }) => apiRequest<{ message: string; topic: any }>(`/api/topics/assist/chat`, { method: 'POST', body: JSON.stringify(payload) }),

@@ -1,12 +1,14 @@
 package server
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"log"
-	"net/http"
-	"strings"
+    "context"
+    "encoding/json"
+    "fmt"
+    "log"
+    "net/http"
+    "strings"
+    "time"
+    "strconv"
 
 	"github.com/labstack/echo/v4"
 	agentcore "github.com/mohammad-safakhou/newser/internal/agent/core"
@@ -20,15 +22,16 @@ type TopicsHandler struct {
 }
 
 func (h *TopicsHandler) Register(g *echo.Group, secret []byte) {
-	g.Use(func(next echo.HandlerFunc) echo.HandlerFunc { return withAuth(next, secret) })
-	g.GET("", h.list)
-	g.POST("", h.create)
-	// Assist sub-group to avoid param route ambiguity
-	assist := g.Group("/assist")
-	assist.POST("/chat", h.assist)
-	g.GET("/:id", h.get)
-	g.PATCH("/:id", h.update)
-	g.POST("/:id/chat", h.chat)
+    g.Use(func(next echo.HandlerFunc) echo.HandlerFunc { return withAuth(next, secret) })
+    g.GET("", h.list)
+    g.POST("", h.create)
+    // Assist sub-group to avoid param route ambiguity
+    assist := g.Group("/assist")
+    assist.POST("/chat", h.assist)
+    g.GET("/:id", h.get)
+    g.PATCH("/:id", h.update)
+    g.POST("/:id/chat", h.chat)
+    g.GET("/:id/chat", h.chatHistory)
 }
 
 // List topics
@@ -157,40 +160,85 @@ func (h *TopicsHandler) update(c echo.Context) error {
 //	@Failure	503		{object}	HTTPError
 //	@Router		/api/topics/{id}/chat [post]
 func (h *TopicsHandler) chat(c echo.Context) error {
-	if h.LLM == nil {
-		return echo.NewHTTPError(http.StatusServiceUnavailable, "LLM not configured")
-	}
-	userID := c.Get("user_id").(string)
-	topicID := c.Param("id")
+    if h.LLM == nil {
+        return echo.NewHTTPError(http.StatusServiceUnavailable, "LLM not configured")
+    }
+    userID := c.Get("user_id").(string)
+    topicID := c.Param("id")
 	name, prefsB, cron, err := h.Store.GetTopicByID(c.Request().Context(), topicID, userID)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusNotFound, err.Error())
 	}
 	var prefs map[string]interface{}
 	_ = json.Unmarshal(prefsB, &prefs)
-	var req ChatRequest
-	if err := c.Bind(&req); err != nil || req.Message == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "message required")
-	}
-	reply, newPrefs, newCron, err := llmRefineTopic(c.Request().Context(), h.LLM, h.Model, req.Message, name, prefs, cron)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-	}
+    var req ChatRequest
+    if err := c.Bind(&req); err != nil || req.Message == "" {
+        return echo.NewHTTPError(http.StatusBadRequest, "message required")
+    }
+    // persist the user message before LLM call
+    if _, err := h.Store.CreateChatMessage(c.Request().Context(), topicID, userID, "user", req.Message); err != nil {
+        return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+    }
+
+    reply, newPrefs, newCron, err := llmRefineTopic(c.Request().Context(), h.LLM, h.Model, req.Message, name, prefs, cron)
+    if err != nil {
+        return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+    }
 	prefsJSON, _ := json.Marshal(newPrefs)
 	var newCronPtr *string
 	if newCron != "" {
 		v := newCron
 		newCronPtr = &v
 	}
-	if err := h.Store.UpdateTopicPrefsAndCron(c.Request().Context(), topicID, userID, prefsJSON, newCronPtr); err != nil {
-		log.Printf("update topic prefs error: %v", err)
-		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-	}
-	return c.JSON(http.StatusOK, ChatResponse{
-		Message: reply,
-		Topic: map[string]interface{}{
-			"Title": name, "Preferences": newPrefs, "CronSpec": newCron},
-	})
+    if err := h.Store.UpdateTopicPrefsAndCron(c.Request().Context(), topicID, userID, prefsJSON, newCronPtr); err != nil {
+        log.Printf("update topic prefs error: %v", err)
+        return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+    }
+    // persist assistant reply
+    _, _ = h.Store.CreateChatMessage(c.Request().Context(), topicID, userID, "assistant", reply)
+    return c.JSON(http.StatusOK, ChatResponse{
+        Message: reply,
+        Topic: map[string]interface{}{
+            "Title": name, "Preferences": newPrefs, "CronSpec": newCron},
+    })
+}
+
+// chatHistory returns paginated chat messages for a topic (newest first, limited)
+//
+//  @Summary  List chat messages for topic
+//  @Tags     topics
+//  @Security BearerAuth
+//  @Security CookieAuth
+//  @Param    id       path   string true  "Topic ID"
+//  @Param    limit    query  int    false "Max messages (default 20, max 200)"
+//  @Param    before   query  string false "ISO timestamp; return messages created before this time"
+//  @Produce  json
+//  @Success  200 {array} ChatLogMessage
+//  @Failure  404 {object} HTTPError
+//  @Router   /api/topics/{id}/chat [get]
+func (h *TopicsHandler) chatHistory(c echo.Context) error {
+    userID := c.Get("user_id").(string)
+    topicID := c.Param("id")
+    // validate topic ownership
+    if _, _, _, err := h.Store.GetTopicByID(c.Request().Context(), topicID, userID); err != nil {
+        return echo.NewHTTPError(http.StatusNotFound, err.Error())
+    }
+    limit := 20
+    if s := c.QueryParam("limit"); s != "" {
+        if n, err := strconv.Atoi(s); err == nil { limit = n }
+    }
+    var before *time.Time
+    if b := c.QueryParam("before"); b != "" {
+        if ts, err := time.Parse(time.RFC3339, b); err == nil { before = &ts }
+    }
+    msgs, err := h.Store.ListChatMessages(c.Request().Context(), topicID, userID, limit, before)
+    if err != nil { return echo.NewHTTPError(http.StatusInternalServerError, err.Error()) }
+    // map to API model
+    out := make([]ChatLogMessage, 0, len(msgs))
+    for _, m := range msgs {
+        out = append(out, ChatLogMessage{ID: m.ID, Role: m.Role, Content: m.Content, CreatedAt: m.CreatedAt.UTC().Format(time.RFC3339)})
+    }
+    return c.JSON(http.StatusOK, out)
 }
 
 // assist provides LLM guidance for drafting a new topic before persistence

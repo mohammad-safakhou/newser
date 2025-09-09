@@ -56,8 +56,8 @@ type ChatRequest struct {
 
 // ChatResponse is the response for topic chat endpoints.
 type ChatResponse struct {
-	Message string                 `json:"message"`
-	Topic   map[string]interface{} `json:"topic"`
+    Message string                 `json:"message"`
+    Topic   map[string]interface{} `json:"topic"`
 }
 
 // AssistRequest is the request for LLM assist endpoint.
@@ -89,3 +89,11 @@ type ExpandAllRequest struct {
 }
 
 type ExpandAllResponse = ExpandResponse
+
+// Chat log models
+type ChatLogMessage struct {
+    ID        string `json:"id"`
+    Role      string `json:"role"`
+    Content   string `json:"content"`
+    CreatedAt string `json:"created_at"`
+}

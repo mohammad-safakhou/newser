@@ -1,21 +1,16 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import PreferenceDiff, { DiffEntry } from '../components/PreferenceDiff'
+// Preference diff removed in favor of always-visible Preferences panel
 import { api2, Run, formatDate, ChatMessage } from '../api'
 import { useToast } from '../components/Toasts'
 import ConfidenceGauge from '../components/ConfidenceGauge'
-import HighlightsList from '../components/HighlightsList'
-import KnowledgeGraph from '../components/KnowledgeGraph'
 import MarkdownView from '../components/MarkdownView'
 import Spinner from '../components/Spinner'
 import { useDialogA11y } from '../components/useDialogA11y'
 import { useSession } from '../session'
 
 function RunDetailModal({ topicId, runId, onClose }: { topicId: string; runId: string; onClose: () => void }) {
-  const [data, setData] = useState<any | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  // expansion of individual highlights removed per UX request; use markdown only
   const [md, setMd] = useState<string | null>(null)
   const [mdOpen, setMdOpen] = useState(false)
   const [mdLoading, setMdLoading] = useState(false)
@@ -23,9 +18,12 @@ function RunDetailModal({ topicId, runId, onClose }: { topicId: string; runId: s
   useDialogA11y(containerRef, onClose, '#run-detail-close')
   useEffect(()=>{
     let mounted = true
-    api2.runResult(topicId, runId).then(d => { if (mounted) setData(d) }).catch(e => { if (mounted) setError(e.message) })
-    // auto-load the primary markdown report on open
-    api2.runMarkdown(topicId, runId).then(text => { if (mounted) { setMd(text); setMdOpen(true) } }).catch(()=>{})
+    // load the primary markdown report on open
+    setMdLoading(true)
+    api2.runMarkdown(topicId, runId)
+      .then(text => { if (mounted) { setMd(text); setMdOpen(true) } })
+      .catch((e:any)=>{ if (mounted) { setMd(`Error: ${e?.message || e}`); setMdOpen(true) } })
+      .finally(()=>{ if (mounted) setMdLoading(false) })
     return ()=>{ mounted = false }
   }, [topicId, runId])
   // per-run expand kept via Expand All button to merge into markdown
@@ -64,17 +62,11 @@ function RunDetailModal({ topicId, runId, onClose }: { topicId: string; runId: s
               <button id="run-detail-close" className="btn-secondary text-xs px-3" onClick={onClose}>Close</button>
             </div>
           </div>
-        {!data && !error && <div className="p-4"><Spinner label="Loading run details" /></div>}
-        {error && <div className="p-4 text-xs text-red-400">{error}</div>}
-        {data && (
-          <div className="p-5 space-y-5">
-            {mdOpen && (
-              <div className="bg-slate-900/60 border border-slate-800 rounded p-3 max-h-[70vh] overflow-auto">
-                {mdLoading ? <Spinner label="Generating" /> : (md ? <MarkdownView markdown={md} /> : <div className="text-xs text-slate-500">—</div>)}
-              </div>
-            )}
+        <div className="p-5 space-y-5">
+          <div className="bg-slate-900/60 border border-slate-800 rounded p-3 max-h-[70vh] overflow-auto">
+            {mdLoading ? <Spinner label="Loading run details" /> : (md ? <MarkdownView markdown={md} /> : <div className="text-xs text-slate-500">—</div>)}
           </div>
-        )}
+        </div>
       </div>
     </div>
   )
@@ -84,6 +76,7 @@ export default function TopicDetailPage() {
   const { id } = useParams<{ id: string }>()
   const qc = useQueryClient()
   const [conversation, setConversation] = useState<ChatMessage[]>([])
+  const [oldestCursor, setOldestCursor] = useState<string | null>(null)
   const [input, setInput] = useState('')
   const [optimisticReply, setOptimisticReply] = useState(false)
   const [showDetail, setShowDetail] = useState(false)
@@ -114,26 +107,27 @@ export default function TopicDetailPage() {
     onSuccess: async (resp, msg) => {
       // Normalize assistant message if backend returned raw JSON
       const clean = normalizeAssistantMessage(resp?.message)
-      setConversation(prev => [...prev, { role: 'user', content: msg }, { role: 'assistant', content: clean }])
+      // Only append assistant reply; the user message was added in send()
+      setConversation(prev => [...prev, { role: 'assistant', content: clean }])
       setOptimisticReply(false)
-      // Try to compute diffs using response; fallback to refetching topic
+      // Refresh Preferences panel immediately
       try {
         const updated = resp?.topic as any
         const serverPrefs = (updated && (updated.preferences || updated.Preferences)) || null
         let newPrefs: Record<string, any> = serverPrefs || {}
         if (!serverPrefs) {
           // If response didn't include prefs (LLM parse quirks), refetch topic
+          await qc.invalidateQueries({ queryKey: ['topic', id] })
           const fresh = await qc.fetchQuery({ queryKey: ['topic', id], queryFn: () => api2.getTopic(id!) }) as any
           newPrefs = (fresh && (fresh.preferences || fresh.Preferences)) || {}
         }
-        const base = lastPrefs ?? (topicQ.data?.preferences || {})
-        const d = computeDiff(base, newPrefs)
-        setDiffs(d)
         setLastPrefs(newPrefs)
-        if (d.length > 0) toast.success('Preferences updated')
-        else toast.info('No preference changes')
+        // Update cache so UI panel reflects immediately
+        qc.setQueryData(['topic', id], (prev: any) => prev ? { ...prev, preferences: newPrefs } : prev)
+        toast.success('Preferences updated')
       } catch (e) {
-        toast.warn('Assistant replied; preferences unchanged')
+        // Show assistant reply, but we couldn’t update prefs view
+        toast.warn('Assistant replied; preferences view unchanged')
       }
     },
     onError: (e:any) => { setOptimisticReply(false); toast.error((e && e.message) || 'Chat failed') }
@@ -159,21 +153,39 @@ export default function TopicDetailPage() {
   }
 
   const [lastPrefs, setLastPrefs] = useState<Record<string, any> | null>(null)
-  const [diffs, setDiffs] = useState<DiffEntry[]>([])
 
   useEffect(()=>{
-    if (topicQ.data && !lastPrefs) {
+    if (topicQ.data) {
       setLastPrefs(topicQ.data.preferences || {})
     }
-  }, [topicQ.data, lastPrefs])
+  }, [topicQ.data])
+
+  // Load conversation history (latest 20) from server on mount/topic change
+  useEffect(()=>{
+    let mounted = true
+    if (!id) return
+    ;(async ()=>{
+      try {
+        const msgs = await api2.chatHistory(id, { limit: 20 })
+        if (!mounted) return
+        // API returns newest-first; display ascending
+        const ordered = [...msgs].reverse().map(m => ({ role: m.role as 'user'|'assistant', content: m.content }))
+        setConversation(ordered)
+        if (msgs.length > 0) setOldestCursor(msgs[msgs.length-1].created_at)
+        else setOldestCursor(null)
+      } catch {}
+    })()
+    return ()=>{ mounted = false }
+  }, [id])
 
   const send = useCallback(() => {
     const msg = input.trim(); if (!msg) return
-    setConversation(prev => [...prev, { role: 'user', content: msg }])
+    const next = [...conversation, { role: 'user', content: msg }]
+    setConversation(next)
     setInput('')
     setOptimisticReply(true)
     chatMut.mutate(msg)
-  }, [input, chatMut])
+  }, [input, chatMut, conversation, id])
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [conversation, optimisticReply])
 
@@ -205,7 +217,7 @@ export default function TopicDetailPage() {
             <h3 className="text-sm font-medium tracking-wide text-slate-300">Conversation</h3>
             {chatMut.isPending && <span className="text-xs text-slate-500 animate-pulse">thinking…</span>}
           </div>
-          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3 text-sm" aria-live="polite">
+          <div id="chat-scroll" className="flex-1 overflow-y-auto px-4 py-4 space-y-3 text-sm" aria-live="polite" onScroll={async (e)=>{ const el=e.currentTarget; if (el.scrollTop < 20 && oldestCursor) { try { const more = await api2.chatHistory(id!, { limit: 20, before: oldestCursor }); if (more.length>0) { const asc = [...more].reverse().map(m=>({ role: m.role as 'user'|'assistant', content: m.content })); setConversation(prev=> [...asc, ...prev]); setOldestCursor(more[more.length-1].created_at) } else { setOldestCursor(null) } } catch {} } }}>
             {conversation.length === 0 && <div className="text-slate-500 text-xs">Start refining this topic by asking for scope, preferences, or scheduling help.</div>}
             {conversation.map((m, i) => (
               <div key={i} className={m.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
@@ -251,13 +263,15 @@ export default function TopicDetailPage() {
               {runsQ.isLoading && <Spinner label="Loading runs" />}
               {runsQ.data && runsQ.data.length === 0 && <div className="text-xs text-slate-500">No runs yet.</div>}
               <ul className="space-y-2 text-xs">
-                {runsQ.data?.map(r => <RunRow key={r.ID} run={r} />)}
+                {runsQ.data?.map(r => <RunRow key={r.ID} run={r} onOpen={()=>setOpenRunId(r.ID)} />)}
               </ul>
             </div>
             <div className="card space-y-2">
-              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Preference Changes</h4>
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Preferences</h4>
               {!topicQ.isSuccess && <div className="text-xs text-slate-500">{topicQ.isLoading ? 'Loading topic…' : 'No data'}</div>}
-              {topicQ.isSuccess && <PreferenceDiff diffs={diffs} />}
+              {topicQ.isSuccess && (
+                <pre className="text-xs bg-slate-900/60 border border-slate-800 rounded p-3 max-h-64 overflow-auto whitespace-pre-wrap">{JSON.stringify(topicQ.data.preferences || {}, null, 2)}</pre>
+              )}
             </div>
           </div>
         </section>
@@ -274,10 +288,8 @@ function LogoutButton() {
   )
 }
 
-function RunRow({ run }: { run: Run }) {
+function RunRow({ run, onOpen }: { run: Run; onOpen: () => void }) {
   const color = run.Status === 'succeeded' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' : run.Status === 'failed' ? 'bg-red-500/20 text-red-300 border-red-500/30' : 'bg-slate-600/20 text-slate-300 border-slate-500/30'
-  const [open, setOpen] = useState(false)
-  const topicId = (useParams() as any).id as string
   return (
     <li className="flex flex-col gap-2 p-2 rounded border border-slate-800 bg-slate-900/40">
       <div className="flex items-start gap-3">
@@ -286,30 +298,10 @@ function RunRow({ run }: { run: Run }) {
           <div className="text-slate-300">{formatDate(run.StartedAt)}</div>
           {run.Error && <div className="text-xs text-red-400 mt-1">{run.Error}</div>}
         </div>
-        <button className="btn-secondary text-xs px-2 py-1" onClick={()=>setOpen(true)}>Details</button>
+        <button className="btn-secondary text-xs px-2 py-1" onClick={onOpen}>Details</button>
       </div>
-      {open && topicId && <RunDetailModal topicId={topicId} runId={run.ID} onClose={()=>setOpen(false)} />}
     </li>
   )
 }
 
-// simple diff utility
-function computeDiff(oldObj: Record<string, any>, newObj: Record<string, any>): DiffEntry[] {
-  const diffs: DiffEntry[] = []
-  const visited = new Set<string>()
-  const walk = (prefix: string, a: any, b: any) => {
-    if (typeof a !== 'object' || a === null || typeof b !== 'object' || b === null) {
-      if (JSON.stringify(a) !== JSON.stringify(b)) {
-        if (a === undefined) diffs.push({ path: prefix, type: 'added', to: b })
-        else if (b === undefined) diffs.push({ path: prefix, type: 'removed', from: a })
-        else diffs.push({ path: prefix, type: 'changed', from: a, to: b })
-      }
-      return
-    }
-    const keys = new Set([...Object.keys(a||{}), ...Object.keys(b||{})])
-    keys.forEach(k => walk(prefix ? `${prefix}.${k}` : k, a?.[k], b?.[k]))
-  }
-  walk('', oldObj || {}, newObj || {})
-  diffs.sort((x,y)=> x.path.localeCompare(y.path))
-  return diffs
-}
+// (client no longer persists; history comes from backend)

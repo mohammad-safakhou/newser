@@ -337,3 +337,46 @@ func (s *Store) GetKnowledgeGraph(ctx context.Context, topic string) (core.Knowl
     }
     return kg, nil
 }
+
+// Chat message operations
+type ChatMessage struct {
+    ID        string
+    TopicID   string
+    UserID    string
+    Role      string
+    Content   string
+    CreatedAt time.Time
+}
+
+func (s *Store) CreateChatMessage(ctx context.Context, topicID, userID, role, content string) (string, error) {
+    var id string
+    err := s.DB.QueryRowContext(ctx, `INSERT INTO chat_messages (topic_id, user_id, role, content) VALUES ($1,$2,$3,$4) RETURNING id`, topicID, userID, role, content).Scan(&id)
+    return id, err
+}
+
+// ListChatMessages returns messages for a topic, newest-first up to limit, optionally before a timestamp
+func (s *Store) ListChatMessages(ctx context.Context, topicID, userID string, limit int, before *time.Time) ([]ChatMessage, error) {
+    if limit <= 0 || limit > 200 { limit = 20 }
+    // Ensure topic ownership
+    if _, _, _, err := s.GetTopicByID(ctx, topicID, userID); err != nil {
+        return nil, err
+    }
+    var rows *sql.Rows
+    var err error
+    if before != nil {
+        rows, err = s.DB.QueryContext(ctx, `SELECT id, topic_id, user_id, role, content, created_at FROM chat_messages WHERE topic_id=$1 AND created_at < $2 ORDER BY created_at DESC LIMIT $3`, topicID, *before, limit)
+    } else {
+        rows, err = s.DB.QueryContext(ctx, `SELECT id, topic_id, user_id, role, content, created_at FROM chat_messages WHERE topic_id=$1 ORDER BY created_at DESC LIMIT $2`, topicID, limit)
+    }
+    if err != nil { return nil, err }
+    defer rows.Close()
+    var out []ChatMessage
+    for rows.Next() {
+        var m ChatMessage
+        if err := rows.Scan(&m.ID, &m.TopicID, &m.UserID, &m.Role, &m.Content, &m.CreatedAt); err != nil {
+            return nil, err
+        }
+        out = append(out, m)
+    }
+    return out, rows.Err()
+}
