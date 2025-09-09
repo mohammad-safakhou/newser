@@ -1,12 +1,12 @@
 package server
 
 import (
-    "context"
-    "encoding/json"
-    "fmt"
-    "log"
-    "net/http"
-    "strings"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 	agentcore "github.com/mohammad-safakhou/newser/internal/agent/core"
@@ -14,21 +14,21 @@ import (
 )
 
 type TopicsHandler struct {
-    Store *store.Store
-    LLM   agentcore.LLMProvider
-    Model string
+	Store *store.Store
+	LLM   agentcore.LLMProvider
+	Model string
 }
 
 func (h *TopicsHandler) Register(g *echo.Group, secret []byte) {
-    g.Use(func(next echo.HandlerFunc) echo.HandlerFunc { return withAuth(next, secret) })
-    g.GET("", h.list)
-    g.POST("", h.create)
-    // Assist sub-group to avoid param route ambiguity
-    assist := g.Group("/assist")
-    assist.POST("/chat", h.assist)
-    g.GET("/:id", h.get)
-    g.PATCH("/:id", h.update)
-    g.POST("/:id/chat", h.chat)
+	g.Use(func(next echo.HandlerFunc) echo.HandlerFunc { return withAuth(next, secret) })
+	g.GET("", h.list)
+	g.POST("", h.create)
+	// Assist sub-group to avoid param route ambiguity
+	assist := g.Group("/assist")
+	assist.POST("/chat", h.assist)
+	g.GET("/:id", h.get)
+	g.PATCH("/:id", h.update)
+	g.POST("/:id/chat", h.chat)
 }
 
 // List topics
@@ -110,33 +110,35 @@ func (h *TopicsHandler) get(c echo.Context) error {
 
 // update allows changing mutable topic fields (e.g., name). Name changes are user-driven only.
 //
-//  @Summary  Update topic
-//  @Tags     topics
-//  @Security BearerAuth
-//  @Security CookieAuth
-//  @Param    id      path  string true "Topic ID"
-//  @Accept   json
-//  @Produce  json
-//  @Param    payload body  map[string]string true "Partial update (name)"
-//  @Success  204
-//  @Failure  400 {object} HTTPError
-//  @Failure  404 {object} HTTPError
-//  @Router   /api/topics/{id} [patch]
+//	@Summary  Update topic
+//	@Tags     topics
+//	@Security BearerAuth
+//	@Security CookieAuth
+//	@Param    id      path  string true "Topic ID"
+//	@Accept   json
+//	@Produce  json
+//	@Param    payload body  map[string]string true "Partial update (name)"
+//	@Success  204
+//	@Failure  400 {object} HTTPError
+//	@Failure  404 {object} HTTPError
+//	@Router   /api/topics/{id} [patch]
 func (h *TopicsHandler) update(c echo.Context) error {
-    userID := c.Get("user_id").(string)
-    topicID := c.Param("id")
-    // validate access
-    if _, _, _, err := h.Store.GetTopicByID(c.Request().Context(), topicID, userID); err != nil {
-        return echo.NewHTTPError(http.StatusNotFound, err.Error())
-    }
-    var payload struct{ Name string `json:"name"` }
-    if err := c.Bind(&payload); err != nil || strings.TrimSpace(payload.Name) == "" {
-        return echo.NewHTTPError(http.StatusBadRequest, "name required")
-    }
-    if err := h.Store.UpdateTopicName(c.Request().Context(), topicID, userID, strings.TrimSpace(payload.Name)); err != nil {
-        return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-    }
-    return c.NoContent(http.StatusNoContent)
+	userID := c.Get("user_id").(string)
+	topicID := c.Param("id")
+	// validate access
+	if _, _, _, err := h.Store.GetTopicByID(c.Request().Context(), topicID, userID); err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	var payload struct {
+		Name string `json:"name"`
+	}
+	if err := c.Bind(&payload); err != nil || strings.TrimSpace(payload.Name) == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "name required")
+	}
+	if err := h.Store.UpdateTopicName(c.Request().Context(), topicID, userID, strings.TrimSpace(payload.Name)); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
 }
 
 // chat handles LLM-assisted conversation to refine a topic's goal/preferences
@@ -221,8 +223,8 @@ func (h *TopicsHandler) assist(c echo.Context) error {
 
 // llmRefineTopic crafts a prompt and parses a strict JSON response to update preferences/cron
 func llmRefineTopic(ctx context.Context, llm agentcore.LLMProvider, model string, message string, name string, prefs map[string]interface{}, cron string) (reply string, newPrefs map[string]interface{}, newCron string, err error) {
-    // Do not use or modify the user-defined topic name in guidance. Keep name out of semantics.
-    prompt := fmt.Sprintf(`You are assisting configuration of a news topic.
+	// Do not use or modify the user-defined topic name in guidance. Keep name out of semantics.
+	prompt := fmt.Sprintf(`You are assisting configuration of a news topic.
 Current schedule: %s
 Current preferences (JSON): %s
 User request: %s
@@ -230,7 +232,7 @@ User request: %s
 Respond ONLY as strict JSON with keys:
 {"message": string, "preferences": object, "cron_spec": string, "context_summary": string, "objectives": [string]}
 `, cron, mustJSON(prefs), message)
-    out, err := llm.Generate(ctx, prompt, model, map[string]interface{}{})
+	out, err := llm.Generate(ctx, prompt, model, map[string]interface{}{})
 	if err != nil {
 		return "", nil, "", err
 	}
@@ -241,13 +243,17 @@ Respond ONLY as strict JSON with keys:
 		ContextSummary string                 `json:"context_summary"`
 		Objectives     []string               `json:"objectives"`
 	}
+	out, err = ExtractJSON(out)
+	if err != nil {
+		return "", nil, "", fmt.Errorf("extract JSON: %w", err)
+	}
 	if e := json.Unmarshal([]byte(out), &parsed); e != nil {
 		var tmp map[string]interface{}
 		if i := firstJSONIndex(out); i >= 0 {
 			_ = json.Unmarshal([]byte(out[i:]), &tmp)
 		}
 		if tmp == nil {
-			return out, prefs, cron, nil
+			return "", nil, "", fmt.Errorf("invalid LLM response: %s", out)
 		}
 		b, _ := json.Marshal(tmp)
 		_ = json.Unmarshal(b, &parsed)

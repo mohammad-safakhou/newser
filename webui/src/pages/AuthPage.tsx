@@ -32,13 +32,50 @@ export default function AuthPage() {
           <h1 className="text-2xl font-semibold tracking-tight">Newser Console</h1>
           <p className="text-sm text-slate-400">Intelligent topic orchestration</p>
         </div>
-        {(error || localError) && <div className="text-sm bg-red-600/20 border border-red-500/40 text-red-200 px-3 py-2 rounded">{localError || error}</div>}
-        <form onSubmit={submit} className="space-y-4">
-          <div className="space-y-2">
-            <input autoFocus type="email" placeholder="Email" className="input" value={email} onChange={e=>setEmail(e.target.value)} disabled={busy} />
-            <input type="password" placeholder="Password" className="input" value={password} onChange={e=>setPassword(e.target.value)} disabled={busy} />
+        {(error || localError) && (
+          <div id="auth-error" className="text-sm bg-red-600/20 border border-red-500/40 text-red-200 px-3 py-2 rounded">
+            {localError || error}
           </div>
-          <button type="submit" disabled={busy} className="btn w-full justify-center">{busy ? '...' : mode==='login' ? 'Sign In' : 'Create Account'}</button>
+        )}
+        <form onSubmit={submit} className="space-y-4" noValidate>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <label htmlFor="email" className="text-xs font-medium text-slate-300">Email</label>
+              <input
+                id="email"
+                name="email"
+                autoFocus
+                type="email"
+                autoComplete="username"
+                placeholder="you@example.com"
+                className="input"
+                value={email}
+                onChange={e=>setEmail(e.target.value)}
+                aria-invalid={Boolean(error || localError) && !email ? true : undefined}
+                aria-describedby={error || localError ? 'auth-error' : undefined}
+                disabled={busy}
+              />
+            </div>
+            <div className="space-y-1">
+              <label htmlFor="password" className="text-xs font-medium text-slate-300">Password</label>
+              <input
+                id="password"
+                name="password"
+                type="password"
+                autoComplete={mode==='login' ? 'current-password' : 'new-password'}
+                placeholder="••••••••"
+                className="input"
+                value={password}
+                onChange={e=>setPassword(e.target.value)}
+                aria-invalid={Boolean(error || localError) && !password ? true : undefined}
+                aria-describedby={error || localError ? 'auth-error' : undefined}
+                disabled={busy}
+              />
+            </div>
+          </div>
+          <button type="submit" disabled={busy || !email || !password} className="btn w-full justify-center">
+            {busy ? '...' : mode==='login' ? 'Sign In' : 'Create Account'}
+          </button>
         </form>
         <div className="text-center text-xs text-slate-500">
           {mode==='login' ? (

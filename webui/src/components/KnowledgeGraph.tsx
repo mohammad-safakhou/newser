@@ -90,15 +90,15 @@ export default function KnowledgeGraph({ nodes, edges }: Props) {
   }, [layout])
 
   return (
-    <div className="relative w-full h-72 bg-slate-900/60 border border-slate-800 rounded">
+    <div className="relative w-full h-72 md:h-80 bg-slate-900/60 border border-slate-800 rounded">
       <canvas ref={canvasRef} className="w-full h-full" />
       {hoverNode && (
-        <div className="pointer-events-none absolute left-2 top-2 text-[11px] bg-slate-800/80 backdrop-blur px-2 py-1 rounded border border-slate-700 shadow">
+        <div className="pointer-events-none absolute left-2 top-2 text-xs bg-slate-800/80 backdrop-blur px-2 py-1 rounded border border-slate-700 shadow">
           <div className="font-semibold text-slate-200 truncate max-w-[220px]">{hoverNode.label || hoverNode.name || hoverNode.id}</div>
           <div className="text-slate-400">Degree {nodeDegree(layout.edges, hoverNode.id)}</div>
         </div>
       )}
-      {layout.nodes.length === 0 && <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-500">No knowledge graph data</div>}
+      {layout.nodes.length === 0 && <div className="absolute inset-0 flex items-center justify-center text-xs text-slate-500">No knowledge graph data</div>}
     </div>
   )
 }

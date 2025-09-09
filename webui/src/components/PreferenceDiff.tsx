@@ -16,7 +16,7 @@ function formatVal(v: any) {
 export default function PreferenceDiff({ diffs }: { diffs: DiffEntry[] }) {
   if (!diffs.length) return <div className="text-xs text-slate-500">No changes.</div>
   return (
-    <ul className="space-y-1 text-[11px] font-mono leading-snug">
+    <ul className="space-y-1 text-xs font-mono leading-snug">
       {diffs.map((d,i)=> (
         <li key={i} className="flex gap-2 items-start">
           <span className={
@@ -33,4 +33,3 @@ export default function PreferenceDiff({ diffs }: { diffs: DiffEntry[] }) {
     </ul>
   )
 }
-

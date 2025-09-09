@@ -3,6 +3,7 @@ import { useMutation } from '@tanstack/react-query'
 import { api2 } from '../api'
 import PreferenceDiff, { DiffEntry } from './PreferenceDiff'
 import cronParser from 'cron-parser'
+import { useDialogA11y } from './useDialogA11y'
 
 interface ProvisionalTopic { name: string; preferences: Record<string, any>; schedule_cron: string }
 interface Props { onClose: () => void; onCreated: () => void }
@@ -22,6 +23,8 @@ export default function NewTopicWizard({ onClose, onCreated }: Props) {
   const [cronError, setCronError] = useState<string | null>(null)
   const [finalizing, setFinalizing] = useState(false)
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  useDialogA11y(containerRef, onClose, '#new-topic-close')
 
   const assistMut = useMutation({
     mutationFn: (message: string) => api2.assistChat({ message, name, preferences: provisional.preferences, schedule_cron: provisional.schedule_cron }),
@@ -97,14 +100,14 @@ export default function NewTopicWizard({ onClose, onCreated }: Props) {
   }
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-slate-950/80 backdrop-blur" onClick={onClose} />
-      <div className="relative w-full max-w-3xl bg-slate-925 card p-0 flex flex-col max-h-[90vh]">
+    <div className="fixed inset-0 z-40 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="new-topic-title">
+      <div className="absolute inset-0 bg-slate-950/80 backdrop-blur" onClick={onClose} aria-hidden="true" />
+      <div ref={containerRef} className="relative w-full max-w-3xl card p-0 flex flex-col max-h-[90vh] focus:outline-none" tabIndex={-1}>
         <header className="px-6 py-4 border-b border-slate-800 flex items-center gap-4">
-          <h3 className="text-base font-semibold tracking-wide">New Topic Wizard</h3>
-          <span className="text-[11px] text-slate-500">Step {step+1} / 4</span>
+          <h3 id="new-topic-title" className="text-base font-semibold tracking-wide">New Topic Wizard</h3>
+          <span className="text-xs text-slate-500">Step {step+1} / 4</span>
           <div className="ml-auto flex gap-2">
-            <button onClick={onClose} className="btn-secondary text-xs px-3">Close</button>
+            <button id="new-topic-close" onClick={onClose} className="btn-secondary text-xs px-3">Close</button>
           </div>
         </header>
         <div className="flex-1 overflow-y-auto" ref={scrollRef}>
@@ -114,7 +117,7 @@ export default function NewTopicWizard({ onClose, onCreated }: Props) {
           {step === 3 && <StepReview provisional={provisional} scheduleCron={scheduleCron} prefDiffs={prefDiffs} creating={createMut.isPending || finalizing} />}
         </div>
         <footer className="px-6 py-4 border-t border-slate-800 flex items-center gap-3">
-          <div className="flex-1 text-[11px] text-slate-500 truncate">{createMut.isError && <span className="text-red-400">{(createMut.error as Error).message}</span>}</div>
+          <div className="flex-1 text-xs text-slate-500 truncate" aria-live="polite">{createMut.isError && <span className="text-red-400">{(createMut.error as Error).message}</span>}</div>
           {step>0 && <button onClick={back} className="btn-secondary text-xs px-4">Back</button>}
           {step < 3 && <button onClick={advance} disabled={nextDisabled} className="btn text-xs px-5">Next</button>}
           {step === 3 && <button onClick={finalize} disabled={createMut.isPending || finalizing} className="btn text-xs px-5">{finalizing ? 'Creating…' : 'Create Topic'}</button>}
@@ -146,12 +149,12 @@ export default function NewTopicWizard({ onClose, onCreated }: Props) {
           <input className="input text-xs flex-1" value={goalMsg} onChange={e=>setGoalMsg(e.target.value)} placeholder="What do you want this topic to cover?" />
           <button type="button" onClick={sendAssist} disabled={!goalMsg.trim() || loading} className="btn text-xs px-4">{loading ? '...' : 'Ask AI'}</button>
         </div>
-        <div className="bg-slate-900/60 rounded border border-slate-800 p-3 h-40 overflow-y-auto text-[11px] space-y-2">
+        <div className="bg-slate-900/60 rounded border border-slate-800 p-3 h-40 overflow-y-auto text-xs space-y-2">
           {conversation.length === 0 && <div className="text-slate-500">AI suggestions will appear here.</div>}
           {conversation.map((m,i)=> <div key={i} className={m.role==='user' ? 'text-brand-300' : 'text-slate-300'}>{m.role==='user' ? 'You: ' : 'AI: '}{m.content}</div> )}
         </div>
       </div>
-      <div className="text-[11px] text-slate-500 space-y-1">
+      <div className="text-xs text-slate-500 space-y-1">
         <div><span className="text-slate-400">Draft Name:</span> {provisional.name || '—'}</div>
         <div><span className="text-slate-400">Draft Cron:</span> {provisional.schedule_cron}</div>
         <div><span className="text-slate-400">Pref Keys:</span> {Object.keys(provisional.preferences||{}).length}</div>
@@ -165,7 +168,7 @@ function StepPreferences({ provisional, prefMessage, setPrefMessage, refine, loa
     <div className="p-6 space-y-6">
       <div>
         <h4 className="text-sm font-semibold mb-1">Refine Preferences</h4>
-        <p className="text-[11px] text-slate-500">Ask for additions, constraints, or quality requirements. Each AI response updates the draft preferences.</p>
+        <p className="text-xs text-slate-500">Ask for additions, constraints, or quality requirements. Each AI response updates the draft preferences.</p>
       </div>
       <div className="flex gap-2">
         <input className="input text-xs flex-1" value={prefMessage} onChange={e=>setPrefMessage(e.target.value)} placeholder="e.g. Add bias detection and focus on APAC markets" />
@@ -173,11 +176,11 @@ function StepPreferences({ provisional, prefMessage, setPrefMessage, refine, loa
       </div>
       <div className="grid md:grid-cols-2 gap-4">
         <div className="space-y-2">
-          <h5 className="text-[11px] uppercase tracking-wide text-slate-400 font-medium">Current Preferences (JSON)</h5>
-          <pre className="text-[10px] bg-slate-900/60 border border-slate-800 rounded p-3 max-h-64 overflow-auto whitespace-pre-wrap">{JSON.stringify(provisional.preferences, null, 2) || '{}'}</pre>
+          <h5 className="text-xs uppercase tracking-wide text-slate-400 font-medium">Current Preferences (JSON)</h5>
+          <pre className="text-xs bg-slate-900/60 border border-slate-800 rounded p-3 max-h-64 overflow-auto whitespace-pre-wrap">{JSON.stringify(provisional.preferences, null, 2) || '{}'}</pre>
         </div>
         <div className="space-y-2">
-          <h5 className="text-[11px] uppercase tracking-wide text-slate-400 font-medium">Last Changes</h5>
+          <h5 className="text-xs uppercase tracking-wide text-slate-400 font-medium">Last Changes</h5>
             <div className="bg-slate-900/60 border border-slate-800 rounded p-3 max-h-64 overflow-auto">
               <PreferenceDiff diffs={diffs} />
             </div>
@@ -203,16 +206,16 @@ function StepSchedule({ scheduleCron, setScheduleCron, error }: any) {
     <div className="p-6 space-y-6">
       <div>
         <h4 className="text-sm font-semibold mb-1">Scheduling</h4>
-        <p className="text-[11px] text-slate-500">Use a cron expression (standard 5-field) or macros like @daily. Preview of next run times shown.</p>
+        <p className="text-xs text-slate-500">Use a cron expression (standard 5-field) or macros like @daily. Preview of next run times shown.</p>
       </div>
       <div className="space-y-2">
         <label className="text-xs font-medium text-slate-400">Cron Expression</label>
         <input className="input text-xs" value={scheduleCron} onChange={e=>setScheduleCron(e.target.value)} placeholder="@daily or 0 9 * * *" />
-        {error && <div className="text-[11px] text-red-400">{error}</div>}
-        {!error && <div className="text-[10px] text-emerald-300/80">Valid expression</div>}
+        {error && <div className="text-xs text-red-400">{error}</div>}
+        {!error && <div className="text-xs text-emerald-300/80">Valid expression</div>}
       </div>
       <div className="grid md:grid-cols-2 gap-4">
-        <div className="bg-slate-900/60 border border-slate-800 rounded p-3 text-[11px] space-y-1">
+        <div className="bg-slate-900/60 border border-slate-800 rounded p-3 text-xs space-y-1">
           <p className="text-slate-400">Examples:</p>
           <ul className="list-disc pl-4 space-y-0.5">
             <li><code>@daily</code> – once per day</li>
@@ -221,7 +224,7 @@ function StepSchedule({ scheduleCron, setScheduleCron, error }: any) {
             <li><code>0 0 1 * *</code> – first day monthly</li>
           </ul>
         </div>
-        <div className="bg-slate-900/60 border border-slate-800 rounded p-3 text-[11px] space-y-1">
+        <div className="bg-slate-900/60 border border-slate-800 rounded p-3 text-xs space-y-1">
           <p className="text-slate-400">Next Runs:</p>
           {nextRuns.length === 0 && <div className="text-slate-500">—</div>}
           <ol className="list-decimal pl-4 space-y-0.5">
@@ -238,29 +241,29 @@ function StepReview({ provisional, scheduleCron, prefDiffs, creating }: any) {
     <div className="p-6 space-y-6">
       <div>
         <h4 className="text-sm font-semibold mb-1">Review & Create</h4>
-        <p className="text-[11px] text-slate-500">Confirm the configuration below. Creating finalizes and schedules the topic.</p>
+        <p className="text-xs text-slate-500">Confirm the configuration below. Creating finalizes and schedules the topic.</p>
       </div>
       <div className="grid md:grid-cols-2 gap-4">
         <div className="space-y-2">
-          <h5 className="text-[11px] uppercase tracking-wide text-slate-400 font-medium">Summary</h5>
-          <div className="text-[11px] space-y-1 bg-slate-900/60 border border-slate-800 rounded p-3">
+          <h5 className="text-xs uppercase tracking-wide text-slate-400 font-medium">Summary</h5>
+          <div className="text-xs space-y-1 bg-slate-900/60 border border-slate-800 rounded p-3">
             <div><span className="text-slate-400">Name:</span> {provisional.name || '—'}</div>
             <div><span className="text-slate-400">Cron:</span> {scheduleCron}</div>
             <div><span className="text-slate-400">Preference Keys:</span> {Object.keys(provisional.preferences||{}).length}</div>
           </div>
         </div>
         <div className="space-y-2">
-          <h5 className="text-[11px] uppercase tracking-wide text-slate-400 font-medium">Latest Changes</h5>
+          <h5 className="text-xs uppercase tracking-wide text-slate-400 font-medium">Latest Changes</h5>
           <div className="bg-slate-900/60 border border-slate-800 rounded p-3 max-h-48 overflow-auto">
             <PreferenceDiff diffs={prefDiffs} />
           </div>
         </div>
       </div>
       <div className="space-y-2">
-        <h5 className="text-[11px] uppercase tracking-wide text-slate-400 font-medium">Preferences JSON</h5>
-        <pre className="text-[10px] bg-slate-900/60 border border-slate-800 rounded p-3 max-h-64 overflow-auto whitespace-pre-wrap">{JSON.stringify(provisional.preferences, null, 2)}</pre>
+        <h5 className="text-xs uppercase tracking-wide text-slate-400 font-medium">Preferences JSON</h5>
+        <pre className="text-xs bg-slate-900/60 border border-slate-800 rounded p-3 max-h-64 overflow-auto whitespace-pre-wrap">{JSON.stringify(provisional.preferences, null, 2)}</pre>
       </div>
-      {creating && <div className="text-[11px] text-slate-400">Creating topic…</div>}
+      {creating && <div className="text-xs text-slate-400">Creating topic…</div>}
     </div>
   )
 }

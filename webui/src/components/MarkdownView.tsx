@@ -70,7 +70,7 @@ function inlineParts(text: string): React.ReactNode[] {
     const [full] = next
     if (next === link) {
       const [, label, url] = next
-      parts.push(<a key={parts.length} href={url} target="_blank" rel="noreferrer" className="text-brand-300 hover:underline">{label}</a>)
+      parts.push(<a key={parts.length} href={url} target="_blank" rel="noopener noreferrer" className="text-brand-300 hover:underline">{label}</a>)
     } else if (next === code) {
       parts.push(<code key={parts.length} className="px-1 rounded bg-slate-800 text-[12px]">{next[1]}</code>)
     } else if (next === bold) {
@@ -108,9 +108,8 @@ export default function MarkdownView({ markdown }: { markdown: string }) {
       continue
     }
     if (t.type === 'p') {
-      out.push(<p key={out.length} className="leading-relaxed text-[13px] text-slate-200 whitespace-pre-wrap">{inlineParts(t.text)}</p>)
+      out.push(<p key={out.length} className="leading-relaxed text-sm text-slate-200 whitespace-pre-wrap">{inlineParts(t.text)}</p>)
     }
   }
   return <div className="prose prose-invert max-w-none">{out}</div>
 }
-

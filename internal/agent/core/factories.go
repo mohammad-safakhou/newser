@@ -182,8 +182,11 @@ func (p *OpenAIProvider) GenerateWithTokens(ctx context.Context, prompt string, 
 	}
 
 	body, err := json.Marshal(chatReq{
-		Model:       apiModel,
-		Messages:    []chatMsg{{Role: "user", Content: prompt}},
+		Model: apiModel,
+		Messages: []chatMsg{
+			{Role: "system", Content: "You are an agent to read the prompt and do as they describe, no extra commentary or helper is needed, like wrapping the answer or explaining what you are doing unless asked for it."},
+			{Role: "user", Content: prompt},
+		},
 		Temperature: temperature,
 		MaxTokens:   maxTokens,
 	})
@@ -792,27 +795,33 @@ func (a *SimpleAgent) GetEstimatedTime(task AgentTask) time.Duration {
 // Agent execution methods
 
 func (a *SimpleAgent) executeResearch(ctx context.Context, task AgentTask) AgentResult {
-    query, _ := task.Parameters["query"].(string)
-    if query == "" {
-        query = "general topic"
-    }
+	query, _ := task.Parameters["query"].(string)
+	if query == "" {
+		query = "general topic"
+	}
 
-    providers, _ := NewSourceProviders(a.config.Sources)
-    ctx2, cancel := context.WithTimeout(ctx, a.config.General.DefaultTimeout)
-    defer cancel()
-    var sourcesList []Source
-    // Build incremental options from context
-    opts := map[string]interface{}{"query": query}
-    if cm, ok := task.Parameters["context"].(map[string]interface{}); ok {
-        if s, ok := cm["last_run_time"].(string); ok && s != "" { opts["since"] = s }
-        if ku, ok := cm["known_urls"].([]string); ok && len(ku) > 0 { opts["exclude_urls"] = ku }
-        if ku2, ok := cm["known_urls"].([]interface{}); ok && len(ku2) > 0 { opts["exclude_urls"] = ku2 }
-    }
-    for _, p := range providers {
-        if res, err := p.Search(ctx2, query, opts); err == nil {
-            sourcesList = append(sourcesList, res...)
-        }
-    }
+	providers, _ := NewSourceProviders(a.config.Sources)
+	ctx2, cancel := context.WithTimeout(ctx, a.config.General.DefaultTimeout)
+	defer cancel()
+	var sourcesList []Source
+	// Build incremental options from context
+	opts := map[string]interface{}{"query": query}
+	if cm, ok := task.Parameters["context"].(map[string]interface{}); ok {
+		if s, ok := cm["last_run_time"].(string); ok && s != "" {
+			opts["since"] = s
+		}
+		if ku, ok := cm["known_urls"].([]string); ok && len(ku) > 0 {
+			opts["exclude_urls"] = ku
+		}
+		if ku2, ok := cm["known_urls"].([]interface{}); ok && len(ku2) > 0 {
+			opts["exclude_urls"] = ku2
+		}
+	}
+	for _, p := range providers {
+		if res, err := p.Search(ctx2, query, opts); err == nil {
+			sourcesList = append(sourcesList, res...)
+		}
+	}
 	// de-duplicate
 	sourcesList = DeduplicateSources(sourcesList)
 
@@ -969,7 +978,7 @@ func (a *SimpleAgent) executeSynthesis(ctx context.Context, task AgentTask) Agen
 	if model == "" {
 		model = a.config.LLM.Routing.Fallback
 	}
-    prompt := fmt.Sprintf(`You are a synthesis agent creating a comprehensive report from multiple sources.
+	prompt := fmt.Sprintf(`You are a synthesis agent creating a comprehensive report from multiple sources.
 USER THOUGHT: %s
 SOURCES (top %d):
 %s
