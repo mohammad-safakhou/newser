@@ -39,17 +39,6 @@ function RunDetailModal({ topicId, runId, onClose }: { topicId: string; runId: s
     }
     finally { setMdLoading(false) }
   }
-  const expandAll = async () => {
-    try {
-      setMdLoading(true)
-      const resp = await api2.expandAll(topicId, runId, { group_by: 'type' })
-      setMd(resp.markdown)
-      setMdOpen(true)
-    } catch (e:any) {
-      setMd(`Error: ${e.message || e}`)
-      setMdOpen(true)
-    } finally { setMdLoading(false) }
-  }
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="run-detail-title">
       <div className="absolute inset-0 bg-slate-950/80 backdrop-blur" onClick={onClose} aria-hidden="true" />
@@ -57,8 +46,7 @@ function RunDetailModal({ topicId, runId, onClose }: { topicId: string; runId: s
           <div className="flex items-center justify-between border-b border-slate-800 px-5 py-3">
             <h3 id="run-detail-title" className="text-sm font-semibold">Run Details</h3>
             <div className="flex items-center gap-2">
-              <button className="btn-secondary text-xs px-3" onClick={loadMarkdown} disabled={mdLoading}>{mdLoading ? 'Loading…' : 'View Markdown'}</button>
-              <button className="btn-secondary text-xs px-3" onClick={expandAll} disabled={mdLoading}>{mdLoading ? 'Generating…' : 'Expand All'}</button>
+              <button className="btn-secondary text-xs px-3" onClick={loadMarkdown} disabled={mdLoading}>{mdLoading ? 'Loading…' : 'View Report'}</button>
               <button id="run-detail-close" className="btn-secondary text-xs px-3" onClick={onClose}>Close</button>
             </div>
           </div>

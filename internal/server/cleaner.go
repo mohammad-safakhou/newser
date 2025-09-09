@@ -6,6 +6,84 @@ import (
 	"unicode/utf8"
 )
 
+// ExtractMarkdown returns the first fenced markdown code block content.
+// Optionally filters by one or more language identifiers (case-insensitive).
+// If langFilter is empty, any fenced block is returned.
+// Supports ``` and ~~~ fences. Returns inner content without the fence lines.
+func ExtractMarkdown(s string, langFilter ...string) (string, error) {
+	s = trimBOM(strings.TrimSpace(s))
+	if s == "" {
+		return "", errors.New("empty input")
+	}
+
+	var want map[string]struct{}
+	if len(langFilter) > 0 {
+		want = make(map[string]struct{}, len(langFilter))
+		for _, lf := range langFilter {
+			lf = strings.ToLower(strings.TrimSpace(lf))
+			if lf != "" {
+				want[lf] = struct{}{}
+			}
+		}
+	}
+
+	search := func(fence string) (string, bool, error) {
+		start := 0
+		for {
+			i := strings.Index(s[start:], fence)
+			if i == -1 {
+				return "", false, nil
+			}
+			i += start
+			afterFence := i + len(fence)
+			// Get info string (language) until newline
+			nl := strings.IndexByte(s[afterFence:], '\n')
+			if nl == -1 {
+				return "", false, errors.New("unterminated fence (no newline after opening)")
+			}
+			info := strings.TrimSpace(s[afterFence : afterFence+nl])
+			contentStart := afterFence + nl + 1
+
+			// Find closing fence beginning on or after contentStart
+			j := strings.Index(s[contentStart:], fence)
+			if j == -1 {
+				return "", false, errors.New("unterminated fenced block (no closing)")
+			}
+			closeIdx := contentStart + j
+			content := s[contentStart:closeIdx]
+
+			// Language filtering
+			if want != nil {
+				lang := strings.ToLower(strings.Fields(info + " ")[0])
+				if lang == "" {
+					// No language tag; skip if we are filtering
+					start = afterFence
+					continue
+				}
+				if _, ok := want[lang]; !ok {
+					start = afterFence
+					continue
+				}
+			}
+			return strings.TrimSpace(content), true, nil
+		}
+	}
+
+	// Try backtick fences first, then tildes
+	if out, ok, err := search("```"); err != nil {
+		return "", err
+	} else if ok {
+		return out, nil
+	}
+	if out, ok, err := search("~~~"); err != nil {
+		return "", err
+	} else if ok {
+		return out, nil
+	}
+
+	return "", errors.New("no fenced markdown block found")
+}
+
 // ExtractJSON finds and returns the first JSON object or array in s.
 // It first removes Markdown code fences if present, then scans for a
 // balanced {...} or [...] while ignoring braces/brackets inside strings.

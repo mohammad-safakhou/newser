@@ -1,20 +1,20 @@
 package server
 
 import (
-    "context"
-    "encoding/json"
-    "fmt"
-    "net/http"
-    "os"
-    "path/filepath"
-    "sort"
-    "strings"
-    "time"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
 
-    "github.com/labstack/echo/v4"
-    "github.com/mohammad-safakhou/newser/config"
-    core "github.com/mohammad-safakhou/newser/internal/agent/core"
-    "github.com/mohammad-safakhou/newser/internal/store"
+	"github.com/labstack/echo/v4"
+	"github.com/mohammad-safakhou/newser/config"
+	core "github.com/mohammad-safakhou/newser/internal/agent/core"
+	"github.com/mohammad-safakhou/newser/internal/store"
 )
 
 type RunsHandler struct {
@@ -32,14 +32,14 @@ func NewRunsHandler(cfg *config.Config, store *store.Store, orch *core.Orchestra
 }
 
 func (h *RunsHandler) Register(g *echo.Group, secret []byte) {
-    g.Use(func(next echo.HandlerFunc) echo.HandlerFunc { return withAuth(next, secret) })
-    g.POST("/:topic_id/trigger", h.trigger)
-    g.GET("/:topic_id/runs", h.list)
-    g.GET("/:topic_id/latest_result", h.latest)
-    g.GET("/:topic_id/runs/:run_id/result", h.result)
-    g.POST("/:topic_id/runs/:run_id/expand", h.expand)
-    g.GET("/:topic_id/runs/:run_id/markdown", h.markdown)
-    g.POST("/:topic_id/runs/:run_id/expand_all", h.expandAll)
+	g.Use(func(next echo.HandlerFunc) echo.HandlerFunc { return withAuth(next, secret) })
+	g.POST("/:topic_id/trigger", h.trigger)
+	g.GET("/:topic_id/runs", h.list)
+	g.GET("/:topic_id/latest_result", h.latest)
+	g.GET("/:topic_id/runs/:run_id/result", h.result)
+	g.POST("/:topic_id/runs/:run_id/expand", h.expand)
+	g.GET("/:topic_id/runs/:run_id/markdown", h.markdown)
+	g.POST("/:topic_id/runs/:run_id/expand_all", h.expandAll)
 }
 
 // Trigger a new run for a topic
@@ -100,19 +100,19 @@ func (h *RunsHandler) trigger(c echo.Context) error {
 				}
 			}
 		}
-    if kg, err := h.store.GetKnowledgeGraph(ctx, topicID); err == nil {
-        ctxMap["knowledge_graph"] = map[string]interface{}{"nodes": kg.Nodes, "edges": kg.Edges, "last_updated": kg.LastUpdated}
-    }
+		if kg, err := h.store.GetKnowledgeGraph(ctx, topicID); err == nil {
+			ctxMap["knowledge_graph"] = map[string]interface{}{"nodes": kg.Nodes, "edges": kg.Edges, "last_updated": kg.LastUpdated}
+		}
 
-        // construct thought from preferences (not user-defined name)
-        content := deriveThoughtContentFromPrefs(map[string]interface{}(prefs))
-        thought := core.UserThought{
-            ID:          runID,
-            Content:     content,
-            Preferences: prefs,
-            Timestamp:   time.Now(),
-            Context:     ctxMap,
-        }
+		// construct thought from preferences (not user-defined name)
+		content := deriveThoughtContentFromPrefs(map[string]interface{}(prefs))
+		thought := core.UserThought{
+			ID:          runID,
+			Content:     content,
+			Preferences: prefs,
+			Timestamp:   time.Now(),
+			Context:     ctxMap,
+		}
 
 		result, err := h.orch.ProcessThought(ctx, thought)
 		if err != nil {
@@ -121,21 +121,26 @@ func (h *RunsHandler) trigger(c echo.Context) error {
 		}
 
 		// Persist the result using the same runID as key in app DB
-        _ = h.store.UpsertProcessingResult(ctx, result)
-        // Persist highlights and knowledge graph keyed by topic ID (not name)
-        if len(result.Highlights) > 0 {
-            _ = h.store.SaveHighlights(ctx, topicID, result.Highlights)
-        }
-        // Always attempt to persist knowledge graph metadata, even if empty
-        _ = h.store.SaveKnowledgeGraphFromMetadata(ctx, topicID, result.Metadata)
-        // Generate and persist Markdown artifact for this run
-        if resJSON, err := h.store.GetProcessingResultByID(ctx, runID); err == nil {
-            if md := renderMarkdownReport(name, resJSON); md != "" {
-                _ = writeRunMarkdown(topicID, runID, md)
-            }
-        }
-        _ = h.store.FinishRun(ctx, runID, "succeeded", nil)
-    }()
+		_ = h.store.UpsertProcessingResult(ctx, result)
+		// Persist highlights and knowledge graph keyed by topic ID (not name)
+		if len(result.Highlights) > 0 {
+			_ = h.store.SaveHighlights(ctx, topicID, result.Highlights)
+		}
+		// Always attempt to persist knowledge graph metadata, even if empty
+		_ = h.store.SaveKnowledgeGraphFromMetadata(ctx, topicID, result.Metadata)
+		// Generate FINAL report (blocking) using LLM deep-dive; persist as canonical markdown
+		if resJSON, err := h.store.GetProcessingResultByID(ctx, runID); err == nil {
+			// Attempt LLM-based deep dive; if it fails, mark the run as failed
+			if md, derr := h.generateFullReport(ctx, name, prefs, resJSON); derr == nil && md != "" {
+				_ = writeRunMarkdown(topicID, runID, md)
+				_ = h.store.FinishRun(ctx, runID, "succeeded", nil)
+			} else {
+				_ = h.store.FinishRun(ctx, runID, "failed", strPtr(fmt.Sprintf("full report generation failed: %v", derr)))
+			}
+		} else {
+			_ = h.store.FinishRun(ctx, runID, "failed", strPtr("processing result missing"))
+		}
+	}()
 
 	return c.JSON(http.StatusAccepted, IDResponse{ID: runID})
 }
@@ -313,84 +318,83 @@ Return ONLY the markdown content.`, summary, firstN(detailed, 1500), target, req
 func strPtr(s string) *string { return &s }
 
 func firstN(s string, n int) string {
-    if len(s) <= n {
-        return s
-    }
-    return s[:n] + "..."
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // ExpandAll: Generate a deep-dive markdown for the entire run, grouping by a category if requested.
 //
-//  @Summary  Expand an entire run to deep-dive markdown
-//  @Tags     runs
-//  @Security BearerAuth
-//  @Security CookieAuth
-//  @Param    topic_id path string true "Topic ID"
-//  @Param    run_id   path string true "Run ID"
-//  @Accept   json
-//  @Produce  json
-//  @Param    payload body ExpandAllRequest true "Expand all request"
-//  @Success  200 {object} ExpandAllResponse
-//  @Failure  404 {object} HTTPError
-//  @Failure  500 {object} HTTPError
-//  @Router   /api/topics/{topic_id}/runs/{run_id}/expand_all [post]
+//	@Summary  Expand an entire run to deep-dive markdown
+//	@Tags     runs
+//	@Security BearerAuth
+//	@Security CookieAuth
+//	@Param    topic_id path string true "Topic ID"
+//	@Param    run_id   path string true "Run ID"
+//	@Accept   json
+//	@Produce  json
+//	@Param    payload body ExpandAllRequest true "Expand all request"
+//	@Success  200 {object} ExpandAllResponse
+//	@Failure  404 {object} HTTPError
+//	@Failure  500 {object} HTTPError
+//	@Router   /api/topics/{topic_id}/runs/{run_id}/expand_all [post]
 func (h *RunsHandler) expandAll(c echo.Context) error {
-    userID := c.Get("user_id").(string)
-    topicID := c.Param("topic_id")
-    topicName, prefsB, _, err := h.store.GetTopicByID(c.Request().Context(), topicID, userID)
-    if err != nil {
-        return echo.NewHTTPError(http.StatusNotFound, err.Error())
-    }
-    runID := c.Param("run_id")
-    var req ExpandAllRequest
-    if err := c.Bind(&req); err != nil {
-        return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-    }
-    res, err := h.store.GetProcessingResultByID(c.Request().Context(), runID)
-    if err != nil {
-        return echo.NewHTTPError(http.StatusNotFound, err.Error())
-    }
+	// Deprecated: return stored final report (no on-demand generation)
+	userID := c.Get("user_id").(string)
+	topicID := c.Param("topic_id")
+	if _, _, _, err := h.store.GetTopicByID(c.Request().Context(), topicID, userID); err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	runID := c.Param("run_id")
+	if b, err := os.ReadFile(runMarkdownPath(topicID, runID)); err == nil && len(b) > 0 {
+		return c.JSON(http.StatusOK, ExpandAllResponse{Markdown: string(b)})
+	}
+	// fallback to renderMarkdownReport
+	name, _, _, _ := h.store.GetTopicByID(c.Request().Context(), topicID, userID)
+	res, err := h.store.GetProcessingResultByID(c.Request().Context(), runID)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	md := renderMarkdownReport(name, res)
+	if md == "" {
+		return echo.NewHTTPError(http.StatusNotFound, "no report available")
+	}
+	return c.JSON(http.StatusOK, ExpandAllResponse{Markdown: md})
+}
 
-    group := strings.ToLower(strings.TrimSpace(req.GroupBy))
-    if group == "" { group = "type" }
+// generateFullReport creates the final deep-dive Markdown for a run using the configured LLM provider.
+func (h *RunsHandler) generateFullReport(ctx context.Context, topicName string, prefs Preferences, res map[string]interface{}) (string, error) {
+	llm, err := core.NewLLMProvider(h.cfg.LLM)
+	if err != nil {
+		return "", err
+	}
+	model := h.cfg.LLM.Routing.Synthesis
+	if model == "" {
+		model = h.cfg.LLM.Routing.Chatting
+	}
 
-    var prefs map[string]interface{}
-    _ = json.Unmarshal(prefsB, &prefs)
+	highlights := "[]"
+	if hs, ok := res["highlights"].([]interface{}); ok {
+		b, _ := json.Marshal(hs)
+		highlights = string(b)
+	}
+	sources := "[]"
+	if ss, ok := res["sources"].([]interface{}); ok {
+		trimmed := make([]map[string]interface{}, 0, len(ss))
+		for _, it := range ss {
+			if m, ok := it.(map[string]interface{}); ok {
+				trimmed = append(trimmed, map[string]interface{}{"title": m["title"], "url": m["url"], "type": m["type"]})
+			}
+		}
+		b, _ := json.Marshal(trimmed)
+		sources = string(b)
+	}
+	summary := safeString(res["summary"])
+	detailed := firstN(safeString(res["detailed_report"]), 2000)
 
-    highlights := "[]"
-    if hs, ok := res["highlights"].([]interface{}); ok {
-        b, _ := json.Marshal(hs); highlights = string(b)
-    }
-    sources := "[]"
-    if ss, ok := res["sources"].([]interface{}); ok {
-        trimmed := make([]map[string]interface{}, 0, len(ss))
-        for _, it := range ss {
-            if m, ok := it.(map[string]interface{}); ok {
-                trimmed = append(trimmed, map[string]interface{}{
-                    "title": m["title"],
-                    "url":   m["url"],
-                    "type":  m["type"],
-                })
-            }
-        }
-        b, _ := json.Marshal(trimmed); sources = string(b)
-    }
-    summary := safeString(res["summary"])
-    detailed := firstN(safeString(res["detailed_report"]), 2000)
-    taxonomy := "[]"
-    if tx, ok := prefs["taxonomy"].([]interface{}); ok {
-        b, _ := json.Marshal(tx); taxonomy = string(b)
-    }
-
-    llm, err := core.NewLLMProvider(h.cfg.LLM)
-    if err != nil { return echo.NewHTTPError(http.StatusInternalServerError, err.Error()) }
-    model := h.cfg.LLM.Routing.Synthesis
-    if model == "" { model = h.cfg.LLM.Routing.Chatting }
-
-    prompt := fmt.Sprintf(`Create a comprehensive, multi-section Markdown deep dive for the run below.
+	prompt := fmt.Sprintf(`Create a single, comprehensive Markdown report for the following run. No grouping options; produce a cohesive narrative suitable for end users.
 TOPIC: %s
-GROUP BY: %s (options: type | domain | none | taxonomy)
-FOCUS (optional): %s
 
 SUMMARY:\n%s
 
@@ -398,204 +402,262 @@ DETAILED REPORT (snippet):\n%s
 
 HIGHLIGHTS (JSON): %s
 SOURCES (JSON): %s
-TAXONOMY (optional JSON): %s
 
 Guidance:
-- Start with a Table of Contents.
-- Organize sections by the chosen grouping. Use clear H2/H3 headings.
-- In each section: what happened, why it matters, timeline, and key sources (with links).
-- Keep it factual; avoid speculation; include actionable notes if relevant.
-- Return ONLY the Markdown content.`, topicName, group, req.Focus, summary, detailed, highlights, sources, taxonomy)
+- Start with a clear title and short executive summary.
+- Organize content with H2/H3 headings as needed; do not rely on external grouping options.
+- For each key development: what happened, why it matters, timeline/context, and cite key sources with links.
+- Keep the tone factual; avoid speculation; conclude with concise takeaways.
+- Return ONLY the Markdown content.`, topicName, summary, detailed, highlights, sources)
 
-    out, err := llm.Generate(c.Request().Context(), prompt, model, map[string]interface{}{"temperature": 0.3, "max_tokens": 1600})
-    if err != nil { return echo.NewHTTPError(http.StatusInternalServerError, err.Error()) }
+	out, err := llm.Generate(ctx, prompt, model, map[string]interface{}{"temperature": 0.3})
+	if err != nil {
+		return "", err
+	}
 
-    _ = writeRunDeepDive(topicID, runID, out)
-    return c.JSON(http.StatusOK, ExpandAllResponse{Markdown: out})
+	final, err := ExtractMarkdown(out)
+	if err != nil {
+		return out, nil
+	}
+	return final, nil
 }
 
 func writeRunDeepDive(topicID, runID, md string) error {
-    dir := filepath.Join("runs", sanitize(topicID))
-    if err := os.MkdirAll(dir, 0o755); err != nil { return err }
-    return os.WriteFile(filepath.Join(dir, sanitize(runID)+"_deepdive.md"), []byte(md), 0o644)
+	dir := filepath.Join("runs", sanitize(topicID))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, sanitize(runID)+"_deepdive.md"), []byte(md), 0o644)
 }
 
 // markdown returns the stored/generated markdown artifact for a specific run
 //
-//  @Summary   Run markdown by ID
-//  @Tags      runs
-//  @Security  BearerAuth
-//  @Security  CookieAuth
-//  @Param     topic_id  path  string  true  "Topic ID"
-//  @Param     run_id    path  string  true  "Run ID"
-//  @Produce   text/markdown
-//  @Success   200  {string}  string
-//  @Failure   404  {object}  HTTPError
-//  @Router    /api/topics/{topic_id}/runs/{run_id}/markdown [get]
+//	@Summary   Run markdown by ID
+//	@Tags      runs
+//	@Security  BearerAuth
+//	@Security  CookieAuth
+//	@Param     topic_id  path  string  true  "Topic ID"
+//	@Param     run_id    path  string  true  "Run ID"
+//	@Produce   text/markdown
+//	@Success   200  {string}  string
+//	@Failure   404  {object}  HTTPError
+//	@Router    /api/topics/{topic_id}/runs/{run_id}/markdown [get]
 func (h *RunsHandler) markdown(c echo.Context) error {
-    userID := c.Get("user_id").(string)
-    topicID := c.Param("topic_id")
-    // Ensure topic belongs to user
-    name, _, _, err := h.store.GetTopicByID(c.Request().Context(), topicID, userID)
-    if err != nil {
-        return echo.NewHTTPError(http.StatusNotFound, err.Error())
-    }
-    runID := c.Param("run_id")
-    // Try existing file first
-    if b, err := os.ReadFile(runMarkdownPath(topicID, runID)); err == nil && len(b) > 0 {
-        return c.Blob(http.StatusOK, "text/markdown; charset=utf-8", b)
-    }
-    // Generate from stored result
-    res, err := h.store.GetProcessingResultByID(c.Request().Context(), runID)
-    if err != nil {
-        return echo.NewHTTPError(http.StatusNotFound, err.Error())
-    }
-    md := renderMarkdownReport(name, res)
-    if md == "" {
-        return echo.NewHTTPError(http.StatusNotFound, "no markdown available")
-    }
-    _ = writeRunMarkdown(topicID, runID, md)
-    return c.Blob(http.StatusOK, "text/markdown; charset=utf-8", []byte(md))
+	userID := c.Get("user_id").(string)
+	topicID := c.Param("topic_id")
+	// Ensure topic belongs to user
+	name, _, _, err := h.store.GetTopicByID(c.Request().Context(), topicID, userID)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	runID := c.Param("run_id")
+	// Try existing file first
+	if b, err := os.ReadFile(runMarkdownPath(topicID, runID)); err == nil && len(b) > 0 {
+		return c.Blob(http.StatusOK, "text/markdown; charset=utf-8", b)
+	}
+	// Generate from stored result
+	res, err := h.store.GetProcessingResultByID(c.Request().Context(), runID)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	md := renderMarkdownReport(name, res)
+	if md == "" {
+		return echo.NewHTTPError(http.StatusNotFound, "no markdown available")
+	}
+	_ = writeRunMarkdown(topicID, runID, md)
+	return c.Blob(http.StatusOK, "text/markdown; charset=utf-8", []byte(md))
 }
 
 // writeRunMarkdown persists the markdown artifact under ./runs/<topic_id>/<run_id>.md
 func writeRunMarkdown(topicID, runID, md string) error {
-    dir := filepath.Join("runs", sanitize(topicID))
-    if err := os.MkdirAll(dir, 0o755); err != nil { return err }
-    return os.WriteFile(filepath.Join(dir, sanitize(runID)+".md"), []byte(md), 0o644)
+	dir := filepath.Join("runs", sanitize(topicID))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, sanitize(runID)+".md"), []byte(md), 0o644)
 }
 
 func runMarkdownPath(topicID, runID string) string {
-    return filepath.Join("runs", sanitize(topicID), sanitize(runID)+".md")
+	return filepath.Join("runs", sanitize(topicID), sanitize(runID)+".md")
 }
 
 func sanitize(s string) string {
-    s = strings.TrimSpace(s)
-    s = strings.ReplaceAll(s, "..", "_")
-    s = strings.ReplaceAll(s, "/", "-")
-    s = strings.ReplaceAll(s, "\\", "-")
-    if s == "" { s = "_" }
-    return s
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "..", "_")
+	s = strings.ReplaceAll(s, "/", "-")
+	s = strings.ReplaceAll(s, "\\", "-")
+	if s == "" {
+		s = "_"
+	}
+	return s
 }
 
 // renderMarkdownReport converts a processing result JSON to a readable, categorized markdown document
 func renderMarkdownReport(topicName string, res map[string]interface{}) string {
-    var b strings.Builder
-    // Header
-    now := time.Now().Format(time.RFC3339)
-    fmt.Fprintf(&b, "# %s — News Brief\n\n", safeString(topicName))
-    fmt.Fprintf(&b, "_Generated: %s_\n\n", now)
+	var b strings.Builder
+	// Header
+	now := time.Now().Format(time.RFC3339)
+	fmt.Fprintf(&b, "# %s — News Brief\n\n", safeString(topicName))
+	fmt.Fprintf(&b, "_Generated: %s_\n\n", now)
 
-    // Summary snapshot
-    summary := safeString(res["summary"])
-    confidence := safeFloat(res["confidence"])
-    tokens := safeInt(res["tokens_used"]) // might be 0 if absent
-    cost := safeFloat(res["cost_estimate"])
-    fmt.Fprintf(&b, "## Executive Summary\n\n")
-    if summary != "" { fmt.Fprintf(&b, "%s\n\n", summary) } else { fmt.Fprintf(&b, "No summary available.\n\n") }
-    if confidence > 0 {
-        fmt.Fprintf(&b, "- Confidence: %.2f\n", confidence)
-    }
-    if cost > 0 || tokens > 0 {
-        fmt.Fprintf(&b, "- Cost/Tokens: $%.2f / %d tokens\n", cost, tokens)
-    }
-    b.WriteString("\n")
+	// Summary snapshot
+	summary := safeString(res["summary"])
+	confidence := safeFloat(res["confidence"])
+	tokens := safeInt(res["tokens_used"]) // might be 0 if absent
+	cost := safeFloat(res["cost_estimate"])
+	fmt.Fprintf(&b, "## Executive Summary\n\n")
+	if summary != "" {
+		fmt.Fprintf(&b, "%s\n\n", summary)
+	} else {
+		fmt.Fprintf(&b, "No summary available.\n\n")
+	}
+	if confidence > 0 {
+		fmt.Fprintf(&b, "- Confidence: %.2f\n", confidence)
+	}
+	if cost > 0 || tokens > 0 {
+		fmt.Fprintf(&b, "- Cost/Tokens: $%.2f / %d tokens\n", cost, tokens)
+	}
+	b.WriteString("\n")
 
-    // Highlights
-    if hs, ok := res["highlights"].([]interface{}); ok && len(hs) > 0 {
-        b.WriteString("## Key Developments\n\n")
-        for _, it := range hs {
-            if m, ok := it.(map[string]interface{}); ok {
-                title := safeString(m["title"])
-                content := safeString(m["content"])
-                if title == "" && content == "" { continue }
-                if title != "" { fmt.Fprintf(&b, "- **%s** — %s\n", title, content) } else { fmt.Fprintf(&b, "- %s\n", content) }
-            }
-        }
-        b.WriteString("\n")
-    }
+	// Highlights
+	if hs, ok := res["highlights"].([]interface{}); ok && len(hs) > 0 {
+		b.WriteString("## Key Developments\n\n")
+		for _, it := range hs {
+			if m, ok := it.(map[string]interface{}); ok {
+				title := safeString(m["title"])
+				content := safeString(m["content"])
+				if title == "" && content == "" {
+					continue
+				}
+				if title != "" {
+					fmt.Fprintf(&b, "- **%s** — %s\n", title, content)
+				} else {
+					fmt.Fprintf(&b, "- %s\n", content)
+				}
+			}
+		}
+		b.WriteString("\n")
+	}
 
-    // Detailed report
-    detailed := safeString(res["detailed_report"])
-    if detailed != "" {
-        b.WriteString("## Detailed Report\n\n")
-        b.WriteString(detailed)
-        if !strings.HasSuffix(detailed, "\n") { b.WriteString("\n") }
-        b.WriteString("\n")
-    }
+	// Detailed report
+	detailed := safeString(res["detailed_report"])
+	if detailed != "" {
+		b.WriteString("## Detailed Report\n\n")
+		b.WriteString(detailed)
+		if !strings.HasSuffix(detailed, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
 
-    // Knowledge graph summary (counts)
-    if meta, ok := res["metadata"].(map[string]interface{}); ok {
-        if kg, ok := meta["knowledge_graph"].(map[string]interface{}); ok {
-            var nCount, eCount int
-            if ns, ok := kg["nodes"].([]interface{}); ok { nCount = len(ns) }
-            if es, ok := kg["edges"].([]interface{}); ok { eCount = len(es) }
-            if nCount > 0 || eCount > 0 {
-                b.WriteString("## Knowledge Graph Overview\n\n")
-                fmt.Fprintf(&b, "- Nodes: %d\n- Edges: %d\n\n", nCount, eCount)
-            }
-        }
-    }
+	// Knowledge graph summary (counts)
+	if meta, ok := res["metadata"].(map[string]interface{}); ok {
+		if kg, ok := meta["knowledge_graph"].(map[string]interface{}); ok {
+			var nCount, eCount int
+			if ns, ok := kg["nodes"].([]interface{}); ok {
+				nCount = len(ns)
+			}
+			if es, ok := kg["edges"].([]interface{}); ok {
+				eCount = len(es)
+			}
+			if nCount > 0 || eCount > 0 {
+				b.WriteString("## Knowledge Graph Overview\n\n")
+				fmt.Fprintf(&b, "- Nodes: %d\n- Edges: %d\n\n", nCount, eCount)
+			}
+		}
+	}
 
-    // Sources grouped by domain
-    if ss, ok := res["sources"].([]interface{}); ok && len(ss) > 0 {
-        b.WriteString("## Sources\n\n")
-        grouped := map[string][]string{}
-        for _, it := range ss {
-            if m, ok := it.(map[string]interface{}); ok {
-                url := safeString(m["url"]) 
-                title := safeString(m["title"]) 
-                if url == "" && title == "" { continue }
-                dom := domainOf(url)
-                item := fmt.Sprintf("- [%s](%s)", or(title, url), or(url, "#"))
-                grouped[dom] = append(grouped[dom], item)
-            }
-        }
-        // stable order by domain
-        var keys []string
-        for k := range grouped { keys = append(keys, k) }
-        sort.Strings(keys)
-        for _, k := range keys {
-            if k != "" { fmt.Fprintf(&b, "### %s\n\n", k) }
-            for _, line := range grouped[k] { b.WriteString(line + "\n") }
-            b.WriteString("\n")
-        }
-    }
+	// Sources grouped by domain
+	if ss, ok := res["sources"].([]interface{}); ok && len(ss) > 0 {
+		b.WriteString("## Sources\n\n")
+		grouped := map[string][]string{}
+		for _, it := range ss {
+			if m, ok := it.(map[string]interface{}); ok {
+				url := safeString(m["url"])
+				title := safeString(m["title"])
+				if url == "" && title == "" {
+					continue
+				}
+				dom := domainOf(url)
+				item := fmt.Sprintf("- [%s](%s)", or(title, url), or(url, "#"))
+				grouped[dom] = append(grouped[dom], item)
+			}
+		}
+		// stable order by domain
+		var keys []string
+		for k := range grouped {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if k != "" {
+				fmt.Fprintf(&b, "### %s\n\n", k)
+			}
+			for _, line := range grouped[k] {
+				b.WriteString(line + "\n")
+			}
+			b.WriteString("\n")
+		}
+	}
 
-    // Footer
-    b.WriteString("---\n")
-    b.WriteString("This report is auto-generated based on your topic and preferences.\n")
-    return b.String()
+	// Footer
+	b.WriteString("---\n")
+	b.WriteString("This report is auto-generated based on your topic and preferences.\n")
+	return b.String()
 }
 
 func safeString(v interface{}) string {
-    if v == nil { return "" }
-    if s, ok := v.(string); ok { return strings.TrimSpace(s) }
-    b, _ := json.Marshal(v)
-    return strings.TrimSpace(string(b))
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	b, _ := json.Marshal(v)
+	return strings.TrimSpace(string(b))
 }
 func safeFloat(v interface{}) float64 {
-    switch t := v.(type) {
-    case float64: return t
-    case float32: return float64(t)
-    case int: return float64(t)
-    case int64: return float64(t)
-    default: return 0
-    }
+	switch t := v.(type) {
+	case float64:
+		return t
+	case float32:
+		return float64(t)
+	case int:
+		return float64(t)
+	case int64:
+		return float64(t)
+	default:
+		return 0
+	}
 }
 func safeInt(v interface{}) int {
-    switch t := v.(type) {
-    case int: return t
-    case int64: return int(t)
-    case float64: return int(t)
-    default: return 0
-    }
+	switch t := v.(type) {
+	case int:
+		return t
+	case int64:
+		return int(t)
+	case float64:
+		return int(t)
+	default:
+		return 0
+	}
 }
-func or(a, b string) string { if a != "" { return a }; return b }
+func or(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
 func domainOf(url string) string {
-    if url == "" { return "" }
-    s := url
-    if i := strings.Index(s, "://"); i >= 0 { s = s[i+3:] }
-    if i := strings.IndexByte(s, '/'); i >= 0 { s = s[:i] }
-    return s
+	if url == "" {
+		return ""
+	}
+	s := url
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		s = s[:i]
+	}
+	return s
 }
