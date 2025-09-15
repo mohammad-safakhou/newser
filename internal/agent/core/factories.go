@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -81,9 +83,6 @@ func NewSourceProviders(cfg config.SourcesConfig) ([]SourceProvider, error) {
 	}
 	if cfg.WebSearch.BraveAPIKey != "" {
 		providers = append(providers, &BraveClient{cfg: cfg.WebSearch, http: httpc})
-	}
-	if cfg.WebSearch.SerperAPIKey != "" {
-		providers = append(providers, &SerperClient{cfg: cfg.WebSearch, http: httpc})
 	}
 	return providers, nil
 }
@@ -179,13 +178,12 @@ func (p *OpenAIProvider) GenerateWithTokens(ctx context.Context, prompt string, 
 		Model       string    `json:"model"`
 		Messages    []chatMsg `json:"messages"`
 		Temperature float64   `json:"temperature,omitempty"`
-		MaxTokens   int       `json:"max_tokens,omitempty"`
+		MaxTokens   int       `json:"max_completion_tokens,omitempty"`
 	}
 
 	body, err := json.Marshal(chatReq{
 		Model: apiModel,
 		Messages: []chatMsg{
-			{Role: "system", Content: "You are an agent to read the prompt and do as they describe, no extra commentary or helper is needed, like wrapping the answer or explaining what you are doing unless asked for it."},
 			{Role: "user", Content: prompt},
 		},
 		Temperature: temperature,
@@ -208,11 +206,19 @@ func (p *OpenAIProvider) GenerateWithTokens(ctx context.Context, prompt string, 
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("do: %w", err)
+		var bodyResp []byte
+		if resp != nil && resp.Body != nil {
+			bodyResp, _ = helpers.ReadAllAndClose(resp.Body)
+		}
+		return "", 0, 0, fmt.Errorf("do: %w, %s", err, string(bodyResp))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", 0, 0, fmt.Errorf("OpenAI status %d", resp.StatusCode)
+		bodyResp := []byte{}
+		if resp.Body != nil {
+			bodyResp, _ = helpers.ReadAllAndClose(resp.Body)
+		}
+		return "", 0, 0, fmt.Errorf("OpenAI status %d, %s", resp.StatusCode, string(bodyResp))
 	}
 
 	var out struct {
@@ -805,39 +811,393 @@ func (a *SimpleAgent) executeResearch(ctx context.Context, task AgentTask) Agent
 	ctx2, cancel := context.WithTimeout(ctx, a.config.General.DefaultTimeout)
 	defer cancel()
 	var sourcesList []Source
-	// Build incremental options from context
-	opts := map[string]interface{}{"query": query}
+	// Build options from preferences + context for Brave
+	var prefs map[string]interface{}
+	if pm, ok := task.Parameters["preferences"].(map[string]interface{}); ok {
+		prefs = pm
+	}
+	var ctxm map[string]interface{}
 	if cm, ok := task.Parameters["context"].(map[string]interface{}); ok {
-		if s, ok := cm["last_run_time"].(string); ok && s != "" {
-			opts["since"] = s
-		}
-		if ku, ok := cm["known_urls"].([]string); ok && len(ku) > 0 {
-			opts["exclude_urls"] = ku
-		}
-		if ku2, ok := cm["known_urls"].([]interface{}); ok && len(ku2) > 0 {
-			opts["exclude_urls"] = ku2
-		}
+		ctxm = cm
 	}
-	for _, p := range providers {
-		if res, err := p.Search(ctx2, query, opts); err == nil {
-			sourcesList = append(sourcesList, res...)
-		}
-	}
-	// de-duplicate
-	sourcesList = DeduplicateSources(sourcesList)
 
+	baseOpts := map[string]interface{}{"query": query}
+	// Exclusions from context
+	if ctxm != nil {
+		if ku, ok := ctxm["known_urls"].([]string); ok && len(ku) > 0 {
+			baseOpts["exclude_urls"] = ku
+		}
+		if ku2, ok := ctxm["known_urls"].([]interface{}); ok && len(ku2) > 0 {
+			baseOpts["exclude_urls"] = ku2
+		}
+	}
+
+	// Build Brave options
+	braveOpts := buildBraveOptionsFromPrefs(prefs, ctxm)
+	braveOpts["query"] = query
+
+	// small pagination loop for Brave only
+	const targetTotal = 30
+	const maxPages = 3
+	domainCap := 3
+	domainCount := map[string]int{}
+	// Domain allow/block sets from preferences
+	preferred := toStringSet(getNestedStringList(prefs, "search", "domains_preferred"))
+	blocked := toStringSet(getNestedStringList(prefs, "search", "domains_blocked"))
+	strictAllow, _ := getNestedBool(prefs, "search", "strict_domains")
+
+	bravePagesFetched := 0
+	for _, p := range providers {
+		switch sp := p.(type) {
+		case *BraveClient:
+			collected := 0
+			for page := 0; page < maxPages && collected < targetTotal; page++ {
+				braveOpts["offset"] = page
+				res, err := sp.Search(ctx2, query, braveOpts)
+				if err != nil {
+					break
+				}
+				bravePagesFetched++
+				for _, s := range res {
+					d := strings.ToLower(domainOnly(s.URL))
+					if d != "" {
+						if blocked[d] {
+							continue
+						}
+						if strictAllow && len(preferred) > 0 && !preferred[d] {
+							continue
+						}
+						if domainCount[d] >= domainCap {
+							continue
+						}
+					}
+					sourcesList = append(sourcesList, s)
+					if d != "" {
+						domainCount[d]++
+					}
+				}
+				collected = len(sourcesList)
+				if len(res) == 0 {
+					break
+				}
+			}
+		default:
+			// other providers (e.g., NewsAPI) once with base options
+			if res, err := p.Search(ctx2, query, baseOpts); err == nil {
+				for _, s := range res {
+					d := strings.ToLower(domainOnly(s.URL))
+					if d != "" {
+						if blocked[d] {
+							continue
+						}
+						if strictAllow && len(preferred) > 0 && !preferred[d] {
+							continue
+						}
+						if domainCount[d] >= domainCap {
+							continue
+						}
+					}
+					sourcesList = append(sourcesList, s)
+					if d != "" {
+						domainCount[d]++
+					}
+				}
+			}
+		}
+	}
+	// de-duplicate after collection
+	sourcesList = DeduplicateSources(sourcesList)
+	// rank results by credibility, domain preference, snippet quality, and recency if available
+	ranked := rankSources(sourcesList, query, preferred)
+	a.logger.Printf("research: brave pages=%d total_sources=%d unique_domains=%d", bravePagesFetched, len(sourcesList), len(domainCount))
+	if a.telemetry != nil {
+		a.telemetry.RecordResearchStats(ctx, bravePagesFetched, len(ranked), len(domainCount))
+	}
 	return AgentResult{
 		Data: map[string]interface{}{
-			"sources":       sourcesList,
-			"total_sources": len(sourcesList),
+			"sources":       ranked,
+			"total_sources": len(ranked),
 			"query":         query,
+			"search_params": braveOpts,
+			"pages_fetched": bravePagesFetched,
+			"domain_cap":    domainCap,
 		},
-		Sources:    sourcesList,
+		Sources:    ranked,
 		Confidence: 0.85,
 		Cost:       0.5,
 		TokensUsed: 500,
 		ModelUsed:  "gpt-5",
 	}
+}
+
+// buildBraveOptionsFromPrefs maps preferences and context to Brave search parameters
+func buildBraveOptionsFromPrefs(prefs map[string]interface{}, ctxm map[string]interface{}) map[string]interface{} {
+	out := map[string]interface{}{
+		"count":            20,
+		"text_decorations": false,
+		"spellcheck":       true,
+		"result_filter":    "web",
+		"extra_snippets":   true,
+	}
+	// preferences.search.*
+	if prefs != nil {
+		if s, ok := getNestedString(prefs, "search", "country"); ok {
+			out["country"] = s
+		}
+		if s, ok := getNestedString(prefs, "search", "search_lang"); ok {
+			out["search_lang"] = s
+		}
+		if s, ok := getNestedString(prefs, "search", "ui_lang"); ok {
+			out["ui_lang"] = s
+		}
+		if s, ok := getNestedString(prefs, "search", "safesearch"); ok {
+			out["safesearch"] = s
+		}
+		if s, ok := getNestedString(prefs, "search", "freshness"); ok {
+			out["freshness"] = s
+		}
+		if v, ok := getNestedInt(prefs, "search", "count"); ok {
+			if v > 0 && v <= 20 {
+				out["count"] = v
+			}
+		}
+		if v, ok := getNestedBool(prefs, "search", "extra_snippets"); ok {
+			out["extra_snippets"] = v
+		}
+		if s, ok := getNestedString(prefs, "search", "units"); ok {
+			out["units"] = s
+		}
+	}
+	// derive freshness if absent from last_run_time
+	if _, have := out["freshness"]; !have && ctxm != nil {
+		if s, ok := ctxm["last_run_time"].(string); ok && s != "" {
+			if t, err := time.Parse(time.RFC3339, s); err == nil {
+				dt := time.Since(t)
+				switch {
+				case dt.Hours() <= 24:
+					out["freshness"] = "pd"
+				case dt.Hours() <= 24*7:
+					out["freshness"] = "pw"
+				case dt.Hours() <= 24*31:
+					out["freshness"] = "pm"
+				default:
+					out["freshness"] = "py"
+				}
+			}
+		}
+	}
+	return out
+}
+
+func getNestedString(m map[string]interface{}, path ...string) (string, bool) {
+	cur := m
+	for i, k := range path {
+		if i == len(path)-1 {
+			if v, ok := cur[k].(string); ok {
+				return v, true
+			}
+			return "", false
+		}
+		v, ok := cur[k].(map[string]interface{})
+		if !ok {
+			return "", false
+		}
+		cur = v
+	}
+	return "", false
+}
+func getNestedInt(m map[string]interface{}, path ...string) (int, bool) {
+	cur := m
+	for i, k := range path {
+		if i == len(path)-1 {
+			switch t := cur[k].(type) {
+			case int:
+				return t, true
+			case float64:
+				return int(t), true
+			default:
+				return 0, false
+			}
+		}
+		v, ok := cur[k].(map[string]interface{})
+		if !ok {
+			return 0, false
+		}
+		cur = v
+	}
+	return 0, false
+}
+func getNestedFloat(m map[string]interface{}, path ...string) (float64, bool) {
+	cur := m
+	for i, k := range path {
+		if i == len(path)-1 {
+			switch t := cur[k].(type) {
+			case float64:
+				return t, true
+			case int:
+				return float64(t), true
+			default:
+				return 0, false
+			}
+		}
+		v, ok := cur[k].(map[string]interface{})
+		if !ok {
+			return 0, false
+		}
+		cur = v
+	}
+	return 0, false
+}
+func getNestedBool(m map[string]interface{}, path ...string) (bool, bool) {
+	cur := m
+	for i, k := range path {
+		if i == len(path)-1 {
+			if v, ok := cur[k].(bool); ok {
+				return v, true
+			}
+			return false, false
+		}
+		v, ok := cur[k].(map[string]interface{})
+		if !ok {
+			return false, false
+		}
+		cur = v
+	}
+	return false, false
+}
+
+func domainOnly(u string) string {
+	if u == "" {
+		return ""
+	}
+	s := u
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		s = s[:i]
+	}
+	return s
+}
+
+func getNestedStringList(m map[string]interface{}, path ...string) []string {
+	cur := m
+	for i, k := range path {
+		if i == len(path)-1 {
+			var out []string
+			if arr, ok := cur[k].([]string); ok {
+				return arr
+			}
+			if ai, ok := cur[k].([]interface{}); ok {
+				for _, it := range ai {
+					if s, ok := it.(string); ok && s != "" {
+						out = append(out, s)
+					}
+				}
+			}
+			return out
+		}
+		v, ok := cur[k].(map[string]interface{})
+		if !ok {
+			return nil
+		}
+		cur = v
+	}
+	return nil
+}
+
+func toStringSet(arr []string) map[string]bool {
+	m := map[string]bool{}
+	for _, s := range arr {
+		if s != "" {
+			m[strings.ToLower(s)] = true
+		}
+	}
+	return m
+}
+
+func rankSources(in []Source, query string, preferred map[string]bool) []Source {
+	// naive scoring function: credibility + domain boost + snippet quality + (optional) recency
+	type scored struct {
+		s     Source
+		score float64
+	}
+	qTokens := tokenizeQuery(query)
+	scoredArr := make([]scored, 0, len(in))
+	for _, s := range in {
+		base := s.Credibility
+		d := domainOnly(s.URL)
+		if preferred[d] {
+			base += 0.15
+		}
+		// snippet quality
+		sn := s.Summary
+		qual := 0.0
+		if sn != "" {
+			l := float64(len(sn))
+			if l > 300 {
+				l = 300
+			}
+			qual = l / 300.0
+			// keyword overlap
+			overlap := keywordOverlap(qTokens, strings.ToLower(sn))
+			qual = 0.5*qual + 0.5*overlap
+		}
+		// recency: if PublishedAt present, score higher if within 7d
+		rec := 0.5
+		if !s.PublishedAt.IsZero() {
+			dt := time.Since(s.PublishedAt)
+			switch {
+			case dt.Hours() <= 24:
+				rec = 1.0
+			case dt.Hours() <= 24*7:
+				rec = 0.8
+			case dt.Hours() <= 24*31:
+				rec = 0.6
+			default:
+				rec = 0.4
+			}
+		}
+		score := 0.5*base + 0.25*qual + 0.25*rec
+		scoredArr = append(scoredArr, scored{s: s, score: score})
+	}
+	// sort by score desc, stable on title
+	sort.SliceStable(scoredArr, func(i, j int) bool {
+		if scoredArr[i].score == scoredArr[j].score {
+			return scoredArr[i].s.Title < scoredArr[j].s.Title
+		}
+		return scoredArr[i].score > scoredArr[j].score
+	})
+	out := make([]Source, 0, len(scoredArr))
+	for _, it := range scoredArr {
+		out = append(out, it.s)
+	}
+	return out
+}
+
+func tokenizeQuery(q string) []string {
+	q = strings.ToLower(q)
+	parts := strings.Fields(q)
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if len(p) >= 3 {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func keywordOverlap(tokens []string, text string) float64 {
+	if len(tokens) == 0 || text == "" {
+		return 0
+	}
+	hits := 0
+	for _, t := range tokens {
+		if strings.Contains(text, t) {
+			hits++
+		}
+	}
+	return float64(hits) / float64(len(tokens))
 }
 
 type analysisParseResult struct {
@@ -884,22 +1244,83 @@ func (a *SimpleAgent) executeAnalysis(ctx context.Context, task AgentTask) Agent
 			}
 		}
 	}
+	// Apply analysis preferences: min_credibility, sources_limit, language, weighting
+	var prefs map[string]interface{}
+	if pm, ok := task.Parameters["preferences"].(map[string]interface{}); ok {
+		prefs = pm
+	}
+	// defaults
+	minCred := 0.0
+	if v, ok := getNestedInt(prefs, "analysis", "sources_limit"); ok && v > 0 {
+		// will be applied below
+	}
+	if f, ok := getNestedFloat(prefs, "analysis", "min_credibility"); ok {
+		minCred = f
+	}
+	lang, _ := getNestedString(prefs, "analysis", "language")
+	relW, _ := getNestedFloat(prefs, "analysis", "relevance_weight")
+	if relW == 0 {
+		relW = 1
+	}
+	credW, _ := getNestedFloat(prefs, "analysis", "credibility_weight")
+	if credW == 0 {
+		credW = 1
+	}
+	impW, _ := getNestedFloat(prefs, "analysis", "importance_weight")
+	if impW == 0 {
+		impW = 1
+	}
+	topicsLimit, _ := getNestedInt(prefs, "analysis", "key_topics_limit")
+	if topicsLimit <= 0 {
+		topicsLimit = 5
+	}
+	sentimentMode, _ := getNestedString(prefs, "analysis", "sentiment_mode")
+
+	// Filter and limit sources
+	var filtered []Source
+	for _, s := range sources {
+		if s.Credibility < minCred {
+			continue
+		}
+		filtered = append(filtered, s)
+	}
+	// Sort by credibility desc simple (stable by title)
+	sort.SliceStable(filtered, func(i, j int) bool {
+		if filtered[i].Credibility == filtered[j].Credibility {
+			return filtered[i].Title < filtered[j].Title
+		}
+		return filtered[i].Credibility > filtered[j].Credibility
+	})
+	if lim, ok := getNestedInt(prefs, "analysis", "sources_limit"); ok && lim > 0 && lim < len(filtered) {
+		filtered = filtered[:lim]
+	}
+
 	srcCtx := ""
-	for i, s := range sources {
-		if i >= 5 {
+	for i, s := range filtered {
+		if i >= 8 {
 			break
 		}
 		srcCtx += fmt.Sprintf("- %s (%s) %s\n", s.Title, s.Type, s.URL)
 	}
-	prompt := fmt.Sprintf(`You are an assistant analyzing relevance and credibility for a research task.
+	sentimentInstr := "detect"
+	if strings.ToLower(sentimentMode) == "none" {
+		sentimentInstr = "none"
+	}
+	langInstr := lang
+	if langInstr == "" {
+		langInstr = "auto"
+	}
+	prompt := fmt.Sprintf(`You are an assistant analyzing relevance, credibility, and importance for a research task.
 TASK: %s
 TOP CONTEXT SOURCES (may be empty):
 %s
+Weighting: relevance=%.2f, credibility=%.2f, importance=%.2f.
+Language: %s. Sentiment mode: %s. Limit key_topics to %d.
 Respond ONLY as strict JSON with keys:
 {"relevance_score": number 0..1, "credibility_score": number 0..1, "importance_score": number 0..1, "sentiment": string one of [positive, neutral, negative], "key_topics": [string], "content_quality": string, "information_depth": string, "confidence": number 0..1}
-`, query, srcCtx)
+`, query, srcCtx, relW, credW, impW, langInstr, sentimentInstr, topicsLimit)
 
-	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.2})
+	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, nil)
 	if err != nil {
 		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
 	}
@@ -919,6 +1340,9 @@ Respond ONLY as strict JSON with keys:
 	}
 
 	cost := a.llmProvider.CalculateCost(inTok, outTok, model)
+	if a.telemetry != nil {
+		a.telemetry.RecordAnalysisStats(ctx, len(filtered), minCred)
+	}
 	return AgentResult{
 		Data: map[string]interface{}{
 			"relevance_score":   parsed.Relevance,
@@ -929,6 +1353,7 @@ Respond ONLY as strict JSON with keys:
 			"content_quality":   parsed.ContentQuality,
 			"information_depth": parsed.InformationDepth,
 			"confidence":        parsed.Confidence,
+			"preferences_used":  map[string]interface{}{"min_credibility": minCred, "sources_considered": len(filtered), "language": langInstr, "weights": map[string]float64{"relevance": relW, "credibility": credW, "importance": impW}, "key_topics_limit": topicsLimit, "sentiment_mode": sentimentInstr},
 		},
 		Confidence: parsed.Confidence,
 		Cost:       cost,
@@ -1007,7 +1432,7 @@ Return ONLY strict JSON with keys:
 }
 `, userThought, max, ctxBuf.String())
 
-	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.2})
+	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, nil)
 	if err != nil {
 		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
 	}
@@ -1118,8 +1543,24 @@ func (a *SimpleAgent) executeConflictDetection(ctx context.Context, task AgentTa
 	}
 	sources = DeduplicateSources(sources)
 	// Build statements from sources
+	// Apply conflict preferences
+	var prefs map[string]interface{}
+	if pm, ok := task.Parameters["preferences"].(map[string]interface{}); ok {
+		prefs = pm
+	}
+	sourcesWindow, _ := getNestedInt(prefs, "conflict", "sources_window")
+	if sourcesWindow <= 0 {
+		sourcesWindow = 12
+	}
+	contradictoryThresh, _ := getNestedFloat(prefs, "conflict", "contradictory_threshold")
+	requireCitations, _ := getNestedBool(prefs, "conflict", "require_citations")
+	stanceDetection, _ := getNestedBool(prefs, "conflict", "stance_detection")
+	groupingBy, _ := getNestedString(prefs, "conflict", "grouping_by")
+	minSupport, _ := getNestedInt(prefs, "conflict", "min_supporting_evidence")
+	resolutionStrategy, _ := getNestedString(prefs, "conflict", "resolution_strategy")
+
 	buf := &bytes.Buffer{}
-	max := 12
+	max := sourcesWindow
 	for i, s := range sources {
 		if i >= max {
 			break
@@ -1133,10 +1574,13 @@ func (a *SimpleAgent) executeConflictDetection(ctx context.Context, task AgentTa
 	prompt := fmt.Sprintf(`You are a conflict detection assistant.
 Given the following statements extracted from different sources, find conflicting claims.
 List concise conflicts with severity and a suggested resolution.
+Sensitivity threshold: %.2f (0..1). Grouping: %s. Min supporting evidence: %d. Resolution strategy: %s.
+Citation requirement: %t. Stance detection: %t.
 STATEMENTS:\n%s\n
-Return ONLY strict JSON: { "conflicts": [ { "description": string, "severity": "low|medium|high|critical", "resolution": string } ], "confidence": number 0..1 }`, buf.String())
+Return ONLY strict JSON: { "conflicts": [ { "description": string, "severity": "low|medium|high|critical", "resolution": string } ], "confidence": number 0..1 }`,
+		contradictoryThresh, groupingBy, minSupport, resolutionStrategy, requireCitations, stanceDetection, buf.String())
 
-	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.2})
+	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, nil)
 	if err != nil {
 		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
 	}
@@ -1162,9 +1606,10 @@ Return ONLY strict JSON: { "conflicts": [ { "description": string, "severity": "
 	cost := a.llmProvider.CalculateCost(inTok, outTok, model)
 	return AgentResult{
 		Data: map[string]interface{}{
-			"conflicts":      conflicts,
-			"conflict_count": len(conflicts),
-			"confidence":     parsed.Confidence,
+			"conflicts":        conflicts,
+			"conflict_count":   len(conflicts),
+			"confidence":       parsed.Confidence,
+			"preferences_used": map[string]interface{}{"sources_window": sourcesWindow, "contradictory_threshold": contradictoryThresh, "require_citations": requireCitations, "stance_detection": stanceDetection, "grouping_by": groupingBy, "min_supporting_evidence": minSupport, "resolution_strategy": resolutionStrategy},
 		},
 		Sources:    sources,
 		Confidence: parsed.Confidence,
@@ -1220,7 +1665,7 @@ func (a *SimpleAgent) executeHighlightManagement(ctx context.Context, task Agent
 	prompt := fmt.Sprintf(`Extract the most important highlights from the following source snippets.
 Return ONLY strict JSON: { "highlights": [ { "title": string, "content": string, "type": "breaking|important|ongoing|general", "priority": 1|2|3|4|5, "source_urls": [string] } ], "confidence": number 0..1 }
 SOURCES:\n%s`, buf.String())
-	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.3})
+	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, nil)
 	if err != nil {
 		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
 	}
@@ -1314,17 +1759,48 @@ func (a *SimpleAgent) executeKnowledgeGraph(ctx context.Context, task AgentTask)
 		}
 		fmt.Fprintf(buf, "- %s :: %s\n", s.Title, s.Summary)
 	}
+	// preferences for graph
+	var prefs map[string]interface{}
+	if pm, ok := task.Parameters["preferences"].(map[string]interface{}); ok {
+		prefs = pm
+	}
+	entityTypes := getNestedStringList(prefs, "knowledge_graph", "entity_types")
+	relationTypes := getNestedStringList(prefs, "knowledge_graph", "relation_types")
+	minConf, _ := getNestedFloat(prefs, "knowledge_graph", "min_confidence")
+	if minConf < 0 {
+		minConf = 0
+	} else if minConf > 1 {
+		minConf = 1
+	}
+	dedupeThresh, _ := getNestedFloat(prefs, "knowledge_graph", "dedupe_threshold")
+	includeAliases, _ := getNestedBool(prefs, "knowledge_graph", "include_aliases")
+	maxNodes, _ := getNestedInt(prefs, "knowledge_graph", "max_nodes")
+	if maxNodes <= 0 {
+		maxNodes = 200
+	}
+	maxEdges, _ := getNestedInt(prefs, "knowledge_graph", "max_edges")
+	if maxEdges <= 0 {
+		maxEdges = 400
+	}
+	kgLang, _ := getNestedString(prefs, "knowledge_graph", "language")
+	if kgLang == "" {
+		kgLang = "auto"
+	}
+
 	model := a.config.LLM.Routing.Analysis
 	if model == "" {
 		model = a.config.LLM.Routing.Fallback
 	}
 	prompt := fmt.Sprintf(`Extract entities and relationships for a knowledge graph about "%s" from the notes below.
+Entity types (whitelist): %v; Relation types (whitelist): %v.
+Drop nodes/edges with confidence < %.2f. Include aliases: %t. Language: %s.
+If too many items, cap at max_nodes=%d and max_edges=%d, preserving important items.
 Return ONLY strict JSON:
 { "nodes": [ { "id": string, "type": string, "label": string, "description": string, "confidence": number 0..1 } ],
   "edges": [ { "id": string, "from": string, "to": string, "type": string, "weight": number 0..1, "confidence": number 0..1 } ],
   "confidence": number 0..1 } 
-NOTES:\n%s`, topic, buf.String())
-	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, map[string]interface{}{"temperature": 0.2})
+NOTES:\n%s`, topic, entityTypes, relationTypes, minConf, includeAliases, kgLang, maxNodes, maxEdges, buf.String())
+	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, nil)
 	if err != nil {
 		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
 	}
@@ -1353,6 +1829,9 @@ NOTES:\n%s`, topic, buf.String())
 		if id == "" {
 			id = uuid.NewString()
 		}
+		if n.Confidence < minConf {
+			continue
+		}
 		nodes = append(nodes, KnowledgeNode{ID: id, Type: n.Type, Label: n.Label, Description: n.Description, Confidence: n.Confidence, CreatedAt: now, UpdatedAt: now})
 	}
 	var edges []KnowledgeEdge
@@ -1361,15 +1840,26 @@ NOTES:\n%s`, topic, buf.String())
 		if id == "" {
 			id = uuid.NewString()
 		}
+		if e.Confidence < minConf {
+			continue
+		}
 		edges = append(edges, KnowledgeEdge{ID: id, From: e.From, To: e.To, Type: e.Type, Weight: e.Weight, Confidence: e.Confidence, CreatedAt: now})
+	}
+	// Cap sizes
+	if len(nodes) > maxNodes {
+		nodes = nodes[:maxNodes]
+	}
+	if len(edges) > maxEdges {
+		edges = edges[:maxEdges]
 	}
 	cost := a.llmProvider.CalculateCost(inTok, outTok, model)
 	return AgentResult{
 		Data: map[string]interface{}{
-			"nodes":      nodes,
-			"edges":      edges,
-			"topic":      topic,
-			"confidence": parsed.Confidence,
+			"nodes":            nodes,
+			"edges":            edges,
+			"topic":            topic,
+			"confidence":       parsed.Confidence,
+			"preferences_used": map[string]interface{}{"entity_types": entityTypes, "relation_types": relationTypes, "min_confidence": minConf, "dedupe_threshold": dedupeThresh, "include_aliases": includeAliases, "max_nodes": maxNodes, "max_edges": maxEdges, "language": kgLang},
 		},
 		Sources:    sources,
 		Confidence: parsed.Confidence,

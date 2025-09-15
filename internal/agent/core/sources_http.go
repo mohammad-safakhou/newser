@@ -1,10 +1,11 @@
 package core
 
 import (
-	"context"
-	"fmt"
-	"strings"
-	"time"
+    "context"
+    "fmt"
+    "net/url"
+    "strings"
+    "time"
 
 	"github.com/google/uuid"
 	"github.com/mohammad-safakhou/newser/config"
@@ -89,20 +90,46 @@ type BraveClient struct {
 }
 
 func (b *BraveClient) Search(ctx context.Context, query string, options map[string]interface{}) ([]Source, error) {
-	var resp struct {
-		Web struct {
-			Results []struct{ Title, URL, Description string } `json:"results"`
-		} `json:"web"`
-	}
-	headers := map[string]string{"X-Subscription-Token": b.cfg.BraveAPIKey}
-	q := query
-	if mq, ok := options["query"].(string); ok && mq != "" {
-		q = mq
-	}
-	url := fmt.Sprintf("https://api.search.brave.com/res/v1/web/search?q=%s&count=%d", escapeQuery(q), max1(b.cfg.MaxResults, 10))
-	if err := b.http.DoJSON(ctx, "GET", url, headers, nil, &resp); err != nil {
-		return nil, err
-	}
+    var resp struct {
+        Web struct {
+            Results []struct{ Title, URL, Description string } `json:"results"`
+        } `json:"web"`
+    }
+    headers := map[string]string{"X-Subscription-Token": b.cfg.BraveAPIKey}
+    q := query
+    if mq, ok := options["query"].(string); ok && mq != "" {
+        q = mq
+    }
+    // Build query parameters
+    vals := url.Values{}
+    vals.Set("q", q)
+    // count and offset
+    cnt := max1(b.cfg.MaxResults, 10)
+    if v, ok := asInt(options["count"]); ok { if v > 0 && v <= 20 { cnt = v } }
+    vals.Set("count", fmt.Sprintf("%d", cnt))
+    if v, ok := asInt(options["offset"]); ok { if v >= 0 && v <= 9 { vals.Set("offset", fmt.Sprintf("%d", v)) } }
+    // locale and safety
+    if s, ok := asString(options["country"]); ok && s != "" { vals.Set("country", s) }
+    if s, ok := asString(options["search_lang"]); ok && s != "" { vals.Set("search_lang", s) }
+    if s, ok := asString(options["ui_lang"]); ok && s != "" { vals.Set("ui_lang", s) }
+    if s, ok := asString(options["safesearch"]); ok && s != "" { vals.Set("safesearch", s) }
+    if s, ok := asString(options["freshness"]); ok && s != "" { vals.Set("freshness", s) }
+    if v, ok := asBool(options["text_decorations"]); ok { vals.Set("text_decorations", boolStr(v)) } else { vals.Set("text_decorations", "false") }
+    if v, ok := asBool(options["spellcheck"]); ok { vals.Set("spellcheck", boolStr(v)) }
+    if s, ok := asString(options["units"]); ok && s != "" { vals.Set("units", s) }
+    if v, ok := asBool(options["extra_snippets"]); ok { vals.Set("extra_snippets", boolStr(v)) }
+    if v, ok := asBool(options["summary"]); ok { vals.Set("summary", boolStr(v)) }
+    // result_filter: CSV string or []string
+    if s, ok := asString(options["result_filter"]); ok && s != "" { vals.Set("result_filter", s) }
+    if arr, ok := options["result_filter"].([]string); ok && len(arr) > 0 { vals.Set("result_filter", strings.Join(arr, ",")) }
+    // goggles: repeated parameter
+    if arr, ok := options["goggles"].([]string); ok {
+        for _, g := range arr { if g != "" { vals.Add("goggles", g) } }
+    }
+    endpoint := "https://api.search.brave.com/res/v1/web/search?" + vals.Encode()
+    if err := b.http.DoJSON(ctx, "GET", endpoint, headers, nil, &resp); err != nil {
+        return nil, err
+    }
     // Exclusion list of known URLs
     exclude := map[string]bool{}
     if arr, ok := options["exclude_urls"].([]string); ok {
@@ -163,11 +190,32 @@ func (s *SerperClient) GetCredibility(src Source) float64 { return 0.65 }
 
 func escapeQuery(q string) string { return strings.ReplaceAll(q, " ", "+") }
 func max1(a, def int) int {
-	if a > 0 {
-		return a
-	}
-	return def
+    if a > 0 {
+        return a
+    }
+    return def
 }
+func asString(v interface{}) (string, bool) {
+    s, ok := v.(string)
+    return s, ok
+}
+func asInt(v interface{}) (int, bool) {
+    switch t := v.(type) {
+    case int:
+        return t, true
+    case int64:
+        return int(t), true
+    case float64:
+        return int(t), true
+    default:
+        return 0, false
+    }
+}
+func asBool(v interface{}) (bool, bool) {
+    b, ok := v.(bool)
+    return b, ok
+}
+func boolStr(b bool) string { if b { return "true" }; return "false" }
 
 // DeduplicateSources merges sources by URL (or title fallback) and keeps the highest credibility
 func DeduplicateSources(in []Source) []Source {

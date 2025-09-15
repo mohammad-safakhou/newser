@@ -38,10 +38,31 @@ type Metrics struct {
 	LLMTokensUsed     map[string]int64
 	LLMAverageLatency map[string]time.Duration
 
-	// Source metrics
-	SourceRequests     map[string]int64
-	SourceSuccessRates map[string]float64
-	SourceAverageTimes map[string]time.Duration
+    // Source metrics
+    SourceRequests     map[string]int64
+    SourceSuccessRates map[string]float64
+    SourceAverageTimes map[string]time.Duration
+
+    // Research metrics
+    ResearchRuns               int64
+    ResearchPagesFetchedTotal  int64
+    ResearchSourcesTotal       int64
+    ResearchUniqueDomainsTotal int64
+
+    // Analysis metrics
+    AnalysisRuns                  int64
+    AnalysisSourcesConsideredTotal int64
+    AnalysisMinCredibilityTotal    float64
+
+    // Knowledge graph metrics
+    KGRuns      int64
+    KGNodesTotal int64
+    KGEdgesTotal int64
+
+    // Conflict detection metrics
+    ConflictRuns                   int64
+    ConflictCountTotal             int64
+    ContradictoryThresholdsTotal   float64
 }
 
 // CostTracker tracks costs across different LLM providers and operations
@@ -109,7 +130,7 @@ func NewTelemetry(config config.TelemetryConfig) *Telemetry {
 	t := &Telemetry{
 		config: config,
 		logger: log.New(log.Writer(), "[TELEMETRY] ", log.LstdFlags),
-		metrics: &Metrics{
+        metrics: &Metrics{
 			AgentExecutions:    make(map[string]int64),
 			AgentSuccessRates:  make(map[string]float64),
 			AgentAverageTimes:  make(map[string]time.Duration),
@@ -118,8 +139,8 @@ func NewTelemetry(config config.TelemetryConfig) *Telemetry {
 			LLMAverageLatency:  make(map[string]time.Duration),
 			SourceRequests:     make(map[string]int64),
 			SourceSuccessRates: make(map[string]float64),
-			SourceAverageTimes: make(map[string]time.Duration),
-		},
+            SourceAverageTimes: make(map[string]time.Duration),
+        },
 		costTracker: &CostTracker{
 			DailyCosts:     make(map[string]float64),
 			OperationCosts: make(map[string]float64),
@@ -259,6 +280,43 @@ func (t *Telemetry) RecordSourceEvent(ctx context.Context, event SourceEvent) {
 
 	t.logger.Printf("Source Event: Source=%s, Success=%t, Duration=%v, Results=%d",
 		event.Source, event.Success, event.Duration, event.Results)
+}
+
+// RecordResearchStats records research pagination/diversity stats
+func (t *Telemetry) RecordResearchStats(ctx context.Context, pagesFetched, totalSources, uniqueDomains int) {
+    if !t.config.Enabled { return }
+    t.mu.Lock(); defer t.mu.Unlock()
+    t.metrics.ResearchRuns++
+    t.metrics.ResearchPagesFetchedTotal += int64(pagesFetched)
+    t.metrics.ResearchSourcesTotal += int64(totalSources)
+    t.metrics.ResearchUniqueDomainsTotal += int64(uniqueDomains)
+}
+
+// RecordAnalysisStats records analysis parameter usage
+func (t *Telemetry) RecordAnalysisStats(ctx context.Context, sourcesConsidered int, minCredibility float64) {
+    if !t.config.Enabled { return }
+    t.mu.Lock(); defer t.mu.Unlock()
+    t.metrics.AnalysisRuns++
+    t.metrics.AnalysisSourcesConsideredTotal += int64(sourcesConsidered)
+    t.metrics.AnalysisMinCredibilityTotal += minCredibility
+}
+
+// RecordKGStats records knowledge graph sizes
+func (t *Telemetry) RecordKGStats(ctx context.Context, nodes, edges int) {
+    if !t.config.Enabled { return }
+    t.mu.Lock(); defer t.mu.Unlock()
+    t.metrics.KGRuns++
+    t.metrics.KGNodesTotal += int64(nodes)
+    t.metrics.KGEdgesTotal += int64(edges)
+}
+
+// RecordConflictStats records conflict detection outputs
+func (t *Telemetry) RecordConflictStats(ctx context.Context, conflicts int, contradictoryThreshold float64) {
+    if !t.config.Enabled { return }
+    t.mu.Lock(); defer t.mu.Unlock()
+    t.metrics.ConflictRuns++
+    t.metrics.ConflictCountTotal += int64(conflicts)
+    t.metrics.ContradictoryThresholdsTotal += contradictoryThreshold
 }
 
 // GetMetrics returns current metrics snapshot

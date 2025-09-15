@@ -41,9 +41,7 @@ func (p *Planner) Plan(ctx context.Context, thought UserThought) (PlanningResult
 	model := p.config.LLM.Routing.Planning
 
 	// Generate plan using LLM
-	response, err := p.llmProvider.Generate(ctx, prompt, model, map[string]interface{}{
-		"temperature": 0.1,
-	})
+	response, err := p.llmProvider.Generate(ctx, prompt, model, nil)
 	if err != nil {
 		return PlanningResult{}, fmt.Errorf("failed to generate plan: %w", err)
 	}
@@ -167,6 +165,7 @@ func (p *Planner) createPlanningPrompt(thought UserThought) string {
 		}
 	}
 
+	caps := CapabilitiesDoc(p.config)
 	return fmt.Sprintf(`ROLE: Senior news intelligence planner focused on accuracy and usefulness. Ignore money/time costs; minimize tasks while maximizing quality.
 
 USER THOUGHT / TOPIC:
@@ -180,14 +179,20 @@ AVAILABLE AGENTS:
 - highlight_management: extract key highlights
 - knowledge_graph: extract entities/relations (always include; can be light)
 
+AGENT PARAMETER HINTS (use for task parameters; map from preferences when available):
+%s
+
 PLANNING PRINCIPLES:
 1) Create the fewest, highest‑impact tasks.
 2) Set dependencies (research -> analysis -> downstream tasks).
 3) Always include FINAL synthesis last, depending on all prior tasks.
 4) Always include knowledge_graph after research/analysis (even if output is small).
 5) Use prior context: since last_run_time; avoid known_urls duplicates.
-6) Encode necessary parameters (query, filters, since, exclude_urls) in tasks.
-7) No cost/time estimation; avoid redundant steps.
+6) For research tasks, encode Brave web_search parameters explicitly: country, search_lang, ui_lang, safesearch, freshness, count, offset, result_filter, spellcheck, text_decorations, extra_snippets, units, domains_preferred/blocked, and query. Derive from preferences where available; otherwise set sensible defaults.
+7) For analysis tasks, include parameters from preferences.analysis: relevance_weight, credibility_weight, importance_weight, sentiment_mode, min_credibility, key_topics_limit, sources_limit, language, extract_key_topics.
+8) For knowledge_graph tasks, include parameters from preferences.knowledge_graph: entity_types, relation_types, min_confidence, dedupe_threshold, include_aliases, max_nodes, max_edges, language.
+9) For conflict_detection tasks, include parameters from preferences.conflict: contradictory_threshold, sources_window, require_citations, stance_detection, grouping_by, min_supporting_evidence, resolution_strategy.
+10) No cost/time estimation; avoid redundant steps.
 
 OUTPUT JSON:
 {
@@ -212,7 +217,7 @@ OUTPUT JSON:
   "reasoning": "why this plan"
 }
 
-Return ONLY JSON. Ensure final synthesis is last and knowledge_graph is present.`, thought.Content, prefBlock, ctxBlock)
+Return ONLY JSON. Ensure final synthesis is last and knowledge_graph is present.`, thought.Content, prefBlock, ctxBlock, caps)
 }
 
 // parsePlanningResponse parses the LLM response into a PlanningResult
@@ -439,9 +444,7 @@ func (p *Planner) OptimizePlan(plan PlanningResult, constraints map[string]inter
 	ctx2, cancel2 := context.WithTimeout(context.Background(), p.config.General.DefaultTimeout)
 	defer cancel2()
 
-	response, err := p.llmProvider.Generate(ctx2, prompt, model, map[string]interface{}{
-		"temperature": 0.2,
-	})
+	response, err := p.llmProvider.Generate(ctx2, prompt, model, nil)
 	if err != nil {
 		return plan, fmt.Errorf("failed to optimize plan: %w", err)
 	}

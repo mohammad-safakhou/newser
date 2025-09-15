@@ -31,6 +31,7 @@ func (h *TopicsHandler) Register(g *echo.Group, secret []byte) {
 	assist.POST("/chat", h.assist)
 	g.GET("/:id", h.get)
 	g.PATCH("/:id", h.update)
+	g.PATCH("/:id/preferences", h.updatePreferences)
 	g.POST("/:id/chat", h.chat)
 	g.GET("/:id/chat", h.chatHistory)
 }
@@ -140,6 +141,48 @@ func (h *TopicsHandler) update(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "name required")
 	}
 	if err := h.Store.UpdateTopicName(c.Request().Context(), topicID, userID, strings.TrimSpace(payload.Name)); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+// updatePreferences allows updating the full preferences JSON and optionally cron
+//
+//	@Summary  Update topic preferences
+//	@Tags     topics
+//	@Security BearerAuth
+//	@Security CookieAuth
+//	@Param    id      path  string true "Topic ID"
+//	@Accept   json
+//	@Produce  json
+//	@Param    payload body  map[string]interface{} true "Preferences update (preferences, optional schedule_cron)"
+//	@Success  204
+//	@Failure  400 {object} HTTPError
+//	@Failure  404 {object} HTTPError
+//	@Router   /api/topics/{id}/preferences [patch]
+func (h *TopicsHandler) updatePreferences(c echo.Context) error {
+	userID := c.Get("user_id").(string)
+	topicID := c.Param("id")
+	if _, _, _, err := h.Store.GetTopicByID(c.Request().Context(), topicID, userID); err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	var payload struct {
+		Preferences  map[string]interface{} `json:"preferences"`
+		ScheduleCron string                 `json:"schedule_cron"`
+	}
+	if err := c.Bind(&payload); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	b, err := json.Marshal(payload.Preferences)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	var cronPtr *string
+	if strings.TrimSpace(payload.ScheduleCron) != "" {
+		v := strings.TrimSpace(payload.ScheduleCron)
+		cronPtr = &v
+	}
+	if err := h.Store.UpdateTopicPrefsAndCron(c.Request().Context(), topicID, userID, b, cronPtr); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	return c.NoContent(http.StatusNoContent)
@@ -278,16 +321,27 @@ func (h *TopicsHandler) assist(c echo.Context) error {
 
 // llmRefineTopic crafts a prompt and parses a strict JSON response to update preferences/cron
 func llmRefineTopic(ctx context.Context, llm agentcore.LLMProvider, model string, message string, name string, prefs map[string]interface{}, cron string) (reply string, newPrefs map[string]interface{}, newCron string, err error) {
+	// Include agent capability hints so the assistant knows which parameters to collect/refine.
+	caps := agentcore.CapabilitiesDoc(nil)
 	// Do not use or modify the user-defined topic name in guidance. Keep name out of semantics.
 	prompt := fmt.Sprintf(`You are assisting configuration of a news topic.
 Current schedule: %s
 Current preferences (JSON): %s
 User request: %s
 
+Agent parameter hints (use to refine preferences/search fields):
+%s
+
+Instructions:
+- Infer sensible defaults (e.g., search_lang/ui_lang from user language if clear), but ALWAYS allow the user to override later.
+- When adding or updating preferences, keep them under explicit keys (e.g., preferences.search.country, preferences.search.search_lang, etc.).
+- If important parameters are missing or ambiguous, include a concise follow-up question in "message" to clarify.
+- Do NOT modify the user-defined topic name.
+
 Respond ONLY as strict JSON with keys:
 {"message": string, "preferences": object, "cron_spec": string, "context_summary": string, "objectives": [string]}
-`, cron, mustJSON(prefs), message)
-	out, err := llm.Generate(ctx, prompt, model, map[string]interface{}{})
+`, cron, mustJSON(prefs), message, caps)
+	out, err := llm.Generate(ctx, prompt, model, nil)
 	if err != nil {
 		return "", nil, "", err
 	}

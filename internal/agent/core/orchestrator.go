@@ -243,9 +243,12 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 				for k, v := range t.Parameters {
 					params[k] = v
 				}
-				if thought.Context != nil {
-					params["context"] = thought.Context
-				}
+                if thought.Context != nil {
+                    params["context"] = thought.Context
+                }
+                if thought.Preferences != nil {
+                    params["preferences"] = thought.Preferences
+                }
 				var inputs []AgentResult
 				var aggSources []Source
 				for _, depID := range t.DependsOn {

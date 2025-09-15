@@ -87,7 +87,10 @@ export default function TopicDetailPage() {
   const topicName = qc.getQueryData<any>(['topics'])?.find?.((t: any)=>t.ID===id)?.Name
   const [editingName, setEditingName] = useState(false)
   const [newName, setNewName] = useState<string>('')
+  const [editingPrefs, setEditingPrefs] = useState(false)
+  const [prefsDraft, setPrefsDraft] = useState<string>('')
   const renameMut = useMutation({ mutationFn: (name: string) => api2.updateTopicName(id!, name), onSuccess: ()=>{ qc.invalidateQueries({ queryKey: ['topics'] }); setEditingName(false); toast.success('Topic renamed') }, onError: (e:any)=> toast.error(e.message || 'Rename failed') })
+  const prefsMut = useMutation({ mutationFn: (payload: { preferences: any; scheduleCron?: string }) => api2.updateTopicPrefs(id!, payload.preferences, payload.scheduleCron), onSuccess: ()=>{ qc.invalidateQueries({ queryKey: ['topic', id] }); setEditingPrefs(false); toast.success('Preferences updated') }, onError: (e:any)=> toast.error(e.message || 'Update failed') })
 
   const triggerMut = useMutation({ mutationFn: () => api2.triggerRun(id!), onSuccess: () => { qc.invalidateQueries({ queryKey: ['runs', id] }); toast.success('Run triggered') }, onError: (e:any) => toast.error(e.message || 'Trigger failed') })
   const chatMut = useMutation({
@@ -255,10 +258,31 @@ export default function TopicDetailPage() {
               </ul>
             </div>
             <div className="card space-y-2">
-              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Preferences</h4>
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Preferences</h4>
+                {topicQ.isSuccess && !editingPrefs && (
+                  <button className="btn-secondary text-xs px-3" onClick={()=>{ setPrefsDraft(JSON.stringify(topicQ.data.preferences || {}, null, 2)); setEditingPrefs(true) }}>Edit</button>
+                )}
+              </div>
               {!topicQ.isSuccess && <div className="text-xs text-slate-500">{topicQ.isLoading ? 'Loading topic…' : 'No data'}</div>}
-              {topicQ.isSuccess && (
+              {topicQ.isSuccess && !editingPrefs && (
                 <pre className="text-xs bg-slate-900/60 border border-slate-800 rounded p-3 max-h-64 overflow-auto whitespace-pre-wrap">{JSON.stringify(topicQ.data.preferences || {}, null, 2)}</pre>
+              )}
+              {topicQ.isSuccess && editingPrefs && (
+                <div className="space-y-2">
+                  <textarea className="w-full h-48 bg-slate-900/60 border border-slate-800 rounded p-3 text-xs font-mono" value={prefsDraft} onChange={e=>setPrefsDraft(e.target.value)} />
+                  <div className="flex gap-2 justify-end">
+                    <button className="btn-secondary text-xs px-3" onClick={()=>setEditingPrefs(false)}>Cancel</button>
+                    <button className="btn text-xs px-4" onClick={()=>{
+                      try {
+                        const obj = JSON.parse(prefsDraft)
+                        prefsMut.mutate({ preferences: obj })
+                      } catch (e:any) {
+                        toast.error('Invalid JSON')
+                      }
+                    }} disabled={prefsMut.isPending}>{prefsMut.isPending ? 'Saving…' : 'Save'}</button>
+                  </div>
+                </div>
               )}
             </div>
           </div>

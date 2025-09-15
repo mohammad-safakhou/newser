@@ -66,6 +66,7 @@ export const api2 = {
   },
   getTopic: (id: string) => apiRequest<any>(`/api/topics/${id}`),
   updateTopicName: (id: string, name: string) => apiRequest(`/api/topics/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  updateTopicPrefs: (id: string, preferences: Record<string, any>, scheduleCron?: string) => apiRequest(`/api/topics/${id}/preferences`, { method: 'PATCH', body: JSON.stringify({ preferences, ...(scheduleCron ? { schedule_cron: scheduleCron } : {}) }) }),
   assistChat: (payload: { message: string; name?: string; preferences?: Record<string, any>; schedule_cron?: string }) => apiRequest<{ message: string; topic: any }>(`/api/topics/assist/chat`, { method: 'POST', body: JSON.stringify(payload) }),
 }
 

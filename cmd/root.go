@@ -1,4 +1,4 @@
-// Package main bootstraps the CLI and HTTP server.
+// Package cmd bootstraps the CLI and HTTP server.
 //
 // Swagger general API metadata
 //

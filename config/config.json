@@ -13,14 +13,14 @@
     "providers": {
       "openai": {
         "type": "openai",
-        "api_key": "",
+        "api_key": "OpenAI_API_Key",
         "base_url": "https://api.openai.com/v1",
         "models": {
           "gpt-5": {
             "name": "gpt-5",
-            "api_name": "gpt-4o",
-            "max_tokens": 16384,
-            "temperature": 0.3,
+            "api_name": "gpt-5",
+            "max_tokens": 131072,
+            "temperature": 1,
             "cost_per_1k_input": 0.01,
             "cost_per_1k_output": 0.03,
             "capabilities": [
@@ -33,9 +33,9 @@
           },
           "gpt-5-nano": {
             "name": "gpt-5-nano",
-            "api_name": "gpt-4o-mini",
-            "max_tokens": 8192,
-            "temperature": 0.7,
+            "api_name": "gpt-5-nano",
+            "max_tokens": 16384,
+            "temperature": 1,
             "cost_per_1k_input": 0.001,
             "cost_per_1k_output": 0.003,
             "capabilities": [
@@ -45,7 +45,7 @@
           }
         },
         "max_retries": 3,
-        "timeout": "30s"
+        "timeout": "240s"
       }
     },
     "routing": {
@@ -112,5 +112,3 @@
     }
   }
 }
-
-

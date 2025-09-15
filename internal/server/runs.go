@@ -247,7 +247,7 @@ Guidance:
 
 Return ONLY the markdown content.`, summary, firstN(detailed, 1500), target, req.Focus)
 
-	out, err := llm.Generate(c.Request().Context(), prompt, model, map[string]interface{}{"temperature": 0.3})
+	out, err := llm.Generate(c.Request().Context(), prompt, model, nil)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
@@ -414,7 +414,7 @@ Guidance:
 - Keep the tone factual; avoid speculation; conclude with concise takeaways.
 - Return ONLY the Markdown content.`, topicName, summary, detailed, highlights, sources)
 
-	out, err := llm.Generate(ctx, prompt, model, map[string]interface{}{"temperature": 0.3})
+	out, err := llm.Generate(ctx, prompt, model, nil)
 	if err != nil {
 		return "", err
 	}
