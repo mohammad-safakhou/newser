@@ -111,8 +111,8 @@ export default function NewTopicWizard({ onClose, onCreated }: Props) {
           </div>
         </header>
         <div className="flex-1 overflow-y-auto" ref={scrollRef}>
-          {step === 0 && <StepIdea name={name} setName={setName} goalMsg={goalMsg} setGoalMsg={setGoalMsg} conversation={assistConversation} sendAssist={sendAssist} loading={assistMut.isPending} provisional={provisional} />}
-          {step === 1 && <StepPreferences provisional={provisional} prefMessage={prefMessage} setPrefMessage={setPrefMessage} refine={refinePrefs} loading={prefsMut.isPending} diffs={prefDiffs} />}
+          {step === 0 && <StepIdea name={name} setName={setName} goalMsg={goalMsg} setGoalMsg={setGoalMsg} conversation={assistConversation} sendAssist={sendAssist} loading={assistMut.isPending} provisional={provisional} setProvisional={setProvisional} />}
+          {step === 1 && <StepPreferences provisional={provisional} setProvisional={setProvisional} prefMessage={prefMessage} setPrefMessage={setPrefMessage} refine={refinePrefs} loading={prefsMut.isPending} diffs={prefDiffs} />}
           {step === 2 && <StepSchedule scheduleCron={scheduleCron} setScheduleCron={setScheduleCron} error={cronError} />}
           {step === 3 && <StepReview provisional={provisional} scheduleCron={scheduleCron} prefDiffs={prefDiffs} creating={createMut.isPending || finalizing} />}
         </div>
@@ -127,7 +127,7 @@ export default function NewTopicWizard({ onClose, onCreated }: Props) {
   )
 }
 
-  function StepIdea({ name, setName, goalMsg, setGoalMsg, conversation, sendAssist, loading, provisional }: {
+  function StepIdea({ name, setName, goalMsg, setGoalMsg, conversation, sendAssist, loading, provisional, setProvisional }: {
     name: string
     setName: (v: string) => void
     goalMsg: string
@@ -136,12 +136,35 @@ export default function NewTopicWizard({ onClose, onCreated }: Props) {
     sendAssist: () => void
     loading: boolean
     provisional: ProvisionalTopic
+    setProvisional: (fn: any) => void
   }) {
+  const applyPreset = (preset: string) => {
+    const base: any = { search: { count: 20, freshness: 'pw', safesearch: 'moderate' }, analysis: { min_credibility: 0.5, key_topics_limit: 10, relevance_weight: 0.4, credibility_weight: 0.3, importance_weight: 0.3, sentiment_mode: 'detect' } }
+    if (preset === 'US Daily') {
+      base.search.country = 'US'; base.search.search_lang = 'en'; base.search.ui_lang = 'en-US';
+      base.search.domains_preferred = ['reuters.com','apnews.com','bbc.com','npr.org']
+    } else if (preset === 'Markets AM') {
+      base.search.country = 'US'; base.search.search_lang = 'en'; base.search.ui_lang = 'en-US';
+      base.search.domains_preferred = ['bloomberg.com','ft.com','wsj.com','cnbc.com']
+    } else if (preset === 'Policy Watch') {
+      base.search.country = 'US'; base.search.search_lang = 'en'; base.search.ui_lang = 'en-US';
+      base.search.domains_preferred = ['politico.com','axios.com','nytimes.com','washingtonpost.com']
+    }
+    setProvisional((p: ProvisionalTopic) => ({ ...p, preferences: { ...(p.preferences||{}), ...base } }))
+  }
   return (
     <div className="p-6 space-y-6">
       <div className="space-y-2">
         <label className="text-xs font-medium text-slate-400">Topic Name</label>
         <input className="input text-sm" value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Global Renewable Energy Trends" />
+      </div>
+      <div className="space-y-2">
+        <label className="text-xs font-medium text-slate-400">Preset</label>
+        <div className="flex gap-2">
+          {['US Daily','Markets AM','Policy Watch'].map(p=> (
+            <button key={p} type="button" onClick={()=>applyPreset(p)} className="btn-secondary text-xs px-3">{p}</button>
+          ))}
+        </div>
       </div>
       <div className="space-y-2">
         <label className="text-xs font-medium text-slate-400">Describe your goal / scope</label>
@@ -163,7 +186,40 @@ export default function NewTopicWizard({ onClose, onCreated }: Props) {
   )
 }
 
-function StepPreferences({ provisional, prefMessage, setPrefMessage, refine, loading, diffs }: any) {
+function StepPreferences({ provisional, setProvisional, prefMessage, setPrefMessage, refine, loading, diffs }: any) {
+  const search = (provisional.preferences?.search || {}) as any
+  const analysis = (provisional.preferences?.analysis || {}) as any
+  const kg = (provisional.preferences?.knowledge_graph || {}) as any
+  const conflict = (provisional.preferences?.conflict || {}) as any
+  const setSearch = (patch: any) => {
+    setProvisional((p: ProvisionalTopic) => {
+      const prefs = { ...(p.preferences || {}) }
+      const nextSearch = { ...(prefs.search || {}), ...patch }
+      return { ...p, preferences: { ...prefs, search: nextSearch } }
+    })
+  }
+  const setAnalysis = (patch: any) => {
+    setProvisional((p: ProvisionalTopic) => {
+      const prefs = { ...(p.preferences || {}) }
+      const next = { ...(prefs.analysis || {}), ...patch }
+      return { ...p, preferences: { ...prefs, analysis: next } }
+    })
+  }
+  const setKG = (patch: any) => {
+    setProvisional((p: ProvisionalTopic) => {
+      const prefs = { ...(p.preferences || {}) }
+      const next = { ...(prefs.knowledge_graph || {}), ...patch }
+      return { ...p, preferences: { ...prefs, knowledge_graph: next } }
+    })
+  }
+  const setConflict = (patch: any) => {
+    setProvisional((p: ProvisionalTopic) => {
+      const prefs = { ...(p.preferences || {}) }
+      const next = { ...(prefs.conflict || {}), ...patch }
+      return { ...p, preferences: { ...prefs, conflict: next } }
+    })
+  }
+  const parseCsv = (s: string) => s.split(',').map(x=>x.trim()).filter(Boolean)
   return (
     <div className="p-6 space-y-6">
       <div>
@@ -173,6 +229,125 @@ function StepPreferences({ provisional, prefMessage, setPrefMessage, refine, loa
       <div className="flex gap-2">
         <input className="input text-xs flex-1" value={prefMessage} onChange={e=>setPrefMessage(e.target.value)} placeholder="e.g. Add bias detection and focus on APAC markets" />
         <button type="button" onClick={refine} disabled={!prefMessage.trim() || loading} className="btn text-xs px-4">{loading ? '...' : 'Refine'}</button>
+      </div>
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="space-y-3 bg-slate-900/50 border border-slate-800 rounded p-3">
+          <h5 className="text-xs uppercase tracking-wide text-slate-400 font-medium">Search Preferences</h5>
+          <div className="flex items-center justify-between gap-2">
+            <label className="text-xs text-slate-300">Strict domain mode</label>
+            <input type="checkbox" className="h-4 w-4" checked={!!search.strict_domains} onChange={e=>setSearch({ strict_domains: e.target.checked })} />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs text-slate-400">Preferred domains (comma-separated)</label>
+            <input className="input text-xs" value={(search.domains_preferred||[]).join(', ')} onChange={e=>setSearch({ domains_preferred: parseCsv(e.target.value) })} placeholder="e.g. reuters.com, apnews.com, bbc.com" />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs text-slate-400">Blocked domains (comma-separated)</label>
+            <input className="input text-xs" value={(search.domains_blocked||[]).join(', ')} onChange={e=>setSearch({ domains_blocked: parseCsv(e.target.value) })} placeholder="e.g. example.com, lowtrust.com" />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <label className="text-xs text-slate-400">Safesearch</label>
+              <select className="input text-xs" value={search.safesearch||''} onChange={e=>setSearch({ safesearch: e.target.value })}>
+                <option value="">Default</option>
+                <option value="off">off</option>
+                <option value="moderate">moderate</option>
+                <option value="strict">strict</option>
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs text-slate-400">Freshness</label>
+              <select className="input text-xs" value={search.freshness||''} onChange={e=>setSearch({ freshness: e.target.value })}>
+                <option value="">Auto</option>
+                <option value="pd">24h</option>
+                <option value="pw">7d</option>
+                <option value="pm">31d</option>
+                <option value="py">365d</option>
+              </select>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <label className="text-xs text-slate-400">Search language</label>
+              <input className="input text-xs" value={search.search_lang||''} onChange={e=>setSearch({ search_lang: e.target.value })} placeholder="e.g. en" />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs text-slate-400">UI language</label>
+              <input className="input text-xs" value={search.ui_lang||''} onChange={e=>setSearch({ ui_lang: e.target.value })} placeholder="e.g. en-US" />
+            </div>
+          </div>
+          <p className="text-[11px] text-slate-500">When strict domain mode is on, search results are limited to preferred domains. Blocked domains are excluded regardless.</p>
+        </div>
+        <div className="space-y-3">
+          <div className="bg-slate-900/50 border border-slate-800 rounded p-3 space-y-2">
+            <h5 className="text-xs uppercase tracking-wide text-slate-400 font-medium">Analysis</h5>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="text-xs text-slate-400">Min credibility
+                <input type="number" step="0.05" min={0} max={1} className="input text-xs" value={analysis.min_credibility ?? ''} onChange={e=>setAnalysis({ min_credibility: parseFloat(e.target.value) || 0 })} />
+              </label>
+              <label className="text-xs text-slate-400">Sources limit
+                <input type="number" min={1} className="input text-xs" value={analysis.sources_limit ?? ''} onChange={e=>setAnalysis({ sources_limit: parseInt(e.target.value||'0') })} />
+              </label>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <label className="text-xs text-slate-400">Relevance
+                <input type="number" step="0.1" min={0} max={1} className="input text-xs" value={analysis.relevance_weight ?? ''} onChange={e=>setAnalysis({ relevance_weight: parseFloat(e.target.value)||0 })} />
+              </label>
+              <label className="text-xs text-slate-400">Credibility
+                <input type="number" step="0.1" min={0} max={1} className="input text-xs" value={analysis.credibility_weight ?? ''} onChange={e=>setAnalysis({ credibility_weight: parseFloat(e.target.value)||0 })} />
+              </label>
+              <label className="text-xs text-slate-400">Importance
+                <input type="number" step="0.1" min={0} max={1} className="input text-xs" value={analysis.importance_weight ?? ''} onChange={e=>setAnalysis({ importance_weight: parseFloat(e.target.value)||0 })} />
+              </label>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="text-xs text-slate-400">Key topics limit
+                <input type="number" min={1} className="input text-xs" value={analysis.key_topics_limit ?? ''} onChange={e=>setAnalysis({ key_topics_limit: parseInt(e.target.value||'0') })} />
+              </label>
+              <label className="text-xs text-slate-400">Sentiment mode
+                <select className="input text-xs" value={analysis.sentiment_mode || ''} onChange={e=>setAnalysis({ sentiment_mode: e.target.value })}>
+                  <option value="">none</option>
+                  <option value="detect">detect</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div className="bg-slate-900/50 border border-slate-800 rounded p-3 space-y-2">
+            <h5 className="text-xs uppercase tracking-wide text-slate-400 font-medium">Knowledge Graph</h5>
+            <div className="space-y-1">
+              <label className="text-xs text-slate-400">Entity types (comma-separated)</label>
+              <input className="input text-xs" value={(kg.entity_types||[]).join(', ')} onChange={e=>setKG({ entity_types: parseCsv(e.target.value) })} placeholder="person, organization, location, event" />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs text-slate-400">Relation types (comma-separated)</label>
+              <input className="input text-xs" value={(kg.relation_types||[]).join(', ')} onChange={e=>setKG({ relation_types: parseCsv(e.target.value) })} placeholder="partnership, acquisition, competition" />
+            </div>
+          </div>
+          <div className="bg-slate-900/50 border border-slate-800 rounded p-3 space-y-2">
+            <h5 className="text-xs uppercase tracking-wide text-slate-400 font-medium">Conflict Detection</h5>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="text-xs text-slate-400">Threshold
+                <input type="number" step="0.05" min={0} max={1} className="input text-xs" value={conflict.contradictory_threshold ?? ''} onChange={e=>setConflict({ contradictory_threshold: parseFloat(e.target.value) || 0 })} />
+              </label>
+              <label className="text-xs text-slate-400">Grouping by
+                <select className="input text-xs" value={conflict.grouping_by || ''} onChange={e=>setConflict({ grouping_by: e.target.value })}>
+                  <option value="">topic</option>
+                  <option value="topic">topic</option>
+                  <option value="claim">claim</option>
+                  <option value="source">source</option>
+                </select>
+              </label>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs text-slate-300">Require citations</label>
+              <input type="checkbox" className="h-4 w-4" checked={!!conflict.require_citations} onChange={e=>setConflict({ require_citations: e.target.checked })} />
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs text-slate-300">Stance detection</label>
+              <input type="checkbox" className="h-4 w-4" checked={!!conflict.stance_detection} onChange={e=>setConflict({ stance_detection: e.target.checked })} />
+            </div>
+          </div>
+        </div>
       </div>
       <div className="grid md:grid-cols-2 gap-4">
         <div className="space-y-2">

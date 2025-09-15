@@ -15,6 +15,8 @@ function tokenize(text: string): any[] {
   let i = 0
   while (i < lines.length) {
     const line = lines[i]
+    // horizontal rule
+    if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { tokens.push({ type: 'hr' }); i++; continue }
     // code fence
     if (/^```/.test(line)) {
       const fence = line.replace(/^```\s*/, '')
@@ -28,6 +30,13 @@ function tokenize(text: string): any[] {
     // heading
     const m = /^(#{1,6})\s+(.*)$/.exec(line)
     if (m) { tokens.push({ type: 'heading', depth: m[1].length, text: m[2] }); i++; continue }
+    // blockquote
+    if (/^>\s?/.test(line)) {
+      const buf: string[] = []
+      while (i < lines.length && /^>\s?/.test(lines[i])) { buf.push(lines[i].replace(/^>\s?/, '')); i++ }
+      tokens.push({ type: 'quote', text: buf.join('\n') })
+      continue
+    }
     // list (ul)
     if (/^\s*[-*]\s+/.test(line)) {
       const items: string[] = []
@@ -99,6 +108,14 @@ export default function MarkdownView({ markdown }: { markdown: string }) {
     }
     if (t.type === 'ol') {
       out.push(<ol key={out.length} className="list-decimal pl-5 space-y-1">{t.items.map((li:string,i:number)=>(<li key={i}>{inlineParts(li)}</li>))}</ol>)
+      continue
+    }
+    if (t.type === 'hr') {
+      out.push(<hr key={out.length} className="my-3 border-slate-700" />)
+      continue
+    }
+    if (t.type === 'quote') {
+      out.push(<blockquote key={out.length} className="border-l-4 border-slate-600 pl-3 text-slate-300 italic">{inlineParts(t.text)}</blockquote>)
       continue
     }
     if (t.type === 'code') {

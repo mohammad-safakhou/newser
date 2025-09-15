@@ -125,6 +125,10 @@ func Run(cfg *config.Config) error {
 	rh := NewRunsHandler(cfg, auth.Store, orch)
 	rh.Register(api.Group("/topics"), auth.Secret)
 
+	// ops endpoints (authenticated)
+	oh := NewOpsHandler(orch)
+	oh.Register(api.Group("/ops", func(next echo.HandlerFunc) echo.HandlerFunc { return withAuth(next, auth.Secret) }))
+
 	// start scheduler (with redis for locks) using AppConfig
 	var rdb *redis.Client
 	if cfg.Storage.Redis.Host == "" || cfg.Storage.Redis.Port == "" {

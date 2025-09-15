@@ -1,0 +1,16 @@
+{
+  "summary": "Daily US news roundup.",
+  "detailed_report": "...",
+  "items": [
+    {"title":"A","summary":"x","category":"top","tags":["us"],"published_at":"2025-09-15T10:00:00Z","sources":[{"url":"https://www.reuters.com/x","domain":"reuters.com"}],"importance":0.9,"confidence":0.8},
+    {"title":"B","summary":"x","category":"policy","tags":["us"],"published_at":"2025-09-15T09:00:00Z","sources":[{"url":"https://apnews.com/x","domain":"apnews.com"}],"importance":0.8,"confidence":0.8},
+    {"title":"C","summary":"x","category":"politics","tags":["us"],"published_at":"2025-09-15T08:00:00Z","sources":[{"url":"https://www.nytimes.com/x","domain":"nytimes.com"}],"importance":0.7,"confidence":0.7},
+    {"title":"D","summary":"x","category":"legal","tags":["us"],"published_at":"2025-09-15T07:00:00Z","sources":[{"url":"https://www.bloomberg.com/x","domain":"bloomberg.com"}],"importance":0.6,"confidence":0.7},
+    {"title":"E","summary":"x","category":"markets","tags":["us"],"published_at":"2025-09-15T06:00:00Z","sources":[{"url":"https://www.ft.com/x","domain":"ft.com"}],"importance":0.5,"confidence":0.7},
+    {"title":"F","summary":"x","category":"other","tags":["us"],"published_at":"2025-09-15T05:00:00Z","sources":[{"url":"https://www.bbc.com/x","domain":"bbc.com"}],"importance":0.4,"confidence":0.7}
+  ],
+  "highlights": [],
+  "conflicts": [],
+  "confidence": 0.8
+}
+

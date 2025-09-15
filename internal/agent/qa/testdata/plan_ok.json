@@ -1,0 +1,12 @@
+{
+  "tasks": [
+    {"id":"r1","type":"research","description":"Collect sources"},
+    {"id":"a1","type":"analysis","description":"Score relevance"},
+    {"id":"kg1","type":"knowledge_graph","description":"Extract graph"},
+    {"id":"s1","type":"synthesis","description":"Build final report"}
+  ],
+  "execution_order": ["r1","a1","kg1","s1"],
+  "confidence": 0.9,
+  "reasoning": "minimal tasks"
+}
+
