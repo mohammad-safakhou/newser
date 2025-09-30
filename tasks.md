@@ -37,16 +37,16 @@ Split the Go monolith into distinct services communicating via durable message q
 Centralize secrets and environment configuration. Remove hard-coded credentials, enforce rotation, and secure CI/CD.
 
 **Tasks**
-- [ ] Inventory existing configuration and remove any leaked secrets.
-- [ ] Introduce `.env` templates and integrate SOPS/Vault for runtime secret injection.
-- [ ] Update CI/CD to support masked secrets and local dev fallbacks.
-- [ ] Add automated secret scanning (Gitleaks) with CI enforcement.
+- [x] Inventory existing configuration and remove any leaked secrets.
+- [x] Introduce `.env` templates and integrate SOPS/Vault for runtime secret injection.
+- [x] Update CI/CD to support masked secrets and local dev fallbacks.
+- [x] Add automated secret scanning (Gitleaks) with CI enforcement.
 
 **Acceptance Criteria**
 
-- [ ] No secrets exist in repo or sample configs.
-- [ ] Secrets rotate successfully and CI blocks on leakage.
-- [ ] Developers can start system via `.env` without manual hacks.
+- [x] No secrets exist in repo or sample configs.
+- [x] Secrets rotate successfully and CI blocks on leakage.
+- [x] Developers can start system via `.env` without manual hacks.
 
 ---
 
@@ -55,18 +55,18 @@ Centralize secrets and environment configuration. Remove hard-coded credentials,
 Provide full observability across all services with unified tracing and metrics.
 
 **Tasks**
-- [ ] Instrument services with OpenTelemetry for spans (tokens, durations, cost).
-- [ ] Deploy OTLP Collector + Prometheus scraping in Compose.
-- [ ] Build Grafana dashboards: latency, queue depth, run duration, token costs.
-- [ ] Add alerting thresholds (queue backlog, API latency).
-- [ ] Aggregate cost telemetry per topic nightly.
+- [x] Instrument services with OpenTelemetry for spans (tokens, durations, cost).
+- [x] Deploy OTLP Collector + Prometheus scraping in Compose.
+- [x] Build Grafana dashboards: latency, queue depth, run duration, token costs.
+- [x] Add alerting thresholds (queue backlog, API latency).
+- [x] Aggregate cost telemetry per topic nightly.
 
 **Acceptance Criteria**
 
-- [ ] Traces visible in Grafana for all services.
-- [ ] Alerts trigger when thresholds exceeded.
-- [ ] Token/cost telemetry captured correctly.
-- [ ] System metrics visible in Grafana.
+- [x] Traces visible in Grafana for all services.
+- [x] Alerts trigger when thresholds exceeded.
+- [x] Token/cost telemetry captured correctly.
+- [x] System metrics visible in Grafana.
 
 ---
 
@@ -75,18 +75,18 @@ Provide full observability across all services with unified tracing and metrics.
 Ensure every execution runs inside an auditable sandbox with strict resource and network limits.
 
 **Tasks**
-- [ ] Evaluate NSJail vs Docker for sandbox execution.
-- [ ] Define security policy config (allowlists, resource/time/memory caps).
-- [ ] Integrate policy enforcement before each executor launch.
-- [ ] Add HTML sanitization and XSS regression tests.
-- [ ] Extract unified JWT auth shared across all binaries.
+- [x] Evaluate NSJail vs Docker for sandbox execution.
+- [x] Define security policy config (allowlists, resource/time/memory caps).
+- [x] Integrate policy enforcement before each executor launch.
+- [x] Add HTML sanitization and XSS regression tests.
+- [x] Extract unified JWT auth shared across all binaries.
 
 **Acceptance Criteria**
 
-- [ ] All tool runs show sandbox = true in logs.
-- [ ] Policy violations safely abort execution.
-- [ ] No XSS vulnerabilities.
-- [ ] Auth consistent across services.
+- [x] All tool runs show sandbox = true in logs.
+- [x] Policy violations safely abort execution.
+- [x] No XSS vulnerabilities.
+- [x] Auth consistent across services.
 
 ---
 

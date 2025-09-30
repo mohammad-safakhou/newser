@@ -19,6 +19,7 @@ type Config struct {
 	Agents    AgentsConfig    `mapstructure:"agents"`
 	Sources   SourcesConfig   `mapstructure:"sources"`
 	Storage   StorageConfig   `mapstructure:"storage"`
+	Security  SecurityConfig  `mapstructure:"security"`
 }
 
 // ServerConfig contains HTTP server and auth settings
@@ -75,11 +76,21 @@ type LLMRoutingConfig struct {
 
 // TelemetryConfig contains telemetry and monitoring settings
 type TelemetryConfig struct {
-	Enabled      bool   `mapstructure:"enabled"`
-	MetricsPort  int    `mapstructure:"metrics_port"`
-	LogFile      string `mapstructure:"log_file"`
-	CostTracking bool   `mapstructure:"cost_tracking"`
-	PeriodicLogs bool   `mapstructure:"periodic_logs"`
+    Enabled      bool   `mapstructure:"enabled"`
+    MetricsPort  int    `mapstructure:"metrics_port"`
+    LogFile      string `mapstructure:"log_file"`
+    CostTracking bool   `mapstructure:"cost_tracking"`
+    PeriodicLogs bool   `mapstructure:"periodic_logs"`
+    OTLPEndpoint string `mapstructure:"otlp_endpoint"`
+}
+
+// SecurityConfig declares sandbox policy defaults.
+type SecurityConfig struct {
+    SandboxProvider string        `mapstructure:"sandbox_provider"`
+    PolicyFile      string        `mapstructure:"policy_file"`
+    DefaultTimeout  time.Duration `mapstructure:"default_timeout"`
+    DefaultCPU      float64       `mapstructure:"default_cpu"`
+    DefaultMemory   string        `mapstructure:"default_memory"`
 }
 
 // AgentsConfig contains agent-specific settings

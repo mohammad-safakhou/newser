@@ -17,6 +17,7 @@ import (
 	"github.com/mohammad-safakhou/newser/config"
 	agentcore "github.com/mohammad-safakhou/newser/internal/agent/core"
 	agenttele "github.com/mohammad-safakhou/newser/internal/agent/telemetry"
+	"github.com/mohammad-safakhou/newser/internal/runtime"
 	"github.com/mohammad-safakhou/newser/internal/store"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
@@ -102,11 +103,11 @@ func Run(cfg *config.Config) error {
 	e.GET("/metrics", echo.WrapHandler(promhttp.Handler()))
 
 	// init auth and routes
-	secret := cfg.Server.JWTSecret
-	if secret == "" {
-		return fmt.Errorf("jwt secret not configured (general.jwt_secret)")
+	secret, err := runtime.LoadJWTSecret(cfg)
+	if err != nil {
+		return err
 	}
-	auth, err := initAuth(ctx, st, []byte(secret))
+	auth, err := initAuth(ctx, st, secret)
 	if err != nil {
 		return err
 	}
@@ -116,7 +117,7 @@ func Run(cfg *config.Config) error {
 
 	// protected group example
 	me := api.Group("/me")
-	me.Use(func(next echo.HandlerFunc) echo.HandlerFunc { return withAuth(next, auth.Secret) })
+	me.Use(runtime.EchoAuthMiddleware(auth.Secret))
 	me.GET("", meHandler)
 
 	th := &TopicsHandler{Store: auth.Store, LLM: llmProvider, Model: cfg.LLM.Routing.Chatting}
@@ -127,7 +128,7 @@ func Run(cfg *config.Config) error {
 
 	// ops endpoints (authenticated)
 	oh := NewOpsHandler(orch)
-	oh.Register(api.Group("/ops", func(next echo.HandlerFunc) echo.HandlerFunc { return withAuth(next, auth.Secret) }))
+	oh.Register(api.Group("/ops", runtime.EchoAuthMiddleware(auth.Secret)))
 
 	// start scheduler (with redis for locks) using AppConfig
 	var rdb *redis.Client

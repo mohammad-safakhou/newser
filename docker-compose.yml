@@ -61,6 +61,8 @@ services:
         condition: service_healthy
       migration:
         condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
     environment:
       NEWSER_STORAGE_POSTGRES_HOST: postgres
       NEWSER_STORAGE_POSTGRES_PORT: "5432"
@@ -72,6 +74,7 @@ services:
       CORS_ALLOW_ORIGINS: "http://localhost:3000"
       JWT_SECRET: dev-secret-change-me
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      NEWSER_TELEMETRY_OTLP_ENDPOINT: otel-collector:4317
     entrypoint: ["/usr/local/bin/api"]
     command: ["--config", "/app/config/config.json"]
     ports:
@@ -86,6 +89,8 @@ services:
         condition: service_healthy
       migration:
         condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
     environment:
       NEWSER_STORAGE_POSTGRES_HOST: postgres
       NEWSER_STORAGE_POSTGRES_PORT: "5432"
@@ -94,6 +99,7 @@ services:
       NEWSER_STORAGE_POSTGRES_DB: newser
       NEWSER_STORAGE_REDIS_HOST: redis
       NEWSER_STORAGE_REDIS_PORT: "6379"
+      NEWSER_TELEMETRY_OTLP_ENDPOINT: otel-collector:4317
     entrypoint: ["/usr/local/bin/worker"]
     command: ["--config", "/app/config/config.json"]
     volumes:
@@ -106,6 +112,8 @@ services:
         condition: service_healthy
       migration:
         condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
     environment:
       NEWSER_STORAGE_POSTGRES_HOST: postgres
       NEWSER_STORAGE_POSTGRES_PORT: "5432"
@@ -114,6 +122,7 @@ services:
       NEWSER_STORAGE_POSTGRES_DB: newser
       NEWSER_STORAGE_REDIS_HOST: redis
       NEWSER_STORAGE_REDIS_PORT: "6379"
+      NEWSER_TELEMETRY_OTLP_ENDPOINT: otel-collector:4317
     entrypoint: ["/usr/local/bin/executor"]
     command: ["--config", "/app/config/config.json"]
     volumes:
@@ -126,6 +135,8 @@ services:
         condition: service_healthy
       migration:
         condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
     environment:
       NEWSER_STORAGE_POSTGRES_HOST: postgres
       NEWSER_STORAGE_POSTGRES_PORT: "5432"
@@ -134,6 +145,7 @@ services:
       NEWSER_STORAGE_POSTGRES_DB: newser
       NEWSER_STORAGE_REDIS_HOST: redis
       NEWSER_STORAGE_REDIS_PORT: "6379"
+      NEWSER_TELEMETRY_OTLP_ENDPOINT: otel-collector:4317
     entrypoint: ["/usr/local/bin/crawler"]
     command: ["--config", "/app/config/config.json"]
     volumes:
@@ -146,6 +158,8 @@ services:
         condition: service_healthy
       migration:
         condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
     environment:
       NEWSER_STORAGE_POSTGRES_HOST: postgres
       NEWSER_STORAGE_POSTGRES_PORT: "5432"
@@ -154,10 +168,48 @@ services:
       NEWSER_STORAGE_POSTGRES_DB: newser
       NEWSER_STORAGE_REDIS_HOST: redis
       NEWSER_STORAGE_REDIS_PORT: "6379"
+      NEWSER_TELEMETRY_OTLP_ENDPOINT: otel-collector:4317
     entrypoint: ["/usr/local/bin/memory"]
     command: ["--config", "/app/config/config.json"]
     volumes:
       - ./config:/app/config:ro
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.102.0
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+    command: ["--config=/etc/otelcol/config.yaml"]
+    ports:
+      - "4317:4317"
+
+  tempo:
+    image: grafana/tempo:2.4.1
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo.yaml:ro
+    command: ["-config.file=/etc/tempo.yaml"]
+    ports:
+      - "3200:3200"
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alert.rules.yml:/etc/prometheus/alert.rules.yml:ro
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=24h"]
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./observability/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./observability/grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - tempo
 
   webui:
     build:

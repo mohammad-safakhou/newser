@@ -21,6 +21,8 @@ import (
 	tcPostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	tcRedis "github.com/testcontainers/testcontainers-go/modules/redis"
 	"github.com/testcontainers/testcontainers-go/wait"
+	otelnoop "go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestWorkerResumeFromCheckpoint(t *testing.T) {
@@ -119,7 +121,9 @@ func TestWorkerResumeFromCheckpoint(t *testing.T) {
 
 	// First processor run (simulate crash after dispatch).
 	consumer1 := consumeRedis("consumer-1")
-	proc := worker.NewProcessor(log.New(os.Stdout, "[TEST] ", log.LstdFlags), st, publisher, consumer1, worker.StreamRunEnqueued, worker.StreamTaskDispatch)
+	noopMeter := otelnoop.NewMeterProvider().Meter("worker-test")
+	noopTracer := trace.NewNoopTracerProvider().Tracer("worker-test")
+	proc := worker.NewProcessor(log.New(os.Stdout, "[TEST] ", log.LstdFlags), st, publisher, consumer1, worker.StreamRunEnqueued, worker.StreamTaskDispatch, noopMeter, noopTracer)
 
 	ctx1, cancel1 := context.WithCancel(ctx)
 	done1 := make(chan error, 1)
@@ -160,7 +164,7 @@ func TestWorkerResumeFromCheckpoint(t *testing.T) {
 
 	// Restart processor to trigger resume.
 	consumer2 := consumeRedis("consumer-2")
-	proc2 := worker.NewProcessor(log.New(os.Stdout, "[TEST] ", log.LstdFlags), st, publisher, consumer2, worker.StreamRunEnqueued, worker.StreamTaskDispatch)
+	proc2 := worker.NewProcessor(log.New(os.Stdout, "[TEST] ", log.LstdFlags), st, publisher, consumer2, worker.StreamRunEnqueued, worker.StreamTaskDispatch, noopMeter, noopTracer)
 	ctx2, cancel2 := context.WithTimeout(ctx, 2*time.Second)
 	done2 := make(chan error, 1)
 	go func() {

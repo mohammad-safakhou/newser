@@ -13,6 +13,7 @@ import (
 	"github.com/labstack/echo/v4"
 	agentcore "github.com/mohammad-safakhou/newser/internal/agent/core"
 	"github.com/mohammad-safakhou/newser/internal/helpers"
+	"github.com/mohammad-safakhou/newser/internal/runtime"
 	"github.com/mohammad-safakhou/newser/internal/store"
 )
 
@@ -23,7 +24,7 @@ type TopicsHandler struct {
 }
 
 func (h *TopicsHandler) Register(g *echo.Group, secret []byte) {
-	g.Use(func(next echo.HandlerFunc) echo.HandlerFunc { return withAuth(next, secret) })
+	g.Use(runtime.EchoAuthMiddleware(secret))
 	g.GET("", h.list)
 	g.POST("", h.create)
 	// Assist sub-group to avoid param route ambiguity

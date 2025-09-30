@@ -1,0 +1,14 @@
+sandbox:
+  provider: docker
+  image: alpine:3.20
+  cpu: 1
+  memory: 1Gi
+  timeout: 120s
+  network:
+    enabled: false
+    allowlist: []
+  env_allowlist:
+    - HOME
+    - LANG
+  mount_readonly:
+    - /etc/ssl/certs

@@ -8,10 +8,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
-	pq "github.com/lib/pq"
+	"github.com/lib/pq"
 	core "github.com/mohammad-safakhou/newser/internal/agent/core"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	otelmetric "go.opentelemetry.io/otel/metric"
 )
 
 type Store struct {
@@ -43,6 +47,27 @@ type SchemaRecord struct {
 	Schema    []byte
 	Checksum  string
 	CreatedAt time.Time
+}
+
+var (
+	metricsOnce    sync.Once
+	costCounter    otelmetric.Float64Counter
+	tokenCounter   otelmetric.Int64Counter
+	metricsInitErr error
+)
+
+func initStoreMetrics() {
+	meter := otel.Meter("store")
+	var err error
+	costCounter, err = meter.Float64Counter("processing_cost_total")
+	if err != nil {
+		metricsInitErr = err
+		return
+	}
+	tokenCounter, err = meter.Int64Counter("processing_tokens_total")
+	if err != nil {
+		metricsInitErr = err
+	}
 }
 
 func New(ctx context.Context) (*Store, error) {
@@ -308,7 +333,22 @@ ON CONFLICT (id) DO UPDATE SET
 		pr.ID, userThought, pr.Summary, pr.DetailedReport, sources, highlights, conflicts,
 		pr.Confidence, int64(pr.ProcessingTime), pr.CostEstimate, pr.TokensUsed, agents, models, metadata, fp,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	metricsOnce.Do(initStoreMetrics)
+	if metricsInitErr == nil {
+		attrs := []attribute.KeyValue{
+			attribute.String("run_id", pr.ID),
+		}
+		if costCounter != nil && pr.CostEstimate > 0 {
+			costCounter.Add(ctx, pr.CostEstimate, otelmetric.WithAttributes(attrs...))
+		}
+		if tokenCounter != nil && pr.TokensUsed > 0 {
+			tokenCounter.Add(ctx, pr.TokensUsed, otelmetric.WithAttributes(attrs...))
+		}
+	}
+	return nil
 }
 
 // SaveKnowledgeGraphFromMetadata extracts knowledge_graph from metadata and persists it for a topic

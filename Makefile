@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: up down logs fmt build test tidy serve cli migrate webui-install webui-build webui-clean serve-all swagger-install swagger swagger-clean
+.PHONY: up down logs fmt build test tidy serve cli migrate webui-install webui-build webui-clean serve-all swagger-install swagger swagger-clean gitleaks
 
 up:
 	docker compose up -d
@@ -22,6 +22,9 @@ build:
 
 test:
 	go test ./... -run . -count=1
+
+gitleaks:
+	docker run --rm -v $(PWD):/repo zricethezav/gitleaks:latest detect --source=/repo --config=/repo/.gitleaks.toml
 
 run:
 	go run ./

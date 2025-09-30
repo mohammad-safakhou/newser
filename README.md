@@ -14,14 +14,21 @@ on a schedule, ensuring users get relevant information without spam.
 - Start infra: `make up`
 - Env (example):
 ```bash
-export POSTGRES_HOST=localhost POSTGRES_PORT=5432 POSTGRES_USER=newser POSTGRES_PASSWORD=newser POSTGRES_DB=newser
-export OPENAI_API_KEY=sk-...
-export JWT_SECRET=dev-secret-change-me
+cp .env.example .env
+# edit .env with your secrets, then export for docker-compose or go run
+export $(grep -v '^#' .env | xargs)
 ```
+
+- Update sandbox policy as needed in `config/security_policy.yaml` before running executor tasks. Default provider is Docker with network disabled.
 - Build WebUI (optional, requires npm):
 ```bash
 make webui-build
 ```
+- Start observability stack (Prometheus, Tempo, Grafana) alongside services:
+```bash
+docker compose up otel-collector tempo prometheus grafana -d
+```
+
 - Run server (serves API and `webui/dist` if present):
 ```bash
 make serve
@@ -35,6 +42,9 @@ The repo ships with a multi-service compose file that runs Postgres, Redis, the 
 - Start everything: `docker compose up -d`
 - UI: http://localhost:3000 (proxies `/api` to the API container)
 - API: http://localhost:10001
+- Grafana: http://localhost:3001 (default credentials admin/admin)
+- Prometheus: http://localhost:9090
+- Tempo OTLP (traces): gRPC on `tempo:4317`
 
 Notes:
 - Chat/assist features require `OPENAI_API_KEY`. The API fails fast on startup if the key is missing.

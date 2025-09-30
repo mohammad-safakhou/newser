@@ -7,13 +7,13 @@
   },
   "server": {
     "address": ":10001",
-    "jwt_secret": "your_jwt_secret"
+    "jwt_secret": ""
   },
   "llm": {
     "providers": {
       "openai": {
         "type": "openai",
-        "api_key": "OpenAI_API_Key",
+        "api_key": "",
         "base_url": "https://api.openai.com/v1",
         "models": {
           "gpt-5": {
@@ -61,7 +61,15 @@
     "enabled": true,
     "metrics_port": 9090,
     "log_file": "./logs/telemetry.log",
-    "cost_tracking": true
+    "cost_tracking": true,
+    "otlp_endpoint": "otel-collector:4317"
+  },
+  "security": {
+    "sandbox_provider": "docker",
+    "policy_file": "config/security_policy.yaml",
+    "default_timeout": "120s",
+    "default_cpu": 1,
+    "default_memory": "1Gi"
   },
   "agents": {
     "max_concurrent_agents": 5,
@@ -105,7 +113,7 @@
       "host": "localhost",
       "port": "5432",
       "user": "newser",
-      "password": "newser",
+      "password": "",
       "dbname": "newser",
       "sslmode": "disable",
       "timeout": "5s"

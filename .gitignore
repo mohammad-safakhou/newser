@@ -3,4 +3,6 @@ runs
 .idea/
 .cursor
 config/local.config.json
+*.env
+.env
 todos/

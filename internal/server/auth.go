@@ -6,11 +6,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/mohammad-safakhou/newser/internal/runtime"
 	"github.com/mohammad-safakhou/newser/internal/store"
 )
 
@@ -84,11 +84,7 @@ func (a *AuthHandler) login(c echo.Context) error {
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) != nil {
 		return echo.NewHTTPError(http.StatusUnauthorized, "invalid credentials")
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub": id,
-		"exp": time.Now().Add(24 * time.Hour).Unix(),
-	})
-	signed, err := token.SignedString(a.Secret)
+	signed, err := runtime.SignJWT(id, a.Secret, 24*time.Hour)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
@@ -124,40 +120,9 @@ func (a *AuthHandler) logout(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
-func withAuth(next echo.HandlerFunc, secret []byte) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		// accept Bearer token or cookie
-		var tok string
-		if h := c.Request().Header.Get("Authorization"); len(h) > 7 && h[:7] == "Bearer " {
-			tok = h[7:]
-		}
-		if tok == "" {
-			ck, err := c.Cookie("auth")
-			if err != nil {
-				return echo.NewHTTPError(http.StatusUnauthorized, "missing auth cookie")
-			}
-			tok = ck.Value
-		}
-		token, err := jwt.Parse(tok, func(t *jwt.Token) (interface{}, error) { return secret, nil })
-		if err != nil || !token.Valid {
-			return echo.NewHTTPError(http.StatusUnauthorized, "invalid token")
-		}
-		if claims, ok := token.Claims.(jwt.MapClaims); ok {
-			if sub, ok := claims["sub"].(string); ok {
-				c.Set("user_id", sub)
-				return next(c)
-			}
-		}
-		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
-	}
-}
-
 func initAuth(ctx context.Context, st *store.Store, jwtSecret []byte) (*AuthHandler, error) {
 	if st == nil {
 		return nil, echo.NewHTTPError(http.StatusInternalServerError, "store not initialized")
-	}
-	if len(jwtSecret) == 0 {
-		jwtSecret = []byte("dev-secret-change-me")
 	}
 	return &AuthHandler{Store: st, Secret: jwtSecret}, nil
 }

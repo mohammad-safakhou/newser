@@ -1,0 +1,22 @@
+title = "Newser Gitleaks Config"
+
+[allowlist]
+regexes = [
+  # Allow placeholder secrets used in examples
+  "change-me",
+  "changeme",
+  "OpenAI_API_Key"
+]
+
+[[rules]]
+id = "generic-api-key"
+description = "Generic API Key"
+regex = '''(?i)(api[_-]?key|token|secret)[^\n]{0,20}[0-9a-zA-Z]{16,}'''
+[[rules.allowlist]]
+regexes = ["OpenAI_API_Key"]
+
+[[rules]]
+id = "jwt-secret"
+description = "JWT Secret"
+regex = '''(?i)jwt[_-]?secret[^\n]{0,20}[0-9a-zA-Z]{16,}'''
+

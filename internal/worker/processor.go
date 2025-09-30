@@ -9,6 +9,8 @@ import (
 
 	"github.com/mohammad-safakhou/newser/internal/queue/streams"
 	"github.com/mohammad-safakhou/newser/internal/store"
+	otelmetric "go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -32,12 +34,16 @@ type StoreAPI interface {
 
 // Processor drives run execution by consuming run.enqueued events and checkpointing progress.
 type Processor struct {
-	logger     *log.Logger
-	store      StoreAPI
-	consumer   *streams.Consumer
-	publisher  *streams.Publisher
-	runStream  string
-	taskStream string
+	logger       *log.Logger
+	store        StoreAPI
+	consumer     *streams.Consumer
+	publisher    *streams.Publisher
+	runStream    string
+	taskStream   string
+	tracer       trace.Tracer
+	runCounter   otelmetric.Int64Counter
+	taskCounter  otelmetric.Int64Counter
+	retryCounter otelmetric.Int64Counter
 }
 
 // RunEnqueuedPayload mirrors the JSON payload published to run.enqueued.
@@ -51,15 +57,36 @@ type RunEnqueuedPayload struct {
 }
 
 // NewProcessor constructs a Processor.
-func NewProcessor(logger *log.Logger, st StoreAPI, pub *streams.Publisher, cons *streams.Consumer, runStream, taskStream string) *Processor {
-	return &Processor{
+func NewProcessor(logger *log.Logger, st StoreAPI, pub *streams.Publisher, cons *streams.Consumer, runStream, taskStream string, meter otelmetric.Meter, tracer trace.Tracer) *Processor {
+	if tracer == nil {
+		tracer = trace.NewNoopTracerProvider().Tracer("worker")
+	}
+
+	proc := &Processor{
 		logger:     logger,
 		store:      st,
 		consumer:   cons,
 		publisher:  pub,
 		runStream:  runStream,
 		taskStream: taskStream,
+		tracer:     tracer,
 	}
+	if meter != nil {
+		var err error
+		proc.runCounter, err = meter.Int64Counter("worker_runs_processed")
+		if err != nil {
+			logger.Printf("warn: create run counter failed: %v", err)
+		}
+		proc.taskCounter, err = meter.Int64Counter("worker_tasks_dispatched")
+		if err != nil {
+			logger.Printf("warn: create task counter failed: %v", err)
+		}
+		proc.retryCounter, err = meter.Int64Counter("worker_checkpoint_retries")
+		if err != nil {
+			logger.Printf("warn: create retry counter failed: %v", err)
+		}
+	}
+	return proc
 }
 
 // Start blocks, continuously processing run.enqueued events until the context is cancelled.
@@ -99,6 +126,9 @@ func (p *Processor) Start(ctx context.Context) error {
 }
 
 func (p *Processor) handleRunEnqueued(ctx context.Context, msg streams.Message) error {
+	ctx, span := p.tracer.Start(ctx, "worker.handle_run")
+	defer span.End()
+
 	claimed, err := p.store.ClaimIdempotency(ctx, msg.Envelope.EventType, msg.Envelope.EventID)
 	if err != nil {
 		return fmt.Errorf("claim idempotency: %w", err)
@@ -141,6 +171,9 @@ func (p *Processor) handleRunEnqueued(ctx context.Context, msg streams.Message) 
 
 	if err := p.dispatchBootstrap(ctx, runID, payload); err != nil {
 		return err
+	}
+	if p.runCounter != nil {
+		p.runCounter.Add(ctx, 1)
 	}
 	return nil
 }
@@ -186,6 +219,9 @@ func (p *Processor) dispatchBootstrap(ctx context.Context, runID string, payload
 	if _, err := p.publisher.PublishRaw(ctx, p.taskStream, StreamTaskDispatch, "v1", taskPayload); err != nil {
 		return fmt.Errorf("publish task.dispatch: %w", err)
 	}
+	if p.taskCounter != nil {
+		p.taskCounter.Add(ctx, 1)
+	}
 	return nil
 }
 
@@ -209,6 +245,9 @@ func (p *Processor) resumePending(ctx context.Context) error {
 		cp.Retries++
 		if err := p.store.UpsertCheckpoint(ctx, cp); err != nil {
 			p.logger.Printf("warn: failed to bump retry count for run %s: %v", cp.RunID, err)
+		}
+		if p.retryCounter != nil {
+			p.retryCounter.Add(ctx, 1)
 		}
 	}
 	return nil

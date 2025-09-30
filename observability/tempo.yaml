@@ -1,0 +1,24 @@
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 4317
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+        http:
+
+compactor:
+  compaction:
+    block_retention: 24h
+
+ingester:
+  trace_idle_period: 10s
+  max_block_duration: 2h
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /tmp/tempo

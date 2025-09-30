@@ -1,0 +1,11 @@
+groups:
+  - name: worker-alerts
+    rules:
+      - alert: WorkerCheckpointRetrySpike
+        expr: increase(worker_checkpoint_retries_total[5m]) > 5
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker checkpoint retries high"
+          description: "Worker retried checkpoints more than 5 times in the last 5 minutes."

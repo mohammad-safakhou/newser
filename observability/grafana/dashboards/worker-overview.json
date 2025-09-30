@@ -1,0 +1,41 @@
+{
+  "title": "Worker Overview",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "30s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Runs Processed",
+      "targets": [
+        {
+          "expr": "increase(worker_runs_processed_total[5m])",
+          "legendFormat": "runs"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tasks Dispatched",
+      "targets": [
+        {
+          "expr": "increase(worker_tasks_dispatched_total[5m])",
+          "legendFormat": "tasks"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Checkpoint Retries",
+      "targets": [
+        {
+          "expr": "increase(worker_checkpoint_retries_total[5m])",
+          "legendFormat": "retries"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
+    }
+  ]
+}
