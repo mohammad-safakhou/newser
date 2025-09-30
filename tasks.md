@@ -17,19 +17,18 @@ This roadmap breaks the future architecture into **8 initiatives**, each contain
 Split the Go monolith into distinct services communicating via durable message queues. Establish isolation, reliability, and schema governance.
 
 **Tasks**
-- [ ] Audit current code (`internal/server`, scheduler, `internal/agent/core`) and define service boundaries with clear message responsibilities.
-- [ ] Choose Redis Streams; implement shared publish/consume libraries with schema validation and acknowledgment.
-- [ ] Scaffold new binaries (`cmd/api`, `cmd/worker`, `cmd/executor`, `cmd/crawler`, `cmd/memory`) and extend Docker Compose for multi-service deployment.
-- [ ] Implement checkpointed queue processing with idempotency keys and Postgres/Redis persistence.
-- [ ] Add a **Schema Registry** (JSON Schema/Protobuf) to validate and version message formats.
-- [ ] Add integration test simulating a worker crash and verifying resume from checkpoint.
+- [x] Audit current code (`internal/server`, scheduler, `internal/agent/core`) and define service boundaries with clear message responsibilities.
+- [x] Choose Redis Streams; implement shared publish/consume libraries with schema validation and acknowledgment.
+- [x] Scaffold new binaries (`cmd/api`, `cmd/worker`, `cmd/executor`, `cmd/crawler`, `cmd/memory`) and extend Docker Compose for multi-service deployment.
+- [x] Implement checkpointed queue processing with idempotency keys and Postgres/Redis persistence.
+- [x] Add a **Schema Registry** (JSON Schema/Protobuf) to validate and version message formats.
+- [x] Add integration test simulating a worker crash and verifying resume from checkpoint.
 
 **Acceptance Criteria**
 
-- [ ] All services start independently in Docker Compose.
-- [ ] Message schemas are validated through registry.
-- [ ] Crashed worker resumes job without duplication.
-- [ ] System metrics visible in Grafana.
+- [x] All services start independently in Docker Compose.
+- [x] Message schemas are validated through registry.
+- [x] Crashed worker resumes job without duplication.
 
 ---
 
@@ -67,6 +66,7 @@ Provide full observability across all services with unified tracing and metrics.
 - [ ] Traces visible in Grafana for all services.
 - [ ] Alerts trigger when thresholds exceeded.
 - [ ] Token/cost telemetry captured correctly.
+- [ ] System metrics visible in Grafana.
 
 ---
 
