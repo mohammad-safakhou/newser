@@ -166,7 +166,7 @@ func (p *Planner) createPlanningPrompt(thought UserThought) string {
 	}
 
 	caps := CapabilitiesDoc(p.config)
-    return fmt.Sprintf(`ROLE: Senior news intelligence planner focused on accuracy and usefulness. Ignore money/time costs; minimize tasks while maximizing quality.
+	return fmt.Sprintf(`ROLE: Senior news intelligence planner focused on accuracy and usefulness. Ignore money/time costs; minimize tasks while maximizing quality.
 
 USER THOUGHT / TOPIC:
 %s%s%s
@@ -196,7 +196,7 @@ PLANNING PRINCIPLES:
 
 SYNTHESIS TASK REQUIREMENTS:
 - Output MUST be itemized with an items[] array where each item has: title, summary, category (one of: top | policy | politics | legal | markets | other), tags[], published_at (ISO8601), sources[] with at least one primary/authoritative link (de‑prioritize Wikipedia as primary), importance (0..1), and confidence (0..1). Include archived_url when feasible.
-- Enforce complete sourcing and timestamps: 100% of items must include published_at and at least one source; drop items that do not meet this.
+- Enforce complete sourcing and timestamps: 100%% of items must include published_at and at least one source; drop items that do not meet this.
 - Category coverage: include sections for Top, Policy, Debate/Politics, Legal/Regulatory, and Quick Hits/Other with soft caps per bucket; anchors for sections/items.
 - Ordering must consume analysis signals: sort items primarily by importance and relevance as derived from analysis outputs and preference weights; prefer recency among ties.
 - Keep the summary concise (2–3 sentences); put depth in detailed_report with clear headings.
