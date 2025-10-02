@@ -6,3 +6,4 @@ config/local.config.json
 *.env
 .env
 todos/
+tools

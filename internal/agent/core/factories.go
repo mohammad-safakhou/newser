@@ -1,23 +1,24 @@
 package core
 
 import (
-    "bytes"
-    "context"
-    "database/sql"
-    "encoding/json"
-    "fmt"
-    "log"
-    "net/http"
-    // neturl "net/url"
-    "os"
-    "sort"
-    "strings"
-    "time"
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	// neturl "net/url"
+	"os"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 	"github.com/mohammad-safakhou/newser/config"
-	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
+	telemetrypkg "github.com/mohammad-safakhou/newser/internal/agent/telemetry"
+	"github.com/mohammad-safakhou/newser/internal/capability"
 	"github.com/mohammad-safakhou/newser/internal/helpers"
 )
 
@@ -45,33 +46,28 @@ func NewLLMProvider(cfg config.LLMConfig) (LLMProvider, error) {
 }
 
 // NewAgents creates all available agents
-func NewAgents(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetry.Telemetry) (map[string]Agent, error) {
+func NewAgents(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetrypkg.Telemetry, registry *capability.Registry) (map[string]Agent, error) {
 	agentsMap := make(map[string]Agent)
 
-	// Create research agent
-	researchAgent := NewResearchAgent(cfg, llmProvider, telemetry)
-	agentsMap["research"] = researchAgent
-
-	// Create analysis agent
-	analysisAgent := NewAnalysisAgent(cfg, llmProvider, telemetry)
-	agentsMap["analysis"] = analysisAgent
-
-	// Create synthesis agent
-	synthesisAgent := NewSynthesisAgent(cfg, llmProvider, telemetry)
-	agentsMap["synthesis"] = synthesisAgent
-
-	// Create conflict detection agent
-	conflictAgent := NewConflictDetectionAgent(cfg, llmProvider, telemetry)
-	agentsMap["conflict_detection"] = conflictAgent
-
-	// Create highlight management agent
-	highlightAgent := NewHighlightManagementAgent(cfg, llmProvider, telemetry)
-	agentsMap["highlight_management"] = highlightAgent
-
-	// Create knowledge graph agent
-	knowledgeAgent := NewKnowledgeGraphAgent(cfg, llmProvider, telemetry)
-	agentsMap["knowledge_graph"] = knowledgeAgent
-
+	required := []struct {
+		name    string
+		factory func(*config.Config, LLMProvider, *telemetrypkg.Telemetry) Agent
+	}{
+		{"research", NewResearchAgent},
+		{"analysis", NewAnalysisAgent},
+		{"synthesis", NewSynthesisAgent},
+		{"conflict_detection", NewConflictDetectionAgent},
+		{"highlight_management", NewHighlightManagementAgent},
+		{"knowledge_graph", NewKnowledgeGraphAgent},
+	}
+	for _, item := range required {
+		if registry != nil {
+			if _, ok := registry.Tool(item.name); !ok {
+				return nil, fmt.Errorf("tool %s not registered", item.name)
+			}
+		}
+		agentsMap[item.name] = item.factory(cfg, llmProvider, telemetry)
+	}
 	return agentsMap, nil
 }
 
@@ -481,6 +477,27 @@ CREATE TABLE IF NOT EXISTS processing_results (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 `)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+CREATE TABLE IF NOT EXISTS plan_graphs (
+    plan_id TEXT PRIMARY KEY,
+    thought_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    confidence DOUBLE PRECISION,
+    execution_order TEXT[] DEFAULT ARRAY[]::TEXT[],
+    budget JSONB,
+    estimates JSONB,
+    plan_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+`)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_plan_graphs_thought_id ON plan_graphs (thought_id);`)
 	return err
 }
 
@@ -626,12 +643,12 @@ type SimpleAgent struct {
 	agentType   string
 	config      *config.Config
 	llmProvider LLMProvider
-	telemetry   *telemetry.Telemetry
+	telemetry   *telemetrypkg.Telemetry
 	logger      *log.Logger
 }
 
 // NewResearchAgent creates a new research agent
-func NewResearchAgent(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetry.Telemetry) Agent {
+func NewResearchAgent(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetrypkg.Telemetry) Agent {
 	return &SimpleAgent{
 		agentType:   "research",
 		config:      cfg,
@@ -642,7 +659,7 @@ func NewResearchAgent(cfg *config.Config, llmProvider LLMProvider, telemetry *te
 }
 
 // NewAnalysisAgent creates a new analysis agent
-func NewAnalysisAgent(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetry.Telemetry) Agent {
+func NewAnalysisAgent(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetrypkg.Telemetry) Agent {
 	return &SimpleAgent{
 		agentType:   "analysis",
 		config:      cfg,
@@ -653,7 +670,7 @@ func NewAnalysisAgent(cfg *config.Config, llmProvider LLMProvider, telemetry *te
 }
 
 // NewSynthesisAgent creates a new synthesis agent
-func NewSynthesisAgent(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetry.Telemetry) Agent {
+func NewSynthesisAgent(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetrypkg.Telemetry) Agent {
 	return &SimpleAgent{
 		agentType:   "synthesis",
 		config:      cfg,
@@ -664,7 +681,7 @@ func NewSynthesisAgent(cfg *config.Config, llmProvider LLMProvider, telemetry *t
 }
 
 // NewConflictDetectionAgent creates a new conflict detection agent
-func NewConflictDetectionAgent(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetry.Telemetry) Agent {
+func NewConflictDetectionAgent(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetrypkg.Telemetry) Agent {
 	return &SimpleAgent{
 		agentType:   "conflict_detection",
 		config:      cfg,
@@ -675,7 +692,7 @@ func NewConflictDetectionAgent(cfg *config.Config, llmProvider LLMProvider, tele
 }
 
 // NewHighlightManagementAgent creates a new highlight management agent
-func NewHighlightManagementAgent(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetry.Telemetry) Agent {
+func NewHighlightManagementAgent(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetrypkg.Telemetry) Agent {
 	return &SimpleAgent{
 		agentType:   "highlight_management",
 		config:      cfg,
@@ -686,7 +703,7 @@ func NewHighlightManagementAgent(cfg *config.Config, llmProvider LLMProvider, te
 }
 
 // NewKnowledgeGraphAgent creates a new knowledge graph agent
-func NewKnowledgeGraphAgent(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetry.Telemetry) Agent {
+func NewKnowledgeGraphAgent(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetrypkg.Telemetry) Agent {
 	return &SimpleAgent{
 		agentType:   "knowledge_graph",
 		config:      cfg,
@@ -803,10 +820,10 @@ func (a *SimpleAgent) GetEstimatedTime(task AgentTask) time.Duration {
 // Agent execution methods
 
 func (a *SimpleAgent) executeResearch(ctx context.Context, task AgentTask) AgentResult {
-    baseQuery, _ := task.Parameters["query"].(string)
-    if baseQuery == "" {
-        baseQuery = "general topic"
-    }
+	baseQuery, _ := task.Parameters["query"].(string)
+	if baseQuery == "" {
+		baseQuery = "general topic"
+	}
 
 	providers, _ := NewSourceProviders(a.config.Sources)
 	ctx2, cancel := context.WithTimeout(ctx, a.config.General.DefaultTimeout)
@@ -822,9 +839,9 @@ func (a *SimpleAgent) executeResearch(ctx context.Context, task AgentTask) Agent
 		ctxm = cm
 	}
 
-    // Build enriched query using preferences (keywords/domains)
-    enrichedQuery := buildQueryFromPrefs(baseQuery, prefs)
-    baseOpts := map[string]interface{}{"query": enrichedQuery}
+	// Build enriched query using preferences (keywords/domains)
+	enrichedQuery := buildQueryFromPrefs(baseQuery, prefs)
+	baseOpts := map[string]interface{}{"query": enrichedQuery}
 	// Exclusions from context
 	if ctxm != nil {
 		if ku, ok := ctxm["known_urls"].([]string); ok && len(ku) > 0 {
@@ -836,8 +853,8 @@ func (a *SimpleAgent) executeResearch(ctx context.Context, task AgentTask) Agent
 	}
 
 	// Build Brave options
-    braveOpts := buildBraveOptionsFromPrefs(prefs, ctxm)
-    braveOpts["query"] = enrichedQuery
+	braveOpts := buildBraveOptionsFromPrefs(prefs, ctxm)
+	braveOpts["query"] = enrichedQuery
 
 	// small pagination loop for Brave only
 	const targetTotal = 30
@@ -849,61 +866,63 @@ func (a *SimpleAgent) executeResearch(ctx context.Context, task AgentTask) Agent
 	blocked := toStringSet(getNestedStringList(prefs, "search", "domains_blocked"))
 	strictAllow, _ := getNestedBool(prefs, "search", "strict_domains")
 
-    bravePagesFetched := 0
-    // simple per-run cache keyed by page offset
-    pageCache := map[int][]Source{}
-    for _, p := range providers {
-        switch sp := p.(type) {
-        case *BraveClient:
-            collected := 0
-            for page := 0; page < maxPages && collected < targetTotal; page++ {
-                braveOpts["offset"] = page
-                var res []Source
-                var err error
-                if cached, ok := pageCache[page]; ok {
-                    res = cached
-                } else {
-                    res, err = sp.Search(ctx2, enrichedQuery, braveOpts)
-                    if err == nil { pageCache[page] = res }
-                }
-                if err != nil {
-                    break
-                }
-                bravePagesFetched++
-                startSources := len(sourcesList)
-                startDomains := len(domainCount)
-                for _, s := range res {
-                    d := strings.ToLower(domainOnly(s.URL))
-                    if d != "" {
-                        if blocked[d] {
-                            continue
-                        }
-                        if strictAllow && len(preferred) > 0 && !preferred[d] {
-                            continue
-                        }
-                        if domainCount[d] >= domainCap {
-                            continue
-                        }
-                    }
-                    sourcesList = append(sourcesList, s)
-                    if d != "" {
-                        domainCount[d]++
-                    }
-                }
-                collected = len(sourcesList)
-                if len(res) == 0 {
-                    break
-                }
-                // early stop if marginal utility is too low
-                newSources := collected - startSources
-                newDomains := len(domainCount) - startDomains
-                if newSources < 3 && newDomains < 2 {
-                    break
-                }
-            }
-        default:
+	bravePagesFetched := 0
+	// simple per-run cache keyed by page offset
+	pageCache := map[int][]Source{}
+	for _, p := range providers {
+		switch sp := p.(type) {
+		case *BraveClient:
+			collected := 0
+			for page := 0; page < maxPages && collected < targetTotal; page++ {
+				braveOpts["offset"] = page
+				var res []Source
+				var err error
+				if cached, ok := pageCache[page]; ok {
+					res = cached
+				} else {
+					res, err = sp.Search(ctx2, enrichedQuery, braveOpts)
+					if err == nil {
+						pageCache[page] = res
+					}
+				}
+				if err != nil {
+					break
+				}
+				bravePagesFetched++
+				startSources := len(sourcesList)
+				startDomains := len(domainCount)
+				for _, s := range res {
+					d := strings.ToLower(domainOnly(s.URL))
+					if d != "" {
+						if blocked[d] {
+							continue
+						}
+						if strictAllow && len(preferred) > 0 && !preferred[d] {
+							continue
+						}
+						if domainCount[d] >= domainCap {
+							continue
+						}
+					}
+					sourcesList = append(sourcesList, s)
+					if d != "" {
+						domainCount[d]++
+					}
+				}
+				collected = len(sourcesList)
+				if len(res) == 0 {
+					break
+				}
+				// early stop if marginal utility is too low
+				newSources := collected - startSources
+				newDomains := len(domainCount) - startDomains
+				if newSources < 3 && newDomains < 2 {
+					break
+				}
+			}
+		default:
 			// other providers (e.g., NewsAPI) once with base options
-            if res, err := p.Search(ctx2, enrichedQuery, baseOpts); err == nil {
+			if res, err := p.Search(ctx2, enrichedQuery, baseOpts); err == nil {
 				for _, s := range res {
 					d := strings.ToLower(domainOnly(s.URL))
 					if d != "" {
@@ -928,7 +947,7 @@ func (a *SimpleAgent) executeResearch(ctx context.Context, task AgentTask) Agent
 	// de-duplicate after collection
 	sourcesList = DeduplicateSources(sourcesList)
 	// rank results by credibility, domain preference, snippet quality, and recency if available
-    ranked := rankSources(sourcesList, enrichedQuery, preferred)
+	ranked := rankSources(sourcesList, enrichedQuery, preferred)
 	a.logger.Printf("research: brave pages=%d total_sources=%d unique_domains=%d", bravePagesFetched, len(sourcesList), len(domainCount))
 	if a.telemetry != nil {
 		a.telemetry.RecordResearchStats(ctx, bravePagesFetched, len(ranked), len(domainCount))
@@ -937,8 +956,8 @@ func (a *SimpleAgent) executeResearch(ctx context.Context, task AgentTask) Agent
 		Data: map[string]interface{}{
 			"sources":       ranked,
 			"total_sources": len(ranked),
-            "query":         enrichedQuery,
-            "search_params": braveOpts,
+			"query":         enrichedQuery,
+			"search_params": braveOpts,
 			"pages_fetched": bravePagesFetched,
 			"domain_cap":    domainCap,
 		},
@@ -1011,73 +1030,101 @@ func buildBraveOptionsFromPrefs(prefs map[string]interface{}, ctxm map[string]in
 
 // buildQueryFromPrefs injects operators (quotes, intitle:, site:, -site:) based on preferences.
 func buildQueryFromPrefs(base string, prefs map[string]interface{}) string {
-    q := strings.TrimSpace(base)
-    if q == "" { q = "news" }
-    // Gather keywords
-    var kws []string
-    if arr := getNestedStringList(prefs, "search", "keywords"); len(arr) > 0 { kws = append(kws, arr...) }
-    if arr := getNestedStringList(prefs, "keywords"); len(arr) > 0 { kws = append(kws, arr...) }
-    // Dedup
-    seen := map[string]bool{}
-    outParts := []string{q}
-    // Add quoted keywords (cap to 5)
-    added := 0
-    for _, kw := range kws {
-        kw = strings.TrimSpace(kw)
-        if kw == "" { continue }
-        lkw := strings.ToLower(kw)
-        if seen[lkw] { continue }
-        seen[lkw] = true
-        if strings.ContainsAny(kw, " ") {
-            outParts = append(outParts, fmt.Sprintf("\"%s\"", kw))
-        } else {
-            outParts = append(outParts, kw)
-        }
-        added++
-        if added >= 5 { break }
-    }
-    // intitle keywords
-    if arr := getNestedStringList(prefs, "search", "intitle_keywords"); len(arr) > 0 {
-        n := 0
-        for _, it := range arr {
-            it = strings.TrimSpace(it)
-            if it == "" { continue }
-            if strings.ContainsAny(it, " ") { outParts = append(outParts, fmt.Sprintf("intitle:\"%s\"", it)) } else { outParts = append(outParts, "intitle:"+it) }
-            n++
-            if n >= 3 { break }
-        }
-    }
-    // domains
-    pref := toStringSet(getNestedStringList(prefs, "search", "domains_preferred"))
-    blocked := toStringSet(getNestedStringList(prefs, "search", "domains_blocked"))
-    strict, _ := getNestedBool(prefs, "search", "strict_domains")
-    // If strict, include site: filters (cap 4)
-    if strict && len(pref) > 0 {
-        count := 0
-        ors := []string{}
-        for d := range pref {
-            ors = append(ors, "site:"+d)
-            count++
-            if count >= 4 { break }
-        }
-        sort.Strings(ors)
-        if len(ors) > 0 { outParts = append(outParts, "("+strings.Join(ors, " OR ")+")") }
-    }
-    // Always add -site: for blocked (cap 5)
-    if len(blocked) > 0 {
-        count := 0
-        // Deterministic order
-        ds := make([]string, 0, len(blocked))
-        for d := range blocked { ds = append(ds, d) }
-        sort.Strings(ds)
-        for _, d := range ds {
-            outParts = append(outParts, "-site:"+d)
-            count++
-            if count >= 5 { break }
-        }
-    }
-    // Join with spaces
-    return strings.Join(outParts, " ")
+	q := strings.TrimSpace(base)
+	if q == "" {
+		q = "news"
+	}
+	// Gather keywords
+	var kws []string
+	if arr := getNestedStringList(prefs, "search", "keywords"); len(arr) > 0 {
+		kws = append(kws, arr...)
+	}
+	if arr := getNestedStringList(prefs, "keywords"); len(arr) > 0 {
+		kws = append(kws, arr...)
+	}
+	// Dedup
+	seen := map[string]bool{}
+	outParts := []string{q}
+	// Add quoted keywords (cap to 5)
+	added := 0
+	for _, kw := range kws {
+		kw = strings.TrimSpace(kw)
+		if kw == "" {
+			continue
+		}
+		lkw := strings.ToLower(kw)
+		if seen[lkw] {
+			continue
+		}
+		seen[lkw] = true
+		if strings.ContainsAny(kw, " ") {
+			outParts = append(outParts, fmt.Sprintf("\"%s\"", kw))
+		} else {
+			outParts = append(outParts, kw)
+		}
+		added++
+		if added >= 5 {
+			break
+		}
+	}
+	// intitle keywords
+	if arr := getNestedStringList(prefs, "search", "intitle_keywords"); len(arr) > 0 {
+		n := 0
+		for _, it := range arr {
+			it = strings.TrimSpace(it)
+			if it == "" {
+				continue
+			}
+			if strings.ContainsAny(it, " ") {
+				outParts = append(outParts, fmt.Sprintf("intitle:\"%s\"", it))
+			} else {
+				outParts = append(outParts, "intitle:"+it)
+			}
+			n++
+			if n >= 3 {
+				break
+			}
+		}
+	}
+	// domains
+	pref := toStringSet(getNestedStringList(prefs, "search", "domains_preferred"))
+	blocked := toStringSet(getNestedStringList(prefs, "search", "domains_blocked"))
+	strict, _ := getNestedBool(prefs, "search", "strict_domains")
+	// If strict, include site: filters (cap 4)
+	if strict && len(pref) > 0 {
+		count := 0
+		ors := []string{}
+		for d := range pref {
+			ors = append(ors, "site:"+d)
+			count++
+			if count >= 4 {
+				break
+			}
+		}
+		sort.Strings(ors)
+		if len(ors) > 0 {
+			outParts = append(outParts, "("+strings.Join(ors, " OR ")+")")
+		}
+	}
+	// Always add -site: for blocked (cap 5)
+	if len(blocked) > 0 {
+		count := 0
+		// Deterministic order
+		ds := make([]string, 0, len(blocked))
+		for d := range blocked {
+			ds = append(ds, d)
+		}
+		sort.Strings(ds)
+		for _, d := range ds {
+			outParts = append(outParts, "-site:"+d)
+			count++
+			if count >= 5 {
+				break
+			}
+		}
+	}
+	// Join with spaces
+	return strings.Join(outParts, " ")
 }
 
 func getNestedString(m map[string]interface{}, path ...string) (string, bool) {
@@ -1215,29 +1262,29 @@ func rankSources(in []Source, query string, preferred map[string]bool) []Source 
 	}
 	qTokens := tokenizeQuery(query)
 	scoredArr := make([]scored, 0, len(in))
-    for _, s := range in {
-        base := s.Credibility
-        d := domainOnly(s.URL)
-        if preferred[d] {
-            base += 0.15
-        }
-        if isTrustedDomain(d) {
-            base += 0.1
-        }
-        // snippet quality
-        sn := s.Summary
-        qual := 0.0
-        if sn != "" {
-            l := float64(len(sn))
-            if l > 300 {
-                l = 300
-            }
-            qual = l / 300.0
-            // keyword overlap
-            overlap := keywordOverlap(qTokens, strings.ToLower(sn))
-            titleOverlap := keywordOverlap(qTokens, strings.ToLower(s.Title))
-            qual = 0.4*qual + 0.4*overlap + 0.2*titleOverlap
-        }
+	for _, s := range in {
+		base := s.Credibility
+		d := domainOnly(s.URL)
+		if preferred[d] {
+			base += 0.15
+		}
+		if isTrustedDomain(d) {
+			base += 0.1
+		}
+		// snippet quality
+		sn := s.Summary
+		qual := 0.0
+		if sn != "" {
+			l := float64(len(sn))
+			if l > 300 {
+				l = 300
+			}
+			qual = l / 300.0
+			// keyword overlap
+			overlap := keywordOverlap(qTokens, strings.ToLower(sn))
+			titleOverlap := keywordOverlap(qTokens, strings.ToLower(s.Title))
+			qual = 0.4*qual + 0.4*overlap + 0.2*titleOverlap
+		}
 		// recency: if PublishedAt present, score higher if within 7d
 		rec := 0.5
 		if !s.PublishedAt.IsZero() {
@@ -1272,17 +1319,21 @@ func rankSources(in []Source, query string, preferred map[string]bool) []Source 
 
 // isTrustedDomain applies a small boost for well-known authoritative outlets
 func isTrustedDomain(d string) bool {
-    if d == "" { return false }
-    trusted := []string{
-        "apnews.com", "reuters.com", "bbc.com", "bbc.co.uk", "npr.org", "politico.com",
-        "axios.com", "theguardian.com", "cnbc.com", "bloomberg.com", "ft.com", "wsj.com",
-        "nytimes.com", "washingtonpost.com", "economist.com",
-    }
-    d = strings.ToLower(d)
-    for _, t := range trusted {
-        if strings.HasSuffix(d, t) { return true }
-    }
-    return false
+	if d == "" {
+		return false
+	}
+	trusted := []string{
+		"apnews.com", "reuters.com", "bbc.com", "bbc.co.uk", "npr.org", "politico.com",
+		"axios.com", "theguardian.com", "cnbc.com", "bloomberg.com", "ft.com", "wsj.com",
+		"nytimes.com", "washingtonpost.com", "economist.com",
+	}
+	d = strings.ToLower(d)
+	for _, t := range trusted {
+		if strings.HasSuffix(d, t) {
+			return true
+		}
+	}
+	return false
 }
 
 func tokenizeQuery(q string) []string {
@@ -1506,64 +1557,92 @@ func (a *SimpleAgent) executeSynthesis(ctx context.Context, task AgentTask) Agen
 		}
 	}
 
-    // Build source context for the LLM
-    ctxBuf := &bytes.Buffer{}
-    max := 10
-    for i, s := range sources {
-        if i >= max {
-            break
-        }
-        fmt.Fprintf(ctxBuf, "- Title: %s\n  URL: %s\n  Type: %s\n  Summary: %s\n", s.Title, s.URL, s.Type, s.Summary)
-    }
+	// Build source context for the LLM
+	ctxBuf := &bytes.Buffer{}
+	max := 10
+	for i, s := range sources {
+		if i >= max {
+			break
+		}
+		fmt.Fprintf(ctxBuf, "- Title: %s\n  URL: %s\n  Type: %s\n  Summary: %s\n", s.Title, s.URL, s.Type, s.Summary)
+	}
 
-    // Collect analysis signals from dependent tasks if available
-    analysisBuf := &bytes.Buffer{}
-    if inputsAny, ok := task.Parameters["inputs"].([]AgentResult); ok {
-        // Use the first analysis result found (or aggregate if multiple)
-        total := 0
-        var avgRel, avgImp, avgCred float64
-        keyTopicsSet := map[string]int{}
-        for _, r := range inputsAny {
-            if r.Data == nil { continue }
-            if v, ok2 := r.Data["relevance_score"].(float64); ok2 { avgRel += v }
-            if v, ok2 := r.Data["importance_score"].(float64); ok2 { avgImp += v }
-            if v, ok2 := r.Data["credibility_score"].(float64); ok2 { avgCred += v }
-            if kt, ok2 := r.Data["key_topics"].([]interface{}); ok2 {
-                for _, t := range kt { if s, ok3 := t.(string); ok3 { keyTopicsSet[s]++ } }
-            }
-            total++
-        }
-        if total > 0 {
-            avgRel /= float64(total); avgImp /= float64(total); avgCred /= float64(total)
-            // Prepare key topics list (top up to 10)
-            type kv struct{ k string; v int }
-            var arr []kv
-            for k, v := range keyTopicsSet { arr = append(arr, kv{k, v}) }
-            sort.Slice(arr, func(i, j int) bool { if arr[i].v == arr[j].v { return arr[i].k < arr[j].k }; return arr[i].v > arr[j].v })
-            topics := []string{}
-            for i := 0; i < len(arr) && i < 10; i++ { topics = append(topics, arr[i].k) }
-            fmt.Fprintf(analysisBuf, "- avg_relevance: %.2f\n- avg_importance: %.2f\n- avg_credibility: %.2f\n- key_topics: %s\n", avgRel, avgImp, avgCred, strings.Join(topics, ", "))
-        }
-    }
+	// Collect analysis signals from dependent tasks if available
+	analysisBuf := &bytes.Buffer{}
+	if inputsAny, ok := task.Parameters["inputs"].([]AgentResult); ok {
+		// Use the first analysis result found (or aggregate if multiple)
+		total := 0
+		var avgRel, avgImp, avgCred float64
+		keyTopicsSet := map[string]int{}
+		for _, r := range inputsAny {
+			if r.Data == nil {
+				continue
+			}
+			if v, ok2 := r.Data["relevance_score"].(float64); ok2 {
+				avgRel += v
+			}
+			if v, ok2 := r.Data["importance_score"].(float64); ok2 {
+				avgImp += v
+			}
+			if v, ok2 := r.Data["credibility_score"].(float64); ok2 {
+				avgCred += v
+			}
+			if kt, ok2 := r.Data["key_topics"].([]interface{}); ok2 {
+				for _, t := range kt {
+					if s, ok3 := t.(string); ok3 {
+						keyTopicsSet[s]++
+					}
+				}
+			}
+			total++
+		}
+		if total > 0 {
+			avgRel /= float64(total)
+			avgImp /= float64(total)
+			avgCred /= float64(total)
+			// Prepare key topics list (top up to 10)
+			type kv struct {
+				k string
+				v int
+			}
+			var arr []kv
+			for k, v := range keyTopicsSet {
+				arr = append(arr, kv{k, v})
+			}
+			sort.Slice(arr, func(i, j int) bool {
+				if arr[i].v == arr[j].v {
+					return arr[i].k < arr[j].k
+				}
+				return arr[i].v > arr[j].v
+			})
+			topics := []string{}
+			for i := 0; i < len(arr) && i < 10; i++ {
+				topics = append(topics, arr[i].k)
+			}
+			fmt.Fprintf(analysisBuf, "- avg_relevance: %.2f\n- avg_importance: %.2f\n- avg_credibility: %.2f\n- key_topics: %s\n", avgRel, avgImp, avgCred, strings.Join(topics, ", "))
+		}
+	}
 
-    // Extract preference weights if present
-    var weightLine string
-    if pm, ok := task.Parameters["preferences"].(map[string]interface{}); ok {
-        if am, ok2 := pm["analysis"].(map[string]interface{}); ok2 {
-            rw, _ := am["relevance_weight"].(float64)
-            cw, _ := am["credibility_weight"].(float64)
-            iw, _ := am["importance_weight"].(float64)
-            mc := 0.0
-            if v, ok3 := am["min_credibility"].(float64); ok3 { mc = v }
-            weightLine = fmt.Sprintf("- weights: relevance=%.2f, credibility=%.2f, importance=%.2f; min_credibility=%.2f\n", rw, cw, iw, mc)
-        }
-    }
+	// Extract preference weights if present
+	var weightLine string
+	if pm, ok := task.Parameters["preferences"].(map[string]interface{}); ok {
+		if am, ok2 := pm["analysis"].(map[string]interface{}); ok2 {
+			rw, _ := am["relevance_weight"].(float64)
+			cw, _ := am["credibility_weight"].(float64)
+			iw, _ := am["importance_weight"].(float64)
+			mc := 0.0
+			if v, ok3 := am["min_credibility"].(float64); ok3 {
+				mc = v
+			}
+			weightLine = fmt.Sprintf("- weights: relevance=%.2f, credibility=%.2f, importance=%.2f; min_credibility=%.2f\n", rw, cw, iw, mc)
+		}
+	}
 
 	model := a.config.LLM.Routing.Synthesis
 	if model == "" {
 		model = a.config.LLM.Routing.Fallback
 	}
-    prompt := fmt.Sprintf(`You are a synthesis agent creating a comprehensive report from multiple sources.
+	prompt := fmt.Sprintf(`You are a synthesis agent creating a comprehensive report from multiple sources.
 USER THOUGHT: %s
 SOURCES (top %d):
 %s
@@ -1617,34 +1696,34 @@ Return ONLY strict JSON with keys:
 	}
 
 	// Parse JSON
-    var parsed struct {
-        Summary    string  `json:"summary"`
-        Detailed   string  `json:"detailed_report"`
-        Confidence float64 `json:"confidence"`
-        Items      []struct {
-            Title       string   `json:"title"`
-            Summary     string   `json:"summary"`
-            Category    string   `json:"category"`
-            Tags        []string `json:"tags"`
-            PublishedAt string   `json:"published_at"`
-            Importance  float64  `json:"importance"`
-            Conf       float64   `json:"confidence"`
-            Sources     []struct {
-                URL         string `json:"url"`
-                Domain      string `json:"domain"`
-                ArchivedURL string `json:"archived_url"`
-            } `json:"sources"`
-        } `json:"items"`
-        Highlights []struct {
-            Title, Content, Type string
-            Priority             int
-            SourceURLs           []string `json:"source_urls"`
-        } `json:"highlights"`
-        Conflicts []struct {
-            Description, Severity, Resolution string
-            SourceURLs                        []string `json:"source_urls"`
-        } `json:"conflicts"`
-    }
+	var parsed struct {
+		Summary    string  `json:"summary"`
+		Detailed   string  `json:"detailed_report"`
+		Confidence float64 `json:"confidence"`
+		Items      []struct {
+			Title       string   `json:"title"`
+			Summary     string   `json:"summary"`
+			Category    string   `json:"category"`
+			Tags        []string `json:"tags"`
+			PublishedAt string   `json:"published_at"`
+			Importance  float64  `json:"importance"`
+			Conf        float64  `json:"confidence"`
+			Sources     []struct {
+				URL         string `json:"url"`
+				Domain      string `json:"domain"`
+				ArchivedURL string `json:"archived_url"`
+			} `json:"sources"`
+		} `json:"items"`
+		Highlights []struct {
+			Title, Content, Type string
+			Priority             int
+			SourceURLs           []string `json:"source_urls"`
+		} `json:"highlights"`
+		Conflicts []struct {
+			Description, Severity, Resolution string
+			SourceURLs                        []string `json:"source_urls"`
+		} `json:"conflicts"`
+	}
 	if err := json.Unmarshal([]byte(jOut), &parsed); err != nil {
 		// Fallback: use whole text as summary
 		parsed.Summary = out
@@ -1680,35 +1759,35 @@ Return ONLY strict JSON with keys:
 	}
 
 	cost := a.llmProvider.CalculateCost(inTok, outTok, model)
-    // Convert items into generic maps for metadata propagation
-    var itemsOut []map[string]interface{}
-    for _, it := range parsed.Items {
-        m := map[string]interface{}{
-            "title": it.Title,
-            "summary": it.Summary,
-            "category": it.Category,
-            "tags": it.Tags,
-            "published_at": it.PublishedAt,
-            "importance": it.Importance,
-            "confidence": it.Conf,
-        }
-        var srcs []map[string]interface{}
-        for _, s := range it.Sources {
-            srcs = append(srcs, map[string]interface{}{"url": s.URL, "domain": s.Domain, "archived_url": s.ArchivedURL})
-        }
-        m["sources"] = srcs
-        itemsOut = append(itemsOut, m)
-    }
-    return AgentResult{
-        Data: map[string]interface{}{
-            "summary":         parsed.Summary,
-            "detailed_report": parsed.Detailed,
-            "items":           itemsOut,
-            "highlights":      highlights,
-            "conflicts":       conflicts,
-            "confidence":      parsed.Confidence,
-        },
-        Sources:    sources,
+	// Convert items into generic maps for metadata propagation
+	var itemsOut []map[string]interface{}
+	for _, it := range parsed.Items {
+		m := map[string]interface{}{
+			"title":        it.Title,
+			"summary":      it.Summary,
+			"category":     it.Category,
+			"tags":         it.Tags,
+			"published_at": it.PublishedAt,
+			"importance":   it.Importance,
+			"confidence":   it.Conf,
+		}
+		var srcs []map[string]interface{}
+		for _, s := range it.Sources {
+			srcs = append(srcs, map[string]interface{}{"url": s.URL, "domain": s.Domain, "archived_url": s.ArchivedURL})
+		}
+		m["sources"] = srcs
+		itemsOut = append(itemsOut, m)
+	}
+	return AgentResult{
+		Data: map[string]interface{}{
+			"summary":         parsed.Summary,
+			"detailed_report": parsed.Detailed,
+			"items":           itemsOut,
+			"highlights":      highlights,
+			"conflicts":       conflicts,
+			"confidence":      parsed.Confidence,
+		},
+		Sources:    sources,
 		Confidence: parsed.Confidence,
 		Cost:       cost,
 		TokensUsed: inTok + outTok,

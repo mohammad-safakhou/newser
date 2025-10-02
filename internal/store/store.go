@@ -13,6 +13,8 @@ import (
 
 	"github.com/lib/pq"
 	core "github.com/mohammad-safakhou/newser/internal/agent/core"
+	"github.com/mohammad-safakhou/newser/internal/budget"
+	"github.com/mohammad-safakhou/newser/internal/policy"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otelmetric "go.opentelemetry.io/otel/metric"
@@ -47,6 +49,48 @@ type SchemaRecord struct {
 	Schema    []byte
 	Checksum  string
 	CreatedAt time.Time
+}
+
+// ToolCardRecord represents a stored capability ToolCard.
+type ToolCardRecord struct {
+	Name         string
+	Version      string
+	Description  string
+	AgentType    string
+	InputSchema  []byte
+	OutputSchema []byte
+	CostEstimate float64
+	SideEffects  []byte
+	Checksum     string
+	Signature    string
+	CreatedAt    time.Time
+}
+
+// PlanGraphRecord captures a stored planner graph document.
+type PlanGraphRecord struct {
+	PlanID         string
+	ThoughtID      string
+	Version        string
+	Confidence     float64
+	ExecutionOrder []string
+	Budget         []byte
+	Estimates      []byte
+	PlanJSON       []byte
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type BudgetApprovalRecord struct {
+	RunID         string
+	TopicID       string
+	EstimatedCost float64
+	Threshold     float64
+	RequestedBy   string
+	Status        string
+	CreatedAt     time.Time
+	DecidedAt     *time.Time
+	DecidedBy     *string
+	Reason        *string
 }
 
 var (
@@ -156,6 +200,217 @@ func (s *Store) ListTopics(ctx context.Context, userID string) ([]Topic, error) 
 func (s *Store) GetTopicByID(ctx context.Context, id string, userID string) (name string, preferences []byte, scheduleCron string, err error) {
 	err = s.DB.QueryRowContext(ctx, `SELECT name, preferences, schedule_cron FROM topics WHERE id=$1 AND user_id=$2`, id, userID).Scan(&name, &preferences, &scheduleCron)
 	return
+}
+
+// UpsertUpdatePolicy creates or updates the temporal policy associated with a topic.
+func (s *Store) UpsertUpdatePolicy(ctx context.Context, topicID string, pol policy.UpdatePolicy) error {
+	if topicID == "" {
+		return fmt.Errorf("topic_id must be provided")
+	}
+	if err := pol.Validate(); err != nil {
+		return err
+	}
+	refresh := int64(pol.RefreshInterval / time.Second)
+	dedup := int64(pol.DedupWindow / time.Second)
+	fresh := int64(pol.FreshnessThreshold / time.Second)
+	metadata := pol.Metadata
+	if metadata == nil {
+		metadata = map[string]interface{}{}
+	}
+	metaBytes, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("marshal policy metadata: %w", err)
+	}
+	_, err = s.DB.ExecContext(ctx, `
+INSERT INTO topic_update_policies (topic_id, refresh_interval_seconds, dedup_window_seconds, repeat_mode, freshness_threshold_seconds, metadata, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW())
+ON CONFLICT (topic_id) DO UPDATE SET
+  refresh_interval_seconds    = EXCLUDED.refresh_interval_seconds,
+  dedup_window_seconds        = EXCLUDED.dedup_window_seconds,
+  repeat_mode                 = EXCLUDED.repeat_mode,
+  freshness_threshold_seconds = EXCLUDED.freshness_threshold_seconds,
+  metadata                    = EXCLUDED.metadata,
+  updated_at                  = NOW();
+`, topicID, refresh, dedup, string(pol.RepeatMode), fresh, metaBytes)
+	return err
+}
+
+// GetUpdatePolicy fetches the temporal policy for a topic. Bool indicates if a policy exists.
+func (s *Store) GetUpdatePolicy(ctx context.Context, topicID string) (policy.UpdatePolicy, bool, error) {
+	if topicID == "" {
+		return policy.UpdatePolicy{}, false, fmt.Errorf("topic_id must be provided")
+	}
+	row := s.DB.QueryRowContext(ctx, `
+SELECT refresh_interval_seconds,
+       dedup_window_seconds,
+       repeat_mode,
+       freshness_threshold_seconds,
+       metadata
+FROM topic_update_policies
+WHERE topic_id=$1
+`, topicID)
+	var (
+		refreshSeconds int64
+		dedupSeconds   int64
+		freshSeconds   int64
+		repeatMode     string
+		metadataBytes  []byte
+	)
+	if err := row.Scan(&refreshSeconds, &dedupSeconds, &repeatMode, &freshSeconds, &metadataBytes); err != nil {
+		if err == sql.ErrNoRows {
+			return policy.UpdatePolicy{}, false, nil
+		}
+		return policy.UpdatePolicy{}, false, err
+	}
+	var metadata map[string]interface{}
+	if len(metadataBytes) > 0 {
+		_ = json.Unmarshal(metadataBytes, &metadata)
+	}
+	if metadata == nil {
+		metadata = map[string]interface{}{}
+	}
+	pol := policy.UpdatePolicy{
+		RefreshInterval:    time.Duration(refreshSeconds) * time.Second,
+		DedupWindow:        time.Duration(dedupSeconds) * time.Second,
+		RepeatMode:         policy.RepeatMode(repeatMode),
+		FreshnessThreshold: time.Duration(freshSeconds) * time.Second,
+		Metadata:           metadata,
+	}
+	if err := pol.Validate(); err != nil {
+		return policy.UpdatePolicy{}, false, err
+	}
+	return pol, true, nil
+}
+
+// UpsertTopicBudgetConfig creates or updates the budget config for a topic.
+func (s *Store) UpsertTopicBudgetConfig(ctx context.Context, topicID string, cfg budget.Config) error {
+	if topicID == "" {
+		return fmt.Errorf("topic_id must be provided")
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	meta := cfg.Metadata
+	if meta == nil {
+		meta = map[string]interface{}{}
+	}
+	metaBytes, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("marshal budget metadata: %w", err)
+	}
+	var maxCost sql.NullFloat64
+	if cfg.MaxCost != nil {
+		maxCost = sql.NullFloat64{Float64: *cfg.MaxCost, Valid: true}
+	}
+	var approvalThresh sql.NullFloat64
+	if cfg.ApprovalThreshold != nil {
+		approvalThresh = sql.NullFloat64{Float64: *cfg.ApprovalThreshold, Valid: true}
+	}
+	var maxTokens sql.NullInt64
+	if cfg.MaxTokens != nil {
+		maxTokens = sql.NullInt64{Int64: *cfg.MaxTokens, Valid: true}
+	}
+	var maxTime sql.NullInt64
+	if cfg.MaxTimeSeconds != nil {
+		maxTime = sql.NullInt64{Int64: *cfg.MaxTimeSeconds, Valid: true}
+	}
+	_, err = s.DB.ExecContext(ctx, `
+INSERT INTO topic_budget_configs (topic_id, max_cost, max_tokens, max_time_seconds, approval_threshold, require_approval, metadata, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),NOW())
+ON CONFLICT (topic_id) DO UPDATE SET
+  max_cost = EXCLUDED.max_cost,
+  max_tokens = EXCLUDED.max_tokens,
+  max_time_seconds = EXCLUDED.max_time_seconds,
+  approval_threshold = EXCLUDED.approval_threshold,
+  require_approval = EXCLUDED.require_approval,
+  metadata = EXCLUDED.metadata,
+  updated_at = NOW();
+`, topicID, maxCost, maxTokens, maxTime, approvalThresh, cfg.RequireApproval, metaBytes)
+	return err
+}
+
+// GetTopicBudgetConfig fetches budget config for a topic.
+func (s *Store) GetTopicBudgetConfig(ctx context.Context, topicID string) (budget.Config, bool, error) {
+	if topicID == "" {
+		return budget.Config{}, false, fmt.Errorf("topic_id must be provided")
+	}
+	row := s.DB.QueryRowContext(ctx, `
+SELECT max_cost, max_tokens, max_time_seconds, approval_threshold, require_approval, metadata
+FROM topic_budget_configs
+WHERE topic_id=$1
+`, topicID)
+	var (
+		maxCost         sql.NullFloat64
+		maxTokens       sql.NullInt64
+		maxTime         sql.NullInt64
+		threshold       sql.NullFloat64
+		requireApproval bool
+		metaBytes       []byte
+	)
+	if err := row.Scan(&maxCost, &maxTokens, &maxTime, &threshold, &requireApproval, &metaBytes); err != nil {
+		if err == sql.ErrNoRows {
+			return budget.Config{}, false, nil
+		}
+		return budget.Config{}, false, err
+	}
+	var meta map[string]interface{}
+	if len(metaBytes) > 0 {
+		_ = json.Unmarshal(metaBytes, &meta)
+	}
+	cfg := budget.Config{RequireApproval: requireApproval, Metadata: meta}
+	if maxCost.Valid {
+		v := maxCost.Float64
+		cfg.MaxCost = &v
+	}
+	if maxTokens.Valid {
+		v := maxTokens.Int64
+		cfg.MaxTokens = &v
+	}
+	if maxTime.Valid {
+		v := maxTime.Int64
+		cfg.MaxTimeSeconds = &v
+	}
+	if threshold.Valid {
+		v := threshold.Float64
+		cfg.ApprovalThreshold = &v
+	}
+	return cfg, true, nil
+}
+
+// ApplyRunBudget persists the budget snapshot for a run.
+func (s *Store) ApplyRunBudget(ctx context.Context, runID string, cfg budget.Config) error {
+	if runID == "" {
+		return fmt.Errorf("run_id must be provided")
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	var maxCost sql.NullFloat64
+	if cfg.MaxCost != nil {
+		maxCost = sql.NullFloat64{Float64: *cfg.MaxCost, Valid: true}
+	}
+	var maxTokens sql.NullInt64
+	if cfg.MaxTokens != nil {
+		maxTokens = sql.NullInt64{Int64: *cfg.MaxTokens, Valid: true}
+	}
+	var maxTime sql.NullInt64
+	if cfg.MaxTimeSeconds != nil {
+		maxTime = sql.NullInt64{Int64: *cfg.MaxTimeSeconds, Valid: true}
+	}
+	var threshold sql.NullFloat64
+	if cfg.ApprovalThreshold != nil {
+		threshold = sql.NullFloat64{Float64: *cfg.ApprovalThreshold, Valid: true}
+	}
+	_, err := s.DB.ExecContext(ctx, `
+UPDATE runs SET
+  budget_cost_limit = $2,
+  budget_token_limit = $3,
+  budget_time_seconds = $4,
+  budget_approval_threshold = $5,
+  budget_require_approval = $6
+WHERE id = $1
+`, runID, maxCost, maxTokens, maxTime, threshold, cfg.RequireApproval)
+	return err
 }
 
 // UpdateTopicPrefsAndCron updates a topic's preferences and optional cron
@@ -290,6 +545,101 @@ func (s *Store) CreateRun(ctx context.Context, topicID string, status string) (s
 func (s *Store) FinishRun(ctx context.Context, runID string, status string, errMsg *string) error {
 	_, err := s.DB.ExecContext(ctx, `UPDATE runs SET status=$1, finished_at=NOW(), error=$2 WHERE id=$3`, status, errMsg, runID)
 	return err
+}
+
+// SetRunStatus updates the status field without modifying timestamps.
+func (s *Store) SetRunStatus(ctx context.Context, runID string, status string) error {
+	if runID == "" {
+		return fmt.Errorf("run_id must be provided")
+	}
+	_, err := s.DB.ExecContext(ctx, `UPDATE runs SET status=$2 WHERE id=$1`, runID, status)
+	return err
+}
+
+// MarkRunBudgetOverrun flags a run as over budget with a descriptive reason.
+func (s *Store) MarkRunBudgetOverrun(ctx context.Context, runID string, reason string) error {
+	if runID == "" {
+		return fmt.Errorf("run_id must be provided")
+	}
+	_, err := s.DB.ExecContext(ctx, `UPDATE runs SET budget_overrun = true, budget_overrun_reason = $2 WHERE id = $1`, runID, reason)
+	return err
+}
+
+// MarkRunPendingApproval updates run status to pending_approval.
+func (s *Store) MarkRunPendingApproval(ctx context.Context, runID string) error {
+	if runID == "" {
+		return fmt.Errorf("run_id must be provided")
+	}
+	_, err := s.DB.ExecContext(ctx, `UPDATE runs SET status='pending_approval' WHERE id=$1`, runID)
+	return err
+}
+
+// CreateBudgetApproval inserts a pending approval entry for a run.
+func (s *Store) CreateBudgetApproval(ctx context.Context, runID, topicID, requestedBy string, estimatedCost, threshold float64) error {
+	if runID == "" || topicID == "" || requestedBy == "" {
+		return fmt.Errorf("run_id, topic_id, and requested_by are required")
+	}
+	_, err := s.DB.ExecContext(ctx, `
+INSERT INTO run_budget_approvals (run_id, topic_id, estimated_cost, approval_threshold, requested_by)
+VALUES ($1,$2,$3,$4,$5)
+ON CONFLICT (run_id) DO UPDATE SET
+  estimated_cost = EXCLUDED.estimated_cost,
+  approval_threshold = EXCLUDED.approval_threshold,
+  status = 'pending',
+  created_at = NOW(),
+  decided_at = NULL,
+  decided_by = NULL,
+  reason = NULL;
+`, runID, topicID, estimatedCost, threshold, requestedBy)
+	return err
+}
+
+// ResolveBudgetApproval updates the approval status and marks the run accordingly.
+func (s *Store) ResolveBudgetApproval(ctx context.Context, runID string, approve bool, decidedBy string, reason *string) error {
+	if runID == "" || decidedBy == "" {
+		return fmt.Errorf("run_id and decided_by required")
+	}
+	status := "rejected"
+	if approve {
+		status = "approved"
+	}
+	_, err := s.DB.ExecContext(ctx, `
+UPDATE run_budget_approvals
+SET status=$2,
+    decided_at=NOW(),
+    decided_by=$3,
+    reason=$4
+WHERE run_id=$1
+`, runID, status, decidedBy, reason)
+	return err
+}
+
+// GetPendingBudgetApproval returns the pending approval for a topic if one exists.
+func (s *Store) GetPendingBudgetApproval(ctx context.Context, topicID string) (BudgetApprovalRecord, bool, error) {
+	if topicID == "" {
+		return BudgetApprovalRecord{}, false, fmt.Errorf("topic_id required")
+	}
+	row := s.DB.QueryRowContext(ctx, `
+SELECT run_id, topic_id, estimated_cost, approval_threshold, requested_by, status, created_at, decided_at, decided_by, COALESCE(reason,'')
+FROM run_budget_approvals
+WHERE topic_id=$1 AND status='pending'
+ORDER BY created_at ASC
+LIMIT 1
+`, topicID)
+	var (
+		rec        BudgetApprovalRecord
+		reasonText string
+	)
+	if err := row.Scan(&rec.RunID, &rec.TopicID, &rec.EstimatedCost, &rec.Threshold, &rec.RequestedBy, &rec.Status, &rec.CreatedAt, &rec.DecidedAt, &rec.DecidedBy, &reasonText); err != nil {
+		if err == sql.ErrNoRows {
+			return BudgetApprovalRecord{}, false, nil
+		}
+		return BudgetApprovalRecord{}, false, err
+	}
+	if reasonText != "" {
+		rec.Reason = &reasonText
+	}
+	return rec, true, nil
 }
 
 // UpsertProcessingResult saves the agent core ProcessingResult keyed by run ID
@@ -531,6 +881,96 @@ func (s *Store) GetMessageSchema(ctx context.Context, eventType, version string)
 		}
 		return SchemaRecord{}, false, err
 	}
+	return rec, true, nil
+}
+
+// UpsertToolCard stores or updates a ToolCard definition.
+func (s *Store) UpsertToolCard(ctx context.Context, tc ToolCardRecord) error {
+	_, err := s.DB.ExecContext(ctx, `
+INSERT INTO tool_registry (name, version, description, agent_type, input_schema, output_schema, cost_estimate, side_effects, checksum, signature, created_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
+ON CONFLICT (name, version) DO UPDATE SET
+  description = EXCLUDED.description,
+  agent_type = EXCLUDED.agent_type,
+  input_schema = EXCLUDED.input_schema,
+  output_schema = EXCLUDED.output_schema,
+  cost_estimate = EXCLUDED.cost_estimate,
+  side_effects = EXCLUDED.side_effects,
+  checksum = EXCLUDED.checksum,
+  signature = EXCLUDED.signature;
+`, tc.Name, tc.Version, tc.Description, tc.AgentType, tc.InputSchema, tc.OutputSchema, tc.CostEstimate, tc.SideEffects, tc.Checksum, tc.Signature)
+	return err
+}
+
+// ListToolCards returns all registered ToolCards.
+func (s *Store) ListToolCards(ctx context.Context) ([]ToolCardRecord, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT name, version, description, agent_type, input_schema, output_schema, cost_estimate, side_effects, checksum, signature, created_at FROM tool_registry ORDER BY name, version`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ToolCardRecord
+	for rows.Next() {
+		var rec ToolCardRecord
+		if err := rows.Scan(&rec.Name, &rec.Version, &rec.Description, &rec.AgentType, &rec.InputSchema, &rec.OutputSchema, &rec.CostEstimate, &rec.SideEffects, &rec.Checksum, &rec.Signature, &rec.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// GetToolCard fetches a ToolCard by name/version.
+func (s *Store) GetToolCard(ctx context.Context, name, version string) (ToolCardRecord, bool, error) {
+	var rec ToolCardRecord
+	row := s.DB.QueryRowContext(ctx, `SELECT name, version, description, agent_type, input_schema, output_schema, cost_estimate, side_effects, checksum, signature, created_at FROM tool_registry WHERE name=$1 AND version=$2`, name, version)
+	if err := row.Scan(&rec.Name, &rec.Version, &rec.Description, &rec.AgentType, &rec.InputSchema, &rec.OutputSchema, &rec.CostEstimate, &rec.SideEffects, &rec.Checksum, &rec.Signature, &rec.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return ToolCardRecord{}, false, nil
+		}
+		return ToolCardRecord{}, false, err
+	}
+	return rec, true, nil
+}
+
+// SavePlanGraph upserts a planner graph document by plan_id.
+func (s *Store) SavePlanGraph(ctx context.Context, rec PlanGraphRecord) error {
+	_, err := s.DB.ExecContext(ctx, `
+INSERT INTO plan_graphs (plan_id, thought_id, version, confidence, execution_order, budget, estimates, plan_json, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
+ON CONFLICT (plan_id) DO UPDATE SET
+  thought_id = EXCLUDED.thought_id,
+  version = EXCLUDED.version,
+  confidence = EXCLUDED.confidence,
+  execution_order = EXCLUDED.execution_order,
+  budget = EXCLUDED.budget,
+  estimates = EXCLUDED.estimates,
+  plan_json = EXCLUDED.plan_json,
+  updated_at = NOW();
+`, rec.PlanID, rec.ThoughtID, rec.Version, rec.Confidence, pq.Array(rec.ExecutionOrder), rec.Budget, rec.Estimates, rec.PlanJSON)
+	return err
+}
+
+// GetLatestPlanGraph returns the most recent plan graph for a thought.
+func (s *Store) GetLatestPlanGraph(ctx context.Context, thoughtID string) (PlanGraphRecord, bool, error) {
+	row := s.DB.QueryRowContext(ctx, `
+SELECT plan_id, thought_id, version, confidence, execution_order, budget, estimates, plan_json, created_at, updated_at
+FROM plan_graphs
+WHERE thought_id=$1
+ORDER BY updated_at DESC
+LIMIT 1
+`, thoughtID)
+	var (
+		rec       PlanGraphRecord
+		execOrder pq.StringArray
+	)
+	if err := row.Scan(&rec.PlanID, &rec.ThoughtID, &rec.Version, &rec.Confidence, &execOrder, &rec.Budget, &rec.Estimates, &rec.PlanJSON, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return PlanGraphRecord{}, false, nil
+		}
+		return PlanGraphRecord{}, false, err
+	}
+	rec.ExecutionOrder = []string(execOrder)
 	return rec, true, nil
 }
 

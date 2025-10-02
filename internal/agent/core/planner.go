@@ -10,6 +10,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/mohammad-safakhou/newser/config"
 	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
+	"github.com/mohammad-safakhou/newser/internal/budget"
+	"github.com/mohammad-safakhou/newser/internal/capability"
+	plannerv1 "github.com/mohammad-safakhou/newser/internal/planner"
+	policypkg "github.com/mohammad-safakhou/newser/internal/policy"
 )
 
 // Planner creates intelligent execution plans for user thoughts
@@ -18,15 +22,17 @@ type Planner struct {
 	llmProvider LLMProvider
 	telemetry   *telemetry.Telemetry
 	logger      *log.Logger
+	registry    *capability.Registry
 }
 
 // NewPlanner creates a new planner instance
-func NewPlanner(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetry.Telemetry) *Planner {
+func NewPlanner(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetry.Telemetry, registry *capability.Registry) *Planner {
 	return &Planner{
 		config:      cfg,
 		llmProvider: llmProvider,
 		telemetry:   telemetry,
 		logger:      log.New(log.Writer(), "[PLANNER] ", log.LstdFlags),
+		registry:    registry,
 	}
 }
 
@@ -34,7 +40,7 @@ func NewPlanner(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetr
 func (p *Planner) Plan(ctx context.Context, thought UserThought) (PlanningResult, error) {
 	startTime := time.Now()
 
-	// Create planning prompt
+	// Create planning prompt with schema guidance
 	prompt := p.createPlanningPrompt(thought)
 
 	// Get the planning model
@@ -55,6 +61,15 @@ func (p *Planner) Plan(ctx context.Context, thought UserThought) (PlanningResult
 	// Validate the plan
 	if err := p.ValidatePlan(plan); err != nil {
 		return PlanningResult{}, fmt.Errorf("plan validation failed: %w", err)
+	}
+
+	applyBudgetToPlan(&plan, thought.Budget, p.registry)
+	if plan.BudgetApprovalRequired {
+		threshold := 0.0
+		if plan.BudgetConfig != nil && plan.BudgetConfig.ApprovalThreshold != nil {
+			threshold = *plan.BudgetConfig.ApprovalThreshold
+		}
+		return PlanningResult{}, budget.ErrApprovalRequired{EstimatedCost: plan.EstimatedCost, Threshold: threshold}
 	}
 
 	// Normalize dependencies: final synthesis depends on all prior tasks; KG depends on research/analysis
@@ -110,10 +125,237 @@ func (p *Planner) Plan(ctx context.Context, thought UserThought) (PlanningResult
 		}
 	}
 
+	if thought.Policy != nil {
+		cloned := thought.Policy.Clone()
+		attachTemporalPolicy(&plan, &cloned)
+	}
+
 	processingTime := time.Since(startTime)
 	p.logger.Printf("Planning completed in %v with %d tasks", processingTime, len(plan.Tasks))
 
 	return plan, nil
+}
+
+func applyBudgetToPlan(plan *PlanningResult, cfg *budget.Config, reg *capability.Registry) {
+	if plan == nil {
+		return
+	}
+	populatePlanEstimates(plan, reg)
+	plan.BudgetConfig = nil
+	plan.BudgetApprovalRequired = false
+	plan.Budget = nil
+	if plan.Graph != nil {
+		plan.Graph.Budget = nil
+	}
+	if cfg == nil {
+		return
+	}
+	clone := cfg.Clone()
+	if clone.IsZero() {
+		return
+	}
+	plan.BudgetConfig = &clone
+	if clone.RequireApproval {
+		plan.BudgetApprovalRequired = true
+	}
+	var pb plannerv1.PlanBudget
+	haveBudget := false
+	if clone.MaxCost != nil {
+		pb.MaxCost = *clone.MaxCost
+		haveBudget = true
+	}
+	if clone.MaxTimeSeconds != nil {
+		pb.MaxTime = (time.Duration(*clone.MaxTimeSeconds) * time.Second).String()
+		haveBudget = true
+	}
+	if clone.MaxTokens != nil {
+		pb.MaxTokens = *clone.MaxTokens
+		haveBudget = true
+	}
+	if haveBudget {
+		plan.Budget = &pb
+		if plan.Graph != nil {
+			copyBudget := pb
+			plan.Graph.Budget = &copyBudget
+		}
+	}
+	if plan.Graph != nil {
+		if plan.Graph.Metadata == nil {
+			plan.Graph.Metadata = make(map[string]interface{})
+		}
+		plan.Graph.Metadata["budget_source"] = "topic"
+	}
+	if clone.ApprovalThreshold != nil && plan.EstimatedCost > 0 && plan.EstimatedCost > *clone.ApprovalThreshold {
+		plan.BudgetApprovalRequired = true
+	}
+	if plan.Graph != nil {
+		if data, err := json.Marshal(plan.Graph); err == nil {
+			plan.RawJSON = data
+		}
+	}
+}
+
+func populatePlanEstimates(plan *PlanningResult, reg *capability.Registry) {
+	if plan == nil || reg == nil {
+		return
+	}
+	var totalCost float64
+	for _, task := range plan.Tasks {
+		if tc, ok := reg.Tool(task.Type); ok {
+			totalCost += tc.CostEstimate
+		}
+	}
+	if totalCost <= 0 {
+		return
+	}
+	plan.EstimatedCost = totalCost
+	if plan.Estimates == nil {
+		plan.Estimates = &plannerv1.PlanEstimates{}
+	}
+	plan.Estimates.TotalCost = totalCost
+	if plan.Graph != nil {
+		if plan.Graph.Estimates == nil {
+			plan.Graph.Estimates = &plannerv1.PlanEstimates{}
+		}
+		plan.Graph.Estimates.TotalCost = totalCost
+	}
+}
+
+func attachTemporalPolicy(plan *PlanningResult, pol *policypkg.UpdatePolicy) {
+	if plan == nil || pol == nil {
+		return
+	}
+	clone := pol.Clone()
+	plan.TemporalPolicy = &clone
+	changed := applyTemporalPolicyHints(plan, clone)
+	if plan.Graph != nil {
+		if plan.Graph.Metadata == nil {
+			plan.Graph.Metadata = make(map[string]interface{})
+		}
+		plan.Graph.Metadata["temporal_policy"] = temporalPolicyMetadata(clone)
+		if updated, err := json.Marshal(plan.Graph); err == nil {
+			plan.RawJSON = updated
+		}
+	} else if changed {
+		// no graph to serialize, but ensure RawJSON reflects task hints if original JSON existed
+		if len(plan.RawJSON) > 0 {
+			if updated, err := json.Marshal(plan); err == nil {
+				plan.RawJSON = updated
+			}
+		}
+	}
+}
+
+func temporalPolicyMetadata(pol policypkg.UpdatePolicy) map[string]interface{} {
+	meta := map[string]interface{}{
+		"repeat_mode": string(pol.RepeatMode),
+	}
+	if pol.RefreshInterval > 0 {
+		meta["refresh_interval"] = pol.RefreshInterval.String()
+	}
+	if pol.DedupWindow > 0 {
+		meta["dedup_window"] = pol.DedupWindow.String()
+	}
+	if pol.FreshnessThreshold > 0 {
+		meta["freshness_threshold"] = pol.FreshnessThreshold.String()
+	}
+	if pol.Metadata != nil && len(pol.Metadata) > 0 {
+		metaCopy := make(map[string]interface{}, len(pol.Metadata))
+		for k, v := range pol.Metadata {
+			metaCopy[k] = v
+		}
+		meta["metadata"] = metaCopy
+	}
+	return meta
+}
+
+func applyTemporalPolicyHints(plan *PlanningResult, pol policypkg.UpdatePolicy) bool {
+	if plan == nil {
+		return false
+	}
+	changed := false
+
+	annotate := func(params map[string]interface{}) (map[string]interface{}, bool) {
+		if params == nil {
+			params = make(map[string]interface{})
+		}
+		mutated := false
+
+		setDuration := func(key string, d time.Duration) {
+			if d > 0 {
+				val := int64(d / time.Second)
+				if current, ok := params[key]; !ok || current != val {
+					params[key] = val
+					mutated = true
+				}
+			} else if _, ok := params[key]; ok {
+				delete(params, key)
+				mutated = true
+			}
+		}
+
+		setDuration("dedup_window_seconds", pol.DedupWindow)
+		setDuration("refresh_interval_seconds", pol.RefreshInterval)
+		setDuration("freshness_threshold_seconds", pol.FreshnessThreshold)
+
+		if pol.RepeatMode == policypkg.RepeatModeManual {
+			if current, ok := params["manual_repeat_mode"]; !ok || current != true {
+				params["manual_repeat_mode"] = true
+				mutated = true
+			}
+		} else if _, ok := params["manual_repeat_mode"]; ok {
+			delete(params, "manual_repeat_mode")
+			mutated = true
+		}
+
+		return params, mutated
+	}
+
+	for i := range plan.Tasks {
+		task := &plan.Tasks[i]
+		var doAnnotate bool
+		switch task.Type {
+		case "research":
+			doAnnotate = pol.DedupWindow > 0 || pol.RefreshInterval > 0
+		case "analysis":
+			doAnnotate = pol.FreshnessThreshold > 0
+		case "synthesis":
+			doAnnotate = pol.RepeatMode == policypkg.RepeatModeManual
+		}
+		if !doAnnotate {
+			continue
+		}
+		params, mutated := annotate(task.Parameters)
+		if mutated || task.Parameters == nil {
+			task.Parameters = params
+			changed = true
+		}
+	}
+
+	if plan.Graph != nil {
+		for i := range plan.Graph.Tasks {
+			task := &plan.Graph.Tasks[i]
+			var doAnnotate bool
+			switch task.Type {
+			case "research":
+				doAnnotate = pol.DedupWindow > 0 || pol.RefreshInterval > 0
+			case "analysis":
+				doAnnotate = pol.FreshnessThreshold > 0
+			case "synthesis":
+				doAnnotate = pol.RepeatMode == policypkg.RepeatModeManual
+			}
+			if !doAnnotate {
+				continue
+			}
+			params, mutated := annotate(task.Parameters)
+			if mutated || task.Parameters == nil {
+				task.Parameters = params
+				changed = true
+			}
+		}
+	}
+
+	return changed
 }
 
 // createPlanningPrompt creates a comprehensive prompt for planning
@@ -146,6 +388,27 @@ func (p *Planner) createPlanningPrompt(thought UserThought) string {
 		ctxBlock = "\nPRIOR CONTEXT:\n" + ctxBlock
 	}
 
+	// Temporal policy guidance for the planner
+	policyBlock := ""
+	if thought.Policy != nil {
+		policyBlock = "\nTEMPORAL POLICY GUIDANCE:\n"
+		policyBlock += fmt.Sprintf("- Repeat mode: %s\n", thought.Policy.RepeatMode)
+		if thought.Policy.RefreshInterval > 0 {
+			policyBlock += fmt.Sprintf("- Refresh interval between runs: %s\n", thought.Policy.RefreshInterval)
+		}
+		if thought.Policy.DedupWindow > 0 {
+			policyBlock += fmt.Sprintf("- Deduplicate content seen within: %s\n", thought.Policy.DedupWindow)
+		}
+		if thought.Policy.FreshnessThreshold > 0 {
+			policyBlock += fmt.Sprintf("- Treat coverage as stale after: %s\n", thought.Policy.FreshnessThreshold)
+		}
+		if len(thought.Policy.Metadata) > 0 {
+			if b, err := json.MarshalIndent(thought.Policy.Metadata, "", "  "); err == nil {
+				policyBlock += "- Additional policy metadata:\n" + string(b) + "\n"
+			}
+		}
+	}
+
 	// Preferences and objectives
 	prefBlock := ""
 	if thought.Preferences != nil && len(thought.Preferences) > 0 {
@@ -169,7 +432,7 @@ func (p *Planner) createPlanningPrompt(thought UserThought) string {
 	return fmt.Sprintf(`ROLE: Senior news intelligence planner focused on accuracy and usefulness. Ignore money/time costs; minimize tasks while maximizing quality.
 
 USER THOUGHT / TOPIC:
-%s%s%s
+%s%s%s%s
 
 AVAILABLE AGENTS:
 - research: gather information from sources
@@ -179,52 +442,51 @@ AVAILABLE AGENTS:
 - highlight_management: extract key highlights
 - knowledge_graph: extract entities/relations (always include; can be light)
 
-AGENT PARAMETER HINTS (use for task parameters; map from preferences when available):
+AGENT PARAMETER HINTS (map from preferences when available):
 %s
 
-PLANNING PRINCIPLES:
-1) Create the fewest, highest‑impact tasks.
-2) Set dependencies (research -> analysis -> downstream tasks).
-3) Always include FINAL synthesis last, depending on all prior tasks.
-4) Always include knowledge_graph after research/analysis (even if output is small).
-5) Use prior context: since last_run_time; avoid known_urls duplicates.
-6) For research tasks, encode Brave web_search parameters explicitly: country, search_lang, ui_lang, safesearch, freshness, count, offset, result_filter, spellcheck, text_decorations, extra_snippets, units, domains_preferred/blocked, and query. Derive from preferences where available; otherwise set sensible defaults.
-7) For analysis tasks, include parameters from preferences.analysis: relevance_weight, credibility_weight, importance_weight, sentiment_mode, min_credibility, key_topics_limit, sources_limit, language, extract_key_topics.
-8) For knowledge_graph tasks, include parameters from preferences.knowledge_graph: entity_types, relation_types, min_confidence, dedupe_threshold, include_aliases, max_nodes, max_edges, language.
-9) For conflict_detection tasks, include parameters from preferences.conflict: contradictory_threshold, sources_window, require_citations, stance_detection, grouping_by, min_supporting_evidence, resolution_strategy.
-10) No cost/time estimation; avoid redundant steps.
+SCHEMA RULES (STRICT JSON, NO commentary):
+- Top-level keys: version, tasks, execution_order, estimates (optional), budget (optional), edges (optional), confidence (optional).
+- version MUST be semantic (e.g. "v1").
+- tasks MUST be an array. Each task requires id (string), type (allowed agent type), description, priority (0-5), parameters (object), depends_on (array), timeout (Go duration string), estimated_cost (number), estimated_time (duration string). Include knowledge_graph and final synthesis tasks.
+- edges optional: {"from": task_id, "to": task_id, "kind": "control"|"data"}.
+- execution_order is array of task ids in run order.
+- estimates {"total_cost": number, "total_time": "duration"}. budget {"max_cost": number, "max_time": "duration"} when constraints exist.
+- confidence is number between 0 and 1.
+- Output must be valid JSON; no markdown, explanations, or trailing text.
 
-SYNTHESIS TASK REQUIREMENTS:
-- Output MUST be itemized with an items[] array where each item has: title, summary, category (one of: top | policy | politics | legal | markets | other), tags[], published_at (ISO8601), sources[] with at least one primary/authoritative link (de‑prioritize Wikipedia as primary), importance (0..1), and confidence (0..1). Include archived_url when feasible.
-- Enforce complete sourcing and timestamps: 100%% of items must include published_at and at least one source; drop items that do not meet this.
-- Category coverage: include sections for Top, Policy, Debate/Politics, Legal/Regulatory, and Quick Hits/Other with soft caps per bucket; anchors for sections/items.
-- Ordering must consume analysis signals: sort items primarily by importance and relevance as derived from analysis outputs and preference weights; prefer recency among ties.
-- Keep the summary concise (2–3 sentences); put depth in detailed_report with clear headings.
-
-OUTPUT JSON:
+VALID OUTPUT EXAMPLE (abridged):
 {
+  "version": "v1",
   "tasks": [
-    {
-      "id": "unique_task_id",
-      "type": "research|analysis|synthesis|conflict_detection|highlight_management|knowledge_graph",
-      "description": "what to do",
-      "priority": 1-5,
-      "parameters": {
-        "query": "...",
-        "filters": {},
-        "since": "RFC3339 if incremental",
-        "exclude_urls": ["..."]
-      },
-      "depends_on": ["task_id1"],
-      "timeout": "2m"
-    }
+    {"id": "t1", "type": "research", "description": "Collect primary sources", "priority": 1, "parameters": {"query": ""}, "depends_on": [], "timeout": "10m", "estimated_cost": 1.0, "estimated_time": "5m"},
+    {"id": "t2", "type": "analysis", "description": "Analyse findings", "priority": 1, "parameters": {}, "depends_on": ["t1"], "timeout": "8m", "estimated_cost": 0.8, "estimated_time": "4m"},
+    {"id": "t3", "type": "knowledge_graph", "description": "Build graph", "priority": 1, "parameters": {}, "depends_on": ["t1","t2"], "timeout": "6m", "estimated_cost": 0.5, "estimated_time": "3m"},
+    {"id": "t4", "type": "synthesis", "description": "Produce executive brief", "priority": 1, "parameters": {}, "depends_on": ["t1","t2","t3"], "timeout": "12m", "estimated_cost": 1.2, "estimated_time": "7m"}
   ],
-  "execution_order": ["task1", "task2"],
-  "confidence": 0.85,
-  "reasoning": "why this plan"
+  "execution_order": ["t1","t2","t3","t4"],
+  "estimates": {"total_cost": 3.5, "total_time": "19m"},
+  "budget": {"max_cost": 5, "max_time": "30m"},
+  "confidence": 0.85
 }
 
-Return ONLY JSON. Ensure final synthesis is last and knowledge_graph is present.`, thought.Content, prefBlock, ctxBlock, caps)
+PLANNING PRINCIPLES:
+1) Create the fewest, highest-impact tasks.
+2) Honour dependencies (research -> analysis -> downstream tasks).
+3) Always include FINAL synthesis last, depending on all prior tasks.
+4) Always include knowledge_graph after research/analysis (even if output is light).
+5) Use prior context: respect last_run_time and known_urls to avoid duplicates.
+6) Map preferences into task parameters (web_search, analysis, knowledge_graph, conflict_detection, etc.).
+7) Ensure every task has realistic timeout and estimates.
+
+SYNTHESIS TASK REQUIREMENTS:
+- Output MUST be itemized with items[] each containing title, summary, category (top|policy|politics|legal|markets|other), tags[], published_at (ISO8601), sources[] (authoritative link, archived_url when feasible), importance (0..1), confidence (0..1).
+- 100%% of items must include published_at and at least one source; drop items otherwise.
+- Provide sections for Top, Policy, Debate/Politics, Legal/Regulatory, and Quick Hits/Other.
+- Sort items by importance and recency derived from analysis.
+- Keep summary concise (2–3 sentences) and move depth to detailed_report with headings.
+
+Respond with ONLY the JSON object.`, thought.Content, ctxBlock, policyBlock, prefBlock, caps)
 }
 
 // parsePlanningResponse parses the LLM response into a PlanningResult
@@ -253,126 +515,73 @@ func (p *Planner) parsePlanningResponse(response string) (PlanningResult, error)
 		return PlanningResult{}, fmt.Errorf("no JSON found in response")
 	}
 
-	var rawPlan struct {
-		Tasks []struct {
-			ID            string                 `json:"id"`
-			Type          string                 `json:"type"`
-			Description   string                 `json:"description"`
-			Priority      int                    `json:"priority"`
-			Parameters    map[string]interface{} `json:"parameters"`
-			DependsOn     []string               `json:"depends_on"`
-			Timeout       string                 `json:"timeout"`
-			EstimatedCost float64                `json:"estimated_cost"`
-			EstimatedTime string                 `json:"estimated_time"`
-		} `json:"tasks"`
-		ExecutionOrder     []string `json:"execution_order"`
-		EstimatedTotalCost float64  `json:"estimated_total_cost"`
-		EstimatedTotalTime string   `json:"estimated_total_time"`
-		Confidence         float64  `json:"confidence"`
-		Reasoning          string   `json:"reasoning"`
+	jsonBytes := []byte(jsonStr)
+	if err := plannerv1.ValidatePlanDocument(jsonBytes); err != nil {
+		return PlanningResult{}, fmt.Errorf("plan schema validation failed: %w", err)
 	}
 
-	if err := json.Unmarshal([]byte(jsonStr), &rawPlan); err != nil {
-		// lenient fallback: coerce numeric IDs
-		var generic map[string]interface{}
-		if err2 := json.Unmarshal([]byte(jsonStr), &generic); err2 == nil {
-			var tasks []AgentTask
-			if tAny, ok := generic["tasks"].([]interface{}); ok {
-				for _, ti := range tAny {
-					tmap, _ := ti.(map[string]interface{})
-					id := ""
-					if v, ok := tmap["id"].(string); ok {
-						id = v
-					} else if fv, ok := tmap["id"].(float64); ok {
-						id = fmt.Sprintf("%.0f", fv)
-					}
-					ttype, _ := tmap["type"].(string)
-					desc, _ := tmap["description"].(string)
-					prio := 0
-					if pv, ok := tmap["priority"].(float64); ok {
-						prio = int(pv)
-					}
-					params := map[string]interface{}{}
-					if pm, ok := tmap["parameters"].(map[string]interface{}); ok {
-						params = pm
-					}
-					var deps []string
-					if dl, ok := tmap["depends_on"].([]interface{}); ok {
-						for _, di := range dl {
-							if ds, ok := di.(string); ok {
-								deps = append(deps, ds)
-							}
-						}
-					}
-					timeout := p.config.Agents.AgentTimeout
-					if ts, ok := tmap["timeout"].(string); ok {
-						if d, e := time.ParseDuration(ts); e == nil {
-							timeout = d
-						}
-					}
-					if id == "" {
-						id = uuid.New().String()
-					}
-					tasks = append(tasks, AgentTask{ID: id, Type: ttype, Description: desc, Priority: prio, Parameters: params, DependsOn: deps, Timeout: timeout, CreatedAt: time.Now()})
-				}
-			}
-			totalTime := 5 * time.Minute
-			if et, ok := generic["estimated_total_time"].(string); ok {
-				if d, e := time.ParseDuration(et); e == nil {
-					totalTime = d
-				}
-			}
-			return PlanningResult{Tasks: tasks, ExecutionOrder: []string{}, EstimatedCost: 0, EstimatedTime: totalTime, Confidence: 0.8}, nil
-		}
-		return PlanningResult{}, fmt.Errorf("failed to parse JSON: %w", err)
+	var graph plannerv1.PlanDocument
+	if err := json.Unmarshal(jsonBytes, &graph); err != nil {
+		return PlanningResult{}, fmt.Errorf("failed to decode plan graph: %w", err)
+	}
+	if graph.Version == "" {
+		graph.Version = "v1"
 	}
 
-	// Convert to PlanningResult
-	var tasks []AgentTask
-	for _, rawTask := range rawPlan.Tasks {
-		// Generate ID if not provided
-		if rawTask.ID == "" {
-			rawTask.ID = uuid.New().String()
+	tasks := make([]AgentTask, 0, len(graph.Tasks))
+	for _, node := range graph.Tasks {
+		id := node.ID
+		if id == "" {
+			id = uuid.New().String()
 		}
 
-		// Parse timeout
-		timeout, err := time.ParseDuration(rawTask.Timeout)
-		if err != nil {
-			timeout = p.config.Agents.AgentTimeout
-		}
-
-		// Parse estimated time (not used in current implementation)
-		_, err = time.ParseDuration(rawTask.EstimatedTime)
-		if err != nil {
-			// Use default time
+		timeout := p.config.Agents.AgentTimeout
+		if node.Timeout != "" {
+			if d, err := time.ParseDuration(node.Timeout); err == nil {
+				timeout = d
+			}
 		}
 
 		task := AgentTask{
-			ID:          rawTask.ID,
-			Type:        rawTask.Type,
-			Description: rawTask.Description,
-			Priority:    rawTask.Priority,
-			Parameters:  rawTask.Parameters,
-			DependsOn:   rawTask.DependsOn,
+			ID:          id,
+			Type:        node.Type,
+			Description: node.Description,
+			Priority:    node.Priority,
+			Parameters:  node.Parameters,
+			DependsOn:   node.DependsOn,
 			Timeout:     timeout,
 			CreatedAt:   time.Now(),
 		}
-
 		tasks = append(tasks, task)
 	}
 
-	// Parse total estimated time
-	totalTime, err := time.ParseDuration(rawPlan.EstimatedTotalTime)
-	if err != nil {
-		totalTime = 5 * time.Minute
+	estimatedCost := 0.0
+	var totalTime time.Duration = 5 * time.Minute
+	if graph.Estimates != nil {
+		estimatedCost = graph.Estimates.TotalCost
+		if graph.Estimates.TotalTime != "" {
+			if d, err := time.ParseDuration(graph.Estimates.TotalTime); err == nil {
+				totalTime = d
+			}
+		}
+	}
+
+	confidence := graph.Confidence
+	if confidence == 0 {
+		confidence = 0.8
 	}
 
 	return PlanningResult{
 		Tasks:          tasks,
-		ExecutionOrder: rawPlan.ExecutionOrder,
-		EstimatedCost:  rawPlan.EstimatedTotalCost,
+		ExecutionOrder: graph.ExecutionOrder,
+		EstimatedCost:  estimatedCost,
 		EstimatedTime:  totalTime,
-		Confidence:     rawPlan.Confidence,
+		Confidence:     confidence,
+		Budget:         graph.Budget,
+		Edges:          graph.Edges,
+		Estimates:      graph.Estimates,
+		Graph:          &graph,
+		RawJSON:        jsonBytes,
 	}, nil
 }
 
@@ -465,6 +674,10 @@ func (p *Planner) OptimizePlan(plan PlanningResult, constraints map[string]inter
 	// Validate optimized plan
 	if err := p.ValidatePlan(optimizedPlan); err != nil {
 		return plan, fmt.Errorf("optimized plan validation failed: %w", err)
+	}
+
+	if plan.TemporalPolicy != nil {
+		attachTemporalPolicy(&optimizedPlan, plan.TemporalPolicy)
 	}
 
 	return optimizedPlan, nil
@@ -574,6 +787,13 @@ func (p *Planner) checkMissingDependencies(tasks []AgentTask) error {
 
 // isValidTaskType checks if a task type is valid
 func (p *Planner) isValidTaskType(taskType string) bool {
+	if p.registry != nil {
+		if _, ok := p.registry.Tool(taskType); ok {
+			return true
+		}
+		return false
+	}
+
 	validTypes := []string{
 		"research",
 		"analysis",
@@ -590,4 +810,5 @@ func (p *Planner) isValidTaskType(taskType string) bool {
 	}
 
 	return false
+
 }

@@ -1,5 +1,36 @@
 export type Me = { user_id: string }
 export type Topic = { ID: string; Name: string; ScheduleCron: string }
+export type TemporalPolicy = {
+  repeat_mode: string
+  refresh_interval?: string
+  dedup_window?: string
+  freshness_threshold?: string
+  metadata?: Record<string, any>
+}
+export type BudgetConfig = {
+  max_cost?: number
+  max_tokens?: number
+  max_time_seconds?: number
+  approval_threshold?: number
+  require_approval: boolean
+  metadata?: Record<string, any>
+}
+export type PendingApproval = {
+  run_id: string
+  estimated_cost: number
+  threshold: number
+  created_at: string
+  requested_by: string
+}
+export type TopicDetail = {
+  id: string
+  name: string
+  schedule_cron: string
+  preferences: Record<string, any>
+  temporal_policy?: TemporalPolicy | null
+  budget?: BudgetConfig | null
+  pending_budget?: PendingApproval | null
+}
 export type Run = { ID: string; Status: string; StartedAt: string; FinishedAt?: string; Error?: string }
 export type ChatMessage = { role: 'user' | 'assistant'; content: string }
 export type ChatLogMessage = { id: string; role: 'user'|'assistant'; content: string; created_at: string }
@@ -64,9 +95,22 @@ export const api2 = {
     const qs = p.toString()
     return apiRequest<ChatLogMessage[]>(`/api/topics/${id}/chat${qs ? `?${qs}` : ''}`)
   },
-  getTopic: (id: string) => apiRequest<any>(`/api/topics/${id}`),
+  getTopic: (id: string) => apiRequest<TopicDetail>(`/api/topics/${id}`),
   updateTopicName: (id: string, name: string) => apiRequest(`/api/topics/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   updateTopicPrefs: (id: string, preferences: Record<string, any>, scheduleCron?: string) => apiRequest(`/api/topics/${id}/preferences`, { method: 'PATCH', body: JSON.stringify({ preferences, ...(scheduleCron ? { schedule_cron: scheduleCron } : {}) }) }),
+  updateTopicBudget: (
+    id: string,
+    payload: { max_cost?: number; max_tokens?: number; max_time_seconds?: number; approval_threshold?: number; require_approval?: boolean; metadata?: Record<string, any> }
+  ) => apiRequest(`/api/topics/${id}/budget`, { method: 'PUT', body: JSON.stringify(payload) }),
+  decideBudget: (
+    topicId: string,
+    runId: string,
+    payload: { approved: boolean; reason?: string }
+  ) => apiRequest(`/api/topics/${topicId}/runs/${runId}/budget_decision`, { method: 'POST', body: JSON.stringify(payload) }),
+  updateTopicPolicy: (
+    id: string,
+    payload: { repeat_mode: string; refresh_interval?: string; dedup_window?: string; freshness_threshold?: string; metadata?: Record<string, any> }
+  ) => apiRequest(`/api/topics/${id}/policy`, { method: 'PUT', body: JSON.stringify(payload) }),
   assistChat: (payload: { message: string; name?: string; preferences?: Record<string, any>; schedule_cron?: string }) => apiRequest<{ message: string; topic: any }>(`/api/topics/assist/chat`, { method: 'POST', body: JSON.stringify(payload) }),
 }
 

@@ -2,13 +2,25 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 // Preference diff removed in favor of always-visible Preferences panel
-import { api2, Run, formatDate, ChatMessage } from '../api'
+import { api2, Run, formatDate, ChatMessage, TemporalPolicy, TopicDetail, BudgetConfig, PendingApproval } from '../api'
 import { useToast } from '../components/Toasts'
 import ConfidenceGauge from '../components/ConfidenceGauge'
 import MarkdownView from '../components/MarkdownView'
 import Spinner from '../components/Spinner'
 import { useDialogA11y } from '../components/useDialogA11y'
 import { useSession } from '../session'
+
+type PolicyDraft = {
+  repeatMode: string
+  refreshInterval: string
+  dedupWindow: string
+  freshnessThreshold: string
+  metadata: string
+}
+
+const POLICY_METADATA_PLACEHOLDER = `{
+  "channels": ["rss"]
+}`
 
 function RunDetailModal({ topicId, runId, onClose }: { topicId: string; runId: string; onClose: () => void }) {
   const [md, setMd] = useState<string | null>(null)
@@ -83,14 +95,86 @@ export default function TopicDetailPage() {
       }
     })
   const latestQ = useQuery({ queryKey: ['latest', id], queryFn: () => api2.latestResult(id!), enabled: !!id, staleTime: 10_000 })
-  const topicQ = useQuery({ queryKey: ['topic', id], queryFn: () => api2.getTopic(id!), enabled: !!id })
+  const topicQ = useQuery<TopicDetail>({ queryKey: ['topic', id], queryFn: () => api2.getTopic(id!), enabled: !!id })
   const topicName = qc.getQueryData<any>(['topics'])?.find?.((t: any)=>t.ID===id)?.Name
+  const policy: TemporalPolicy | null = topicQ.data?.temporal_policy ?? null
+  const budgetCfg: BudgetConfig | null = topicQ.data?.budget ?? null
+  const pendingBudget: PendingApproval | null = topicQ.data?.pending_budget ?? null
   const [editingName, setEditingName] = useState(false)
   const [newName, setNewName] = useState<string>('')
   const [editingPrefs, setEditingPrefs] = useState(false)
   const [prefsDraft, setPrefsDraft] = useState<string>('')
+  const [editingPolicy, setEditingPolicy] = useState(false)
+  const [policyDraft, setPolicyDraft] = useState<PolicyDraft>({
+    repeatMode: 'adaptive',
+    refreshInterval: '',
+    dedupWindow: '',
+    freshnessThreshold: '',
+    metadata: ''
+  })
+  const [budgetDecisionReason, setBudgetDecisionReason] = useState('')
   const renameMut = useMutation({ mutationFn: (name: string) => api2.updateTopicName(id!, name), onSuccess: ()=>{ qc.invalidateQueries({ queryKey: ['topics'] }); setEditingName(false); toast.success('Topic renamed') }, onError: (e:any)=> toast.error(e.message || 'Rename failed') })
   const prefsMut = useMutation({ mutationFn: (payload: { preferences: any; scheduleCron?: string }) => api2.updateTopicPrefs(id!, payload.preferences, payload.scheduleCron), onSuccess: ()=>{ qc.invalidateQueries({ queryKey: ['topic', id] }); setEditingPrefs(false); toast.success('Preferences updated') }, onError: (e:any)=> toast.error(e.message || 'Update failed') })
+  const policyMut = useMutation({
+    mutationFn: (payload: { repeat_mode: string; refresh_interval?: string; dedup_window?: string; freshness_threshold?: string; metadata?: Record<string, any> }) =>
+      api2.updateTopicPolicy(id!, payload),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['topic', id] })
+      setEditingPolicy(false)
+      toast.success('Temporal policy updated')
+    },
+    onError: (e: any) => toast.error(e.message || 'Policy update failed')
+  })
+
+  const budgetDecisionMut = useMutation({
+    mutationFn: (payload: { approved: boolean; reason?: string }) => api2.decideBudget(id!, pendingBudget!.run_id, payload),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['topic', id] })
+      qc.invalidateQueries({ queryKey: ['runs', id] })
+      setBudgetDecisionReason('')
+      toast.success('Budget decision recorded')
+    },
+    onError: (e: any) => toast.error(e.message || 'Budget decision failed')
+  })
+
+  const beginPolicyEdit = useCallback(() => {
+    const current = policy
+    setPolicyDraft({
+      repeatMode: current?.repeat_mode || 'adaptive',
+      refreshInterval: current?.refresh_interval || '',
+      dedupWindow: current?.dedup_window || '',
+      freshnessThreshold: current?.freshness_threshold || '',
+      metadata: current?.metadata ? JSON.stringify(current.metadata, null, 2) : ''
+    })
+    setEditingPolicy(true)
+  }, [policy])
+
+  const savePolicy = useCallback(() => {
+    if (!id) return
+    let metadataValue: Record<string, any> | undefined
+    const metadataText = policyDraft.metadata.trim()
+    if (metadataText) {
+      try {
+        metadataValue = JSON.parse(metadataText)
+      } catch (e: any) {
+        toast.error('Metadata must be valid JSON')
+        return
+      }
+    }
+
+    const payload: { repeat_mode: string; refresh_interval?: string; dedup_window?: string; freshness_threshold?: string; metadata?: Record<string, any> } = {
+      repeat_mode: policyDraft.repeatMode
+    }
+    const refreshText = policyDraft.refreshInterval.trim()
+    const dedupText = policyDraft.dedupWindow.trim()
+    const freshText = policyDraft.freshnessThreshold.trim()
+    if (refreshText) payload.refresh_interval = refreshText
+    if (dedupText) payload.dedup_window = dedupText
+    if (freshText) payload.freshness_threshold = freshText
+    if (metadataValue !== undefined) payload.metadata = metadataValue
+
+    policyMut.mutate(payload)
+  }, [id, policyDraft, policyMut, toast])
 
   const triggerMut = useMutation({ mutationFn: () => api2.triggerRun(id!), onSuccess: () => { qc.invalidateQueries({ queryKey: ['runs', id] }); toast.success('Run triggered') }, onError: (e:any) => toast.error(e.message || 'Trigger failed') })
   const chatMut = useMutation({
@@ -257,6 +341,143 @@ export default function TopicDetailPage() {
                 {runsQ.data?.map(r => <RunRow key={r.ID} run={r} onOpen={()=>setOpenRunId(r.ID)} />)}
               </ul>
             </div>
+            <div className="card space-y-2">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Temporal Policy</h4>
+                {topicQ.isSuccess && !editingPolicy && (
+                  <button className="btn-secondary text-xs px-3" onClick={beginPolicyEdit}>Edit</button>
+                )}
+              </div>
+              {!topicQ.isSuccess && <div className="text-xs text-slate-500">{topicQ.isLoading ? 'Loading policy…' : 'No data'}</div>}
+              {topicQ.isSuccess && !editingPolicy && (
+                <div className="text-xs space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Repeat mode</span>
+                    <span className="text-slate-200 font-medium">{policy?.repeat_mode || 'adaptive'}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Refresh interval</span>
+                    <span className="text-slate-200">{policy?.refresh_interval || '—'}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Dedup window</span>
+                    <span className="text-slate-200">{policy?.dedup_window || '—'}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Freshness threshold</span>
+                    <span className="text-slate-200">{policy?.freshness_threshold || '—'}</span>
+                  </div>
+                  {policy?.metadata && Object.keys(policy.metadata).length > 0 ? (
+                    <pre className="bg-slate-900/60 border border-slate-800 rounded p-3 whitespace-pre-wrap overflow-x-auto">
+                      {JSON.stringify(policy.metadata, null, 2)}
+                    </pre>
+                  ) : (
+                    <div className="text-slate-500">No additional metadata.</div>
+                  )}
+                  <p className="text-[11px] text-slate-500">Durations use Go format (e.g. <code>30m</code>, <code>1h30m</code>). Blank fields keep defaults.</p>
+                </div>
+              )}
+              {topicQ.isSuccess && editingPolicy && (
+                <form className="space-y-3" onSubmit={(e)=>{ e.preventDefault(); savePolicy() }}>
+                  <label className="flex flex-col gap-1 text-xs">
+                    <span className="text-slate-300">Repeat mode</span>
+                    <select
+                      className="input text-xs"
+                      value={policyDraft.repeatMode}
+                      onChange={e=>setPolicyDraft(prev=>({ ...prev, repeatMode: e.target.value }))}
+                    >
+                      <option value="adaptive">adaptive</option>
+                      <option value="always">always</option>
+                      <option value="manual">manual</option>
+                    </select>
+                  </label>
+                  <div className="grid gap-2 sm:grid-cols-3 text-xs">
+                    <label className="flex flex-col gap-1">
+                      <span className="text-slate-300">Refresh interval</span>
+                      <input className="input text-xs" placeholder="e.g. 2h" value={policyDraft.refreshInterval} onChange={e=>setPolicyDraft(prev=>({ ...prev, refreshInterval: e.target.value }))} />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-slate-300">Dedup window</span>
+                      <input className="input text-xs" placeholder="e.g. 6h" value={policyDraft.dedupWindow} onChange={e=>setPolicyDraft(prev=>({ ...prev, dedupWindow: e.target.value }))} />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-slate-300">Freshness threshold</span>
+                      <input className="input text-xs" placeholder="e.g. 12h" value={policyDraft.freshnessThreshold} onChange={e=>setPolicyDraft(prev=>({ ...prev, freshnessThreshold: e.target.value }))} />
+                    </label>
+                  </div>
+                  <label className="flex flex-col gap-1 text-xs">
+                    <span className="text-slate-300">Metadata (JSON)</span>
+                    <textarea
+                      className="w-full h-32 bg-slate-900/60 border border-slate-800 rounded p-3 text-xs font-mono"
+                      placeholder={POLICY_METADATA_PLACEHOLDER}
+                      value={policyDraft.metadata}
+                      onChange={e=>setPolicyDraft(prev=>({ ...prev, metadata: e.target.value }))}
+                    />
+                  </label>
+                  <div className="flex gap-2 justify-end">
+                    <button type="button" className="btn-secondary text-xs px-3" onClick={()=>setEditingPolicy(false)} disabled={policyMut.isPending}>Cancel</button>
+                    <button type="submit" className="btn text-xs px-4" disabled={policyMut.isPending}>{policyMut.isPending ? 'Saving…' : 'Save'}</button>
+                  </div>
+                </form>
+              )}
+            </div>
+            <div className="card space-y-2">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Budget</h4>
+              </div>
+              {!topicQ.isSuccess && <div className="text-xs text-slate-500">{topicQ.isLoading ? 'Loading budget…' : 'No data'}</div>}
+              {topicQ.isSuccess && (
+                <div className="text-xs space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Max cost</span>
+                    <span className="text-slate-200">{budgetCfg?.max_cost != null ? `$${budgetCfg.max_cost.toFixed(2)}` : '—'}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Max tokens</span>
+                    <span className="text-slate-200">{budgetCfg?.max_tokens != null ? budgetCfg.max_tokens.toLocaleString() : '—'}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Max time</span>
+                    <span className="text-slate-200">{budgetCfg?.max_time_seconds != null ? `${budgetCfg.max_time_seconds}s` : '—'}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Approval threshold</span>
+                    <span className="text-slate-200">{budgetCfg?.approval_threshold != null ? `$${budgetCfg.approval_threshold.toFixed(2)}` : '—'}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Requires approval</span>
+                    <span className="text-slate-200">{budgetCfg?.require_approval ? 'Yes' : 'No'}</span>
+                  </div>
+                  {budgetCfg?.metadata && Object.keys(budgetCfg.metadata).length > 0 && (
+                    <pre className="bg-slate-900/60 border border-slate-800 rounded p-3 whitespace-pre-wrap overflow-x-auto">
+                      {JSON.stringify(budgetCfg.metadata, null, 2)}
+                    </pre>
+                  )}
+                </div>
+              )}
+            </div>
+            {pendingBudget && (
+              <div className="card space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Pending Budget Approval</h4>
+                </div>
+                <div className="text-xs space-y-2">
+                  <div className="flex items-center justify-between"><span className="text-slate-400">Run ID</span><span className="text-slate-200 font-mono">{pendingBudget.run_id}</span></div>
+                  <div className="flex items-center justify-between"><span className="text-slate-400">Estimated cost</span><span className="text-slate-200">${pendingBudget.estimated_cost.toFixed(2)}</span></div>
+                  <div className="flex items-center justify-between"><span className="text-slate-400">Threshold</span><span className="text-slate-200">${pendingBudget.threshold.toFixed(2)}</span></div>
+                  <div className="flex items-center justify-between"><span className="text-slate-400">Requested by</span><span className="text-slate-200">{pendingBudget.requested_by}</span></div>
+                  <div className="flex items-center justify-between"><span className="text-slate-400">Requested at</span><span className="text-slate-200">{new Date(pendingBudget.created_at).toLocaleString()}</span></div>
+                </div>
+                <label className="text-xs flex flex-col gap-1">
+                  <span className="text-slate-300">Decision note (required for rejection)</span>
+                  <textarea className="w-full h-20 bg-slate-900/60 border border-slate-800 rounded p-3 text-xs" value={budgetDecisionReason} onChange={e=>setBudgetDecisionReason(e.target.value)} placeholder="Reason for rejection" />
+                </label>
+                <div className="flex gap-2 justify-end">
+                  <button className="btn-secondary text-xs px-3" disabled={budgetDecisionMut.isPending} onClick={()=>budgetDecisionMut.mutate({ approved: true })}>Approve</button>
+                  <button className="btn text-xs px-3" disabled={budgetDecisionMut.isPending || !budgetDecisionReason.trim()} onClick={()=>budgetDecisionMut.mutate({ approved: false, reason: budgetDecisionReason.trim() })}>{budgetDecisionMut.isPending ? 'Submitting…' : 'Reject'}</button>
+                </div>
+              </div>
+            )}
             <div className="card space-y-2">
               <div className="flex items-center justify-between">
                 <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Preferences</h4>

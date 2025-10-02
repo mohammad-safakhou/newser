@@ -101,16 +101,16 @@ Ensure every execution runs inside an auditable sandbox with strict resource and
 Formal catalog of all available tools and their safe usage metadata.
 
 **Tasks**
-- [ ] Design `ToolCard` schema (I/O, cost, side effects).
-- [ ] Build signed registry service/API backed by Postgres.
-- [ ] Add CLI to publish, sign, and validate manifests.
-- [ ] Make orchestrator load only registered tools.
+- [x] Design `ToolCard` schema (I/O, cost, side effects).
+- [x] Build signed registry service/API backed by Postgres.
+- [x] Add CLI to publish, sign, and validate manifests.
+- [x] Make orchestrator load only registered tools.
 
 **Acceptance Criteria**
 
-- [ ] Unknown tools rejected.
-- [ ] All tools versioned and signed.
-- [ ] Registry validated in CI.
+- [x] Unknown tools rejected.
+- [x] All tools versioned and signed.
+- [x] Registry validated in CI.
 
 ---
 
@@ -119,17 +119,17 @@ Formal catalog of all available tools and their safe usage metadata.
 Planner LLM outputs JSON DAG representing dynamic multi-step workflows.
 
 **Tasks**
-- [ ] Define JSON schema for plans (nodes, edges, budgets).
-- [ ] Add plan validation and rejection logic in orchestrator.
-- [ ] Fine-tune LLM to emit schema-compliant plans.
-- [ ] Persist validated plan graphs in Postgres.
-- [ ] Add a “dry-run” endpoint for plan validation/costing.
+- [x] Define JSON schema for plans (nodes, edges, budgets).
+- [x] Add plan validation and rejection logic in orchestrator.
+- [x] Fine-tune LLM to emit schema-compliant plans.
+- [x] Persist validated plan graphs in Postgres.
+- [x] Add a “dry-run” endpoint for plan validation/costing.
 
 **Acceptance Criteria**
 
-- [ ] Invalid plans rejected with clear errors.
-- [ ] Plans persisted and viewable via API.
-- [ ] Dry-run returns cost/time estimates.
+- [x] Invalid plans rejected with clear errors.
+- [x] Plans persisted and viewable via API.
+- [x] Dry-run returns cost/time estimates.
 
 ---
 
@@ -138,14 +138,14 @@ Planner LLM outputs JSON DAG representing dynamic multi-step workflows.
 Execute plans deterministically with concurrency, retries, and checkpoint recovery.
 
 **Tasks**
-- [ ] Build DAG executor enforcing dependency order.
-- [ ] Add checkpoint persistence for resume after crash.
-- [ ] Implement retry and circuit-breaking strategies.
-- [ ] Expose executor metrics (retry counts, checkpoint age).
+- [x] Build DAG executor enforcing dependency order.
+- [x] Add checkpoint persistence for resume after crash.
+- [x] Implement retry and circuit-breaking strategies.
+- [x] Expose executor metrics (retry counts, checkpoint age).
 - [ ] Implement Temporal Policy Engine:
-  - Define `UpdatePolicy` schema (refresh_interval, dedup_window, repeat_mode, freshness_threshold).
-  - Pass this policy to the planner for query strategy generation.
-  - Persist per-topic in Postgres and expose in WebUI builder.
+  - [x] Define `UpdatePolicy` schema (refresh_interval, dedup_window, repeat_mode, freshness_threshold).
+  - [x] Pass this policy to the planner for query strategy generation.
+  - [x] Persist per-topic in Postgres and expose in WebUI builder.
 
 **Acceptance Criteria**
 
@@ -161,10 +161,10 @@ Execute plans deterministically with concurrency, retries, and checkpoint recove
 Monitor and restrict cost/time/token budgets.
 
 **Tasks**
-- [ ] Add budget configs per topic/run.
-- [ ] Estimate budgets pre-run using ToolCard metadata.
-- [ ] Abort gracefully when over budget and emit detailed report.
-- [ ] Implement approval UI for manual overrides.
+  - [x] Add budget configs per topic/run.
+  - [x] Estimate budgets pre-run using ToolCard metadata.
+  - [x] Abort gracefully when over budget and emit detailed report.
+  - [x] Implement approval UI for manual overrides.
 
 **Acceptance Criteria**
 

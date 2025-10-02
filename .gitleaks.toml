@@ -5,7 +5,8 @@ regexes = [
   # Allow placeholder secrets used in examples
   "change-me",
   "changeme",
-  "OpenAI_API_Key"
+  "OpenAI_API_Key",
+  "capability-secret-change-me"
 ]
 
 [[rules]]
@@ -19,4 +20,3 @@ regexes = ["OpenAI_API_Key"]
 id = "jwt-secret"
 description = "JWT Secret"
 regex = '''(?i)jwt[_-]?secret[^\n]{0,20}[0-9a-zA-Z]{16,}'''
-

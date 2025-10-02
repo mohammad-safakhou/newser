@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,7 +16,9 @@ import (
 	"github.com/microcosm-cc/bluemonday"
 	"github.com/mohammad-safakhou/newser/config"
 	core "github.com/mohammad-safakhou/newser/internal/agent/core"
+	"github.com/mohammad-safakhou/newser/internal/budget"
 	"github.com/mohammad-safakhou/newser/internal/helpers"
+	policy "github.com/mohammad-safakhou/newser/internal/policy"
 	"github.com/mohammad-safakhou/newser/internal/runtime"
 	"github.com/mohammad-safakhou/newser/internal/store"
 )
@@ -46,6 +49,7 @@ func (h *RunsHandler) Register(g *echo.Group, secret []byte) {
 	g.GET("/:topic_id/runs/:run_id/markdown", h.markdown)
 	g.POST("/:topic_id/runs/:run_id/expand_all", h.expandAll)
 	g.GET("/:topic_id/runs/:run_id/html", h.html)
+	g.POST("/:topic_id/runs/:run_id/budget_decision", h.budgetDecision)
 }
 
 // Trigger a new run for a topic
@@ -82,6 +86,11 @@ func (h *RunsHandler) trigger(c echo.Context) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
 		if err := processRun(ctx, h.cfg, h.store, h.orch, topicID, userID, runID); err != nil {
+			var approval budget.ErrApprovalRequired
+			if errors.As(err, &approval) {
+				// run remains pending approval; do not mark failed yet
+				return
+			}
 			_ = h.store.FinishRun(ctx, runID, "failed", strPtr(err.Error()))
 		}
 	}()
@@ -454,6 +463,64 @@ func (h *RunsHandler) expandAll(c echo.Context) error {
 	return c.JSON(http.StatusOK, ExpandAllResponse{Markdown: md})
 }
 
+func (h *RunsHandler) budgetDecision(c echo.Context) error {
+	ctx := c.Request().Context()
+	userID := c.Get("user_id").(string)
+	topicID := c.Param("topic_id")
+	runID := c.Param("run_id")
+	var req struct {
+		Approved bool   `json:"approved"`
+		Reason   string `json:"reason"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	if _, _, _, err := h.store.GetTopicByID(ctx, topicID, userID); err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	approval, ok, err := h.store.GetPendingBudgetApproval(ctx, topicID)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok || approval.RunID != runID {
+		return echo.NewHTTPError(http.StatusBadRequest, "no pending approval for run")
+	}
+	var reasonPtr *string
+	if strings.TrimSpace(req.Reason) != "" {
+		reason := strings.TrimSpace(req.Reason)
+		reasonPtr = &reason
+	}
+	if err := h.store.ResolveBudgetApproval(ctx, runID, req.Approved, userID, reasonPtr); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if req.Approved {
+		if err := h.store.SetRunStatus(ctx, runID, "running"); err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		}
+		if h.orch != nil {
+			go func() {
+				workerCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+				defer cancel()
+				if err := processRun(workerCtx, h.cfg, h.store, h.orch, topicID, userID, runID); err != nil {
+					_ = h.store.FinishRun(workerCtx, runID, "failed", strPtr(err.Error()))
+				}
+			}()
+		}
+		return c.JSON(http.StatusAccepted, map[string]string{"status": "approved"})
+	}
+	// rejected
+	if err := h.store.SetRunStatus(ctx, runID, "rejected"); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if err := h.store.MarkRunBudgetOverrun(ctx, runID, fmt.Sprintf("rejected: %s", strings.TrimSpace(req.Reason))); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if err := h.store.FinishRun(ctx, runID, "rejected", reasonPtr); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]string{"status": "rejected"})
+}
+
 // HTML view for a run's report (feature-flagged optional view). Returns text/html.
 //
 //	@Summary  Run report as HTML
@@ -514,6 +581,30 @@ func processRun(ctx context.Context, cfg *config.Config, st *store.Store, orch *
 		ctxMap["knowledge_graph"] = map[string]interface{}{"nodes": kg.Nodes, "edges": kg.Edges, "last_updated": kg.LastUpdated}
 	}
 
+	// Load temporal update policy for the topic (defaults when not configured).
+	pol := policy.NewDefault()
+	if stored, ok, err := st.GetUpdatePolicy(ctx, topicID); err != nil {
+		return fmt.Errorf("load update policy: %w", err)
+	} else if ok {
+		pol = stored
+	}
+	policyContext := map[string]interface{}{
+		"repeat_mode": string(pol.RepeatMode),
+	}
+	if pol.RefreshInterval > 0 {
+		policyContext["refresh_interval"] = pol.RefreshInterval.String()
+	}
+	if pol.DedupWindow > 0 {
+		policyContext["dedup_window"] = pol.DedupWindow.String()
+	}
+	if pol.FreshnessThreshold > 0 {
+		policyContext["freshness_threshold"] = pol.FreshnessThreshold.String()
+	}
+	if len(pol.Metadata) > 0 {
+		policyContext["metadata"] = pol.Metadata
+	}
+	ctxMap["temporal_policy"] = policyContext
+
 	// Fetch topic (name, preferences)
 	name, prefsB, _, err := st.GetTopicByID(ctx, topicID, userID)
 	if err != nil {
@@ -524,10 +615,54 @@ func processRun(ctx context.Context, cfg *config.Config, st *store.Store, orch *
 
 	// Construct thought from preferences (not user-defined name)
 	content := deriveThoughtContentFromPrefs(prefs)
-	thought := core.UserThought{ID: runID, Content: content, Preferences: prefs, Timestamp: time.Now(), Context: ctxMap}
+	budgetCfg, hasBudget, err := st.GetTopicBudgetConfig(ctx, topicID)
+	if err != nil {
+		return fmt.Errorf("load budget config: %w", err)
+	}
+	if hasBudget && !budgetCfg.IsZero() {
+		budgetContext := map[string]interface{}{}
+		if budgetCfg.MaxCost != nil {
+			budgetContext["max_cost"] = *budgetCfg.MaxCost
+		}
+		if budgetCfg.MaxTokens != nil {
+			budgetContext["max_tokens"] = *budgetCfg.MaxTokens
+		}
+		if budgetCfg.MaxTimeSeconds != nil {
+			budgetContext["max_time_seconds"] = *budgetCfg.MaxTimeSeconds
+		}
+		if budgetCfg.ApprovalThreshold != nil {
+			budgetContext["approval_threshold"] = *budgetCfg.ApprovalThreshold
+		}
+		budgetContext["require_approval"] = budgetCfg.RequireApproval
+		if len(budgetCfg.Metadata) > 0 {
+			budgetContext["metadata"] = budgetCfg.Metadata
+		}
+		ctxMap["budget"] = budgetContext
+	}
+	var thoughtBudget *budget.Config
+	if hasBudget && !budgetCfg.IsZero() {
+		cfgClone := budgetCfg.Clone()
+		thoughtBudget = &cfgClone
+		if err := st.ApplyRunBudget(ctx, runID, cfgClone); err != nil {
+			return fmt.Errorf("apply run budget: %w", err)
+		}
+	}
+	policyCopy := pol.Clone()
+	thought := core.UserThought{ID: runID, Content: content, Preferences: prefs, Timestamp: time.Now(), Context: ctxMap, Policy: &policyCopy, Budget: thoughtBudget}
 
 	result, err := orch.ProcessThought(ctx, thought)
 	if err != nil {
+		var exceeded budget.ErrExceeded
+		var approval budget.ErrApprovalRequired
+		switch {
+		case errors.As(err, &approval):
+			if hasBudget {
+				_ = st.MarkRunPendingApproval(ctx, runID)
+				_ = st.CreateBudgetApproval(ctx, runID, topicID, userID, approval.EstimatedCost, approval.Threshold)
+			}
+		case errors.As(err, &exceeded):
+			_ = st.MarkRunBudgetOverrun(ctx, runID, exceeded.Error())
+		}
 		return err
 	}
 

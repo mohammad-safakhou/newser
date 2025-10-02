@@ -12,7 +12,9 @@ import (
 
 	"github.com/labstack/echo/v4"
 	agentcore "github.com/mohammad-safakhou/newser/internal/agent/core"
+	"github.com/mohammad-safakhou/newser/internal/budget"
 	"github.com/mohammad-safakhou/newser/internal/helpers"
+	"github.com/mohammad-safakhou/newser/internal/policy"
 	"github.com/mohammad-safakhou/newser/internal/runtime"
 	"github.com/mohammad-safakhou/newser/internal/store"
 )
@@ -33,6 +35,8 @@ func (h *TopicsHandler) Register(g *echo.Group, secret []byte) {
 	g.GET("/:id", h.get)
 	g.PATCH("/:id", h.update)
 	g.PATCH("/:id/preferences", h.updatePreferences)
+	g.PUT("/:id/policy", h.updatePolicy)
+	g.PUT("/:id/budget", h.updateBudget)
 	g.POST("/:id/chat", h.chat)
 	g.GET("/:id/chat", h.chatHistory)
 }
@@ -106,11 +110,34 @@ func (h *TopicsHandler) get(c echo.Context) error {
 	}
 	var prefs map[string]interface{}
 	_ = json.Unmarshal(prefsB, &prefs)
+	pol := policy.NewDefault()
+	if stored, ok, err := h.Store.GetUpdatePolicy(c.Request().Context(), topicID); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("load policy: %v", err))
+	} else if ok {
+		pol = stored
+	}
+	budgetCfg, _, err := h.Store.GetTopicBudgetConfig(c.Request().Context(), topicID)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("load budget: %v", err))
+	}
+	approval, hasPending, err := h.Store.GetPendingBudgetApproval(c.Request().Context(), topicID)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("load budget approval: %v", err))
+	}
+
 	return c.JSON(http.StatusOK, TopicDetailResponse{
 		ID:           topicID,
 		Name:         name,
 		ScheduleCron: cron,
 		Preferences:  prefs,
+		Policy:       temporalPolicyResponse(pol),
+		Budget:       budgetResponse(budgetCfg),
+		PendingBudget: func() *PendingApproval {
+			if !hasPending {
+				return nil
+			}
+			return pendingApprovalResponse(approval)
+		}(),
 	})
 }
 
@@ -187,6 +214,205 @@ func (h *TopicsHandler) updatePreferences(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+// updatePolicy updates the temporal policy for a topic.
+//
+//	@Summary  Update topic temporal policy
+//	@Tags     topics
+//	@Security BearerAuth
+//	@Security CookieAuth
+//	@Param    id      path  string true "Topic ID"
+//	@Accept   json
+//	@Produce  json
+//	@Param    payload body  UpdateTemporalPolicyRequest true "Temporal policy"
+//	@Success  200 {object} TemporalPolicyResponse
+//	@Failure  400 {object} HTTPError
+//	@Failure  404 {object} HTTPError
+//	@Router   /api/topics/{id}/policy [put]
+func (h *TopicsHandler) updatePolicy(c echo.Context) error {
+	userID := c.Get("user_id").(string)
+	topicID := c.Param("id")
+
+	if _, _, _, err := h.Store.GetTopicByID(c.Request().Context(), topicID, userID); err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+
+	var req UpdateTemporalPolicyRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	if strings.TrimSpace(req.RepeatMode) == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "repeat_mode is required")
+	}
+
+	parseDuration := func(label string, value *string) (time.Duration, error) {
+		if value == nil {
+			return 0, nil
+		}
+		trimmed := strings.TrimSpace(*value)
+		if trimmed == "" {
+			return 0, nil
+		}
+		d, err := time.ParseDuration(trimmed)
+		if err != nil {
+			return 0, fmt.Errorf("%s must be a Go duration (e.g. 1h30m)", label)
+		}
+		if d < 0 {
+			return 0, fmt.Errorf("%s cannot be negative", label)
+		}
+		return d, nil
+	}
+
+	refresh, err := parseDuration("refresh_interval", req.RefreshInterval)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	dedup, err := parseDuration("dedup_window", req.DedupWindow)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	fresh, err := parseDuration("freshness_threshold", req.FreshnessThreshold)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+
+	pol := policy.UpdatePolicy{
+		RefreshInterval:    refresh,
+		DedupWindow:        dedup,
+		RepeatMode:         policy.RepeatMode(strings.TrimSpace(req.RepeatMode)),
+		FreshnessThreshold: fresh,
+		Metadata:           req.Metadata,
+	}
+	if err := pol.Validate(); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+
+	if err := h.Store.UpsertUpdatePolicy(c.Request().Context(), topicID, pol); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+
+	return c.JSON(http.StatusOK, temporalPolicyResponse(pol))
+}
+
+func temporalPolicyResponse(pol policy.UpdatePolicy) *TemporalPolicyResponse {
+	resp := &TemporalPolicyResponse{
+		RepeatMode: string(pol.RepeatMode),
+	}
+	if pol.RefreshInterval > 0 {
+		resp.RefreshInterval = pol.RefreshInterval.String()
+	}
+	if pol.DedupWindow > 0 {
+		resp.DedupWindow = pol.DedupWindow.String()
+	}
+	if pol.FreshnessThreshold > 0 {
+		resp.FreshnessThreshold = pol.FreshnessThreshold.String()
+	}
+	if len(pol.Metadata) > 0 {
+		resp.Metadata = pol.Metadata
+	}
+	return resp
+}
+
+// updateBudget updates the budget guardrails for a topic.
+//
+//	@Summary  Update topic budget
+//	@Tags     topics
+//	@Security BearerAuth
+//	@Security CookieAuth
+//	@Param    id      path  string true "Topic ID"
+//	@Accept   json
+//	@Produce  json
+//	@Param    payload body  UpdateBudgetConfigRequest true "Budget config"
+//	@Success  200 {object} BudgetConfigResponse
+//	@Failure  400 {object} HTTPError
+//	@Failure  404 {object} HTTPError
+//	@Router   /api/topics/{id}/budget [put]
+func (h *TopicsHandler) updateBudget(c echo.Context) error {
+	userID := c.Get("user_id").(string)
+	topicID := c.Param("id")
+	if _, _, _, err := h.Store.GetTopicByID(c.Request().Context(), topicID, userID); err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	var req UpdateBudgetConfigRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	current, _, err := h.Store.GetTopicBudgetConfig(c.Request().Context(), topicID)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("load budget: %v", err))
+	}
+	cfg := current.Clone()
+	if req.MaxCost != nil {
+		v := *req.MaxCost
+		cfg.MaxCost = &v
+	}
+	if req.MaxTokens != nil {
+		v := *req.MaxTokens
+		cfg.MaxTokens = &v
+	}
+	if req.MaxTimeSeconds != nil {
+		v := *req.MaxTimeSeconds
+		cfg.MaxTimeSeconds = &v
+	}
+	if req.ApprovalThreshold != nil {
+		v := *req.ApprovalThreshold
+		cfg.ApprovalThreshold = &v
+	}
+	if req.RequireApproval != nil {
+		cfg.RequireApproval = *req.RequireApproval
+	}
+	if req.Metadata != nil {
+		cfg.Metadata = req.Metadata
+	}
+	if err := cfg.Validate(); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	if err := h.Store.UpsertTopicBudgetConfig(c.Request().Context(), topicID, cfg); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, budgetResponse(cfg))
+}
+
+func budgetResponse(cfg budget.Config) *BudgetConfigResponse {
+	if cfg.MaxCost == nil && cfg.MaxTokens == nil && cfg.MaxTimeSeconds == nil && cfg.ApprovalThreshold == nil && !cfg.RequireApproval && len(cfg.Metadata) == 0 {
+		return nil
+	}
+	resp := &BudgetConfigResponse{RequireApproval: cfg.RequireApproval}
+	if cfg.MaxCost != nil {
+		v := *cfg.MaxCost
+		resp.MaxCost = &v
+	}
+	if cfg.MaxTokens != nil {
+		v := *cfg.MaxTokens
+		resp.MaxTokens = &v
+	}
+	if cfg.MaxTimeSeconds != nil {
+		v := *cfg.MaxTimeSeconds
+		resp.MaxTimeSeconds = &v
+	}
+	if cfg.ApprovalThreshold != nil {
+		v := *cfg.ApprovalThreshold
+		resp.ApprovalThreshold = &v
+	}
+	if len(cfg.Metadata) > 0 {
+		clone := make(map[string]interface{}, len(cfg.Metadata))
+		for k, v := range cfg.Metadata {
+			clone[k] = v
+		}
+		resp.Metadata = clone
+	}
+	return resp
+}
+
+func pendingApprovalResponse(rec store.BudgetApprovalRecord) *PendingApproval {
+	return &PendingApproval{
+		RunID:         rec.RunID,
+		EstimatedCost: rec.EstimatedCost,
+		Threshold:     rec.Threshold,
+		CreatedAt:     rec.CreatedAt.Format(time.RFC3339),
+		RequestedBy:   rec.RequestedBy,
+	}
 }
 
 // chat handles LLM-assisted conversation to refine a topic's goal/preferences

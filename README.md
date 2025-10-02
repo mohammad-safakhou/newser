@@ -45,6 +45,7 @@ The repo ships with a multi-service compose file that runs Postgres, Redis, the 
 - Grafana: http://localhost:3001 (default credentials admin/admin)
 - Prometheus: http://localhost:9090
 - Tempo OTLP (traces): gRPC on `tempo:4317`
+- Capability registry CLI: `./tools list` or `./tools publish --file tool.json`
 
 Notes:
 - Chat/assist features require `OPENAI_API_KEY`. The API fails fast on startup if the key is missing.

@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/mohammad-safakhou/newser/internal/executor"
 	"github.com/mohammad-safakhou/newser/internal/queue/streams"
 	"github.com/mohammad-safakhou/newser/internal/store"
 	otelmetric "go.opentelemetry.io/otel/metric"
@@ -44,6 +45,8 @@ type Processor struct {
 	runCounter   otelmetric.Int64Counter
 	taskCounter  otelmetric.Int64Counter
 	retryCounter otelmetric.Int64Counter
+	executor     *executor.Executor
+	runner       executor.TaskRunner
 }
 
 // RunEnqueuedPayload mirrors the JSON payload published to run.enqueued.
@@ -86,6 +89,9 @@ func NewProcessor(logger *log.Logger, st StoreAPI, pub *streams.Publisher, cons 
 			logger.Printf("warn: create retry counter failed: %v", err)
 		}
 	}
+
+	proc.executor = executor.New(executor.WithCheckpointManager(executor.NewStoreCheckpointManager(st)))
+	proc.runner = &taskDispatchRunner{publisher: pub, taskStream: taskStream, counter: proc.taskCounter}
 	return proc
 }
 
@@ -169,30 +175,10 @@ func (p *Processor) handleRunEnqueued(ctx context.Context, msg streams.Message) 
 		return fmt.Errorf("upsert run checkpoint: %w", err)
 	}
 
-	if err := p.dispatchBootstrap(ctx, runID, payload); err != nil {
-		return err
-	}
-	if p.runCounter != nil {
-		p.runCounter.Add(ctx, 1)
-	}
-	return nil
-}
-
-func (p *Processor) dispatchBootstrap(ctx context.Context, runID string, payload RunEnqueuedPayload) error {
-	cp, exists, err := p.store.GetCheckpoint(ctx, runID, stageBootstrapTask)
-	if err != nil {
-		return fmt.Errorf("get bootstrap checkpoint: %w", err)
-	}
-	if exists && cp.Status == store.CheckpointStatusDispatched {
-		// already dispatched; nothing to do
-		return nil
-	}
-
-	taskID := fmt.Sprintf("bootstrap:%s", runID)
-	dispatchToken := fmt.Sprintf("%s:%s", stageBootstrapTask, runID)
+	dispatchToken := fmt.Sprintf("bootstrap:%s:%s", msg.Envelope.EventID, runID)
 	taskPayload := map[string]interface{}{
 		"run_id":           runID,
-		"task_id":          taskID,
+		"task_id":          fmt.Sprintf("bootstrap:%s", runID),
 		"task_type":        "bootstrap",
 		"priority":         1,
 		"plan_snapshot":    map[string]interface{}{"kind": "bootstrap"},
@@ -200,27 +186,20 @@ func (p *Processor) dispatchBootstrap(ctx context.Context, runID string, payload
 		"checkpoint_token": dispatchToken,
 	}
 
-	if err := p.store.UpsertCheckpoint(ctx, store.Checkpoint{
-		RunID:           runID,
-		Stage:           stageBootstrapTask,
-		Status:          store.CheckpointStatusDispatched,
-		CheckpointToken: dispatchToken,
-		Payload:         taskPayload,
-		Retries: func() int {
-			if exists {
-				return cp.Retries + 1
-			}
-			return 0
-		}(),
-	}); err != nil {
-		return fmt.Errorf("upsert bootstrap checkpoint: %w", err)
-	}
+	graph := executor.Graph{Tasks: map[string]executor.Task{
+		stageBootstrapTask: {
+			ID:              stageBootstrapTask,
+			Stage:           stageBootstrapTask,
+			Payload:         map[string]interface{}{"dispatch": taskPayload},
+			CheckpointToken: dispatchToken,
+		},
+	}}
 
-	if _, err := p.publisher.PublishRaw(ctx, p.taskStream, StreamTaskDispatch, "v1", taskPayload); err != nil {
-		return fmt.Errorf("publish task.dispatch: %w", err)
+	if _, err := p.executor.Execute(ctx, runID, graph, p.runner); err != nil {
+		return fmt.Errorf("execute bootstrap: %w", err)
 	}
-	if p.taskCounter != nil {
-		p.taskCounter.Add(ctx, 1)
+	if p.runCounter != nil {
+		p.runCounter.Add(ctx, 1)
 	}
 	return nil
 }
@@ -237,7 +216,17 @@ func (p *Processor) resumePending(ctx context.Context) error {
 		if cp.Payload == nil {
 			continue
 		}
-		if _, err := p.publisher.PublishRaw(ctx, p.taskStream, StreamTaskDispatch, "v1", cp.Payload); err != nil {
+		payloadWrapper, ok := cp.Payload["payload"].(map[string]interface{})
+		if !ok {
+			p.logger.Printf("warn: missing payload wrapper for run %s", cp.RunID)
+			continue
+		}
+		dispatchPayload, ok := payloadWrapper["dispatch"].(map[string]interface{})
+		if !ok {
+			p.logger.Printf("warn: missing dispatch payload for run %s", cp.RunID)
+			continue
+		}
+		if _, err := p.publisher.PublishRaw(ctx, p.taskStream, StreamTaskDispatch, "v1", dispatchPayload); err != nil {
 			p.logger.Printf("warn: failed to re-dispatch task for run %s: %v", cp.RunID, err)
 			continue
 		}

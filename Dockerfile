@@ -10,6 +10,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/executor ./cmd/execut
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/crawler ./cmd/crawler
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/memory ./cmd/memory
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/schema ./cmd/schema
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/tools ./cmd/tools
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/newser ./
 
 FROM gcr.io/distroless/base-debian12
@@ -20,6 +21,7 @@ COPY --from=gobuild /out/executor /usr/local/bin/executor
 COPY --from=gobuild /out/crawler /usr/local/bin/crawler
 COPY --from=gobuild /out/memory /usr/local/bin/memory
 COPY --from=gobuild /out/schema /usr/local/bin/schema
+COPY --from=gobuild /out/tools /usr/local/bin/tools
 COPY --from=gobuild /out/newser /usr/local/bin/newser
 COPY --from=gobuild /src/config /app/config
 COPY migrations /app/migrations

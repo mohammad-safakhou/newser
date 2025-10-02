@@ -16,6 +16,7 @@ type Config struct {
 	Server    ServerConfig    `mapstructure:"server"`
 	LLM       LLMConfig       `mapstructure:"llm"`
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
+	Capability CapabilityConfig `mapstructure:"capability"`
 	Agents    AgentsConfig    `mapstructure:"agents"`
 	Sources   SourcesConfig   `mapstructure:"sources"`
 	Storage   StorageConfig   `mapstructure:"storage"`
@@ -76,19 +77,25 @@ type LLMRoutingConfig struct {
 
 // TelemetryConfig contains telemetry and monitoring settings
 type TelemetryConfig struct {
-    Enabled      bool   `mapstructure:"enabled"`
-    MetricsPort  int    `mapstructure:"metrics_port"`
-    LogFile      string `mapstructure:"log_file"`
-    CostTracking bool   `mapstructure:"cost_tracking"`
-    PeriodicLogs bool   `mapstructure:"periodic_logs"`
-    OTLPEndpoint string `mapstructure:"otlp_endpoint"`
+	Enabled      bool   `mapstructure:"enabled"`
+	MetricsPort  int    `mapstructure:"metrics_port"`
+	LogFile      string `mapstructure:"log_file"`
+	CostTracking bool   `mapstructure:"cost_tracking"`
+	PeriodicLogs bool   `mapstructure:"periodic_logs"`
+	OTLPEndpoint string `mapstructure:"otlp_endpoint"`
+}
+
+// CapabilityConfig controls the ToolCard registry behaviour.
+type CapabilityConfig struct {
+	SigningSecret string   `mapstructure:"signing_secret"`
+	RequiredTools []string `mapstructure:"required_tools"`
 }
 
 // SecurityConfig declares sandbox policy defaults.
 type SecurityConfig struct {
-    SandboxProvider string        `mapstructure:"sandbox_provider"`
-    PolicyFile      string        `mapstructure:"policy_file"`
-    DefaultTimeout  time.Duration `mapstructure:"default_timeout"`
+	SandboxProvider string        `mapstructure:"sandbox_provider"`
+	PolicyFile      string        `mapstructure:"policy_file"`
+	DefaultTimeout  time.Duration `mapstructure:"default_timeout"`
     DefaultCPU      float64       `mapstructure:"default_cpu"`
     DefaultMemory   string        `mapstructure:"default_memory"`
 }

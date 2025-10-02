@@ -52,13 +52,13 @@ func Run(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	// Agent config + telemetry + orchestrator (single instance)
-	tele := agenttele.NewTelemetry(cfg.Telemetry)
-	orchLogger := log.New(log.Writer(), "[ORCH] ", log.LstdFlags)
-	orch, err := agentcore.NewOrchestrator(cfg, orchLogger, tele)
+	capRegistry, err := runtime.EnsureCapabilityRegistry(ctx, st, cfg)
 	if err != nil {
 		return err
 	}
+	// Agent config + telemetry + orchestrator (single instance)
+	tele := agenttele.NewTelemetry(cfg.Telemetry)
+	orchLogger := log.New(log.Writer(), "[ORCH] ", log.LstdFlags)
 	// LLM provider for topic chat using internal core factory
 	llmProvider, err := agentcore.NewLLMProvider(cfg.LLM)
 	if err != nil {
@@ -112,6 +112,12 @@ func Run(cfg *config.Config) error {
 		return err
 	}
 
+	planRepo := newPlanRepository(auth.Store, orchLogger)
+	orch, err := agentcore.NewOrchestrator(cfg, orchLogger, tele, capRegistry, planRepo)
+	if err != nil {
+		return err
+	}
+
 	api := e.Group("/api")
 	auth.Register(api.Group("/auth"))
 
@@ -125,6 +131,12 @@ func Run(cfg *config.Config) error {
 
 	rh := NewRunsHandler(cfg, auth.Store, orch)
 	rh.Register(api.Group("/topics"), auth.Secret)
+
+	toolsH := &ToolsHandler{Store: auth.Store, Config: cfg}
+	toolsH.Register(api.Group("/tools"), auth.Secret)
+
+	plansH := NewPlansHandler(planRepo)
+	plansH.Register(api.Group("/plans"), auth.Secret)
 
 	// ops endpoints (authenticated)
 	oh := NewOpsHandler(orch)

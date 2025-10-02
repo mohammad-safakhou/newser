@@ -3,15 +3,21 @@ package core
 import (
 	"context"
 	"time"
+
+	"github.com/mohammad-safakhou/newser/internal/budget"
+	planner "github.com/mohammad-safakhou/newser/internal/planner"
+	policypkg "github.com/mohammad-safakhou/newser/internal/policy"
 )
 
 // UserThought represents a user's thought or request
 type UserThought struct {
-	ID          string                 `json:"id"`
-	Content     string                 `json:"content"`
-	Timestamp   time.Time              `json:"timestamp"`
-	Preferences map[string]interface{} `json:"preferences,omitempty"`
-	Context     map[string]interface{} `json:"context,omitempty"`
+	ID          string                  `json:"id"`
+	Content     string                  `json:"content"`
+	Timestamp   time.Time               `json:"timestamp"`
+	Preferences map[string]interface{}  `json:"preferences,omitempty"`
+	Context     map[string]interface{}  `json:"context,omitempty"`
+	Policy      *policypkg.UpdatePolicy `json:"temporal_policy,omitempty"`
+	Budget      *budget.Config          `json:"budget,omitempty"`
 }
 
 // ProcessingResult represents the final result of processing a user thought
@@ -101,11 +107,19 @@ type AgentResult struct {
 
 // PlanningResult represents the result of planning phase
 type PlanningResult struct {
-	Tasks          []AgentTask   `json:"tasks"`
-	ExecutionOrder []string      `json:"execution_order"`
-	EstimatedCost  float64       `json:"estimated_cost"`
-	EstimatedTime  time.Duration `json:"estimated_time"`
-	Confidence     float64       `json:"confidence"`
+	Tasks                  []AgentTask             `json:"tasks"`
+	ExecutionOrder         []string                `json:"execution_order"`
+	EstimatedCost          float64                 `json:"estimated_cost"`
+	EstimatedTime          time.Duration           `json:"estimated_time"`
+	Confidence             float64                 `json:"confidence"`
+	Budget                 *planner.PlanBudget     `json:"budget,omitempty"`
+	Edges                  []planner.PlanEdge      `json:"edges,omitempty"`
+	Estimates              *planner.PlanEstimates  `json:"estimates,omitempty"`
+	Graph                  *planner.PlanDocument   `json:"graph,omitempty"`
+	RawJSON                []byte                  `json:"-"`
+	TemporalPolicy         *policypkg.UpdatePolicy `json:"temporal_policy,omitempty"`
+	BudgetConfig           *budget.Config          `json:"-"`
+	BudgetApprovalRequired bool                    `json:"budget_approval_required"`
 }
 
 // KnowledgeGraph represents the knowledge graph for a topic
@@ -273,4 +287,19 @@ type Storage interface {
 
 	// DeleteHighlight deletes a highlight
 	DeleteHighlight(ctx context.Context, highlightID string) error
+}
+
+// PlanRepository persists validated planner graphs for later inspection or replay.
+type PlanRepository interface {
+	SavePlanGraph(ctx context.Context, thoughtID string, doc *planner.PlanDocument, raw []byte) (string, error)
+	GetLatestPlanGraph(ctx context.Context, thoughtID string) (StoredPlanGraph, bool, error)
+}
+
+// StoredPlanGraph returns the durable representation of a plan graph.
+type StoredPlanGraph struct {
+	PlanID    string
+	ThoughtID string
+	Document  *planner.PlanDocument
+	RawJSON   []byte
+	UpdatedAt time.Time
 }
