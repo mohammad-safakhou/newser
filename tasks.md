@@ -142,17 +142,17 @@ Execute plans deterministically with concurrency, retries, and checkpoint recove
 - [x] Add checkpoint persistence for resume after crash.
 - [x] Implement retry and circuit-breaking strategies.
 - [x] Expose executor metrics (retry counts, checkpoint age).
-- [ ] Implement Temporal Policy Engine:
+- [x] Implement Temporal Policy Engine:
   - [x] Define `UpdatePolicy` schema (refresh_interval, dedup_window, repeat_mode, freshness_threshold).
   - [x] Pass this policy to the planner for query strategy generation.
   - [x] Persist per-topic in Postgres and expose in WebUI builder.
 
 **Acceptance Criteria**
 
-- [ ] Partial runs resume correctly.
-- [ ] Flaky tool retries capped.
-- [ ] Executor metrics visible.
-- [ ] Planner can adapt its plan structure based on user’s temporal policy (confirmed by inspecting plan JSON).
+- [x] Partial runs resume correctly.
+- [x] Flaky tool retries capped.
+- [x] Executor metrics visible.
+- [x] Planner can adapt its plan structure based on user’s temporal policy (confirmed by inspecting plan JSON).
 
 ---
 
@@ -168,9 +168,9 @@ Monitor and restrict cost/time/token budgets.
 
 **Acceptance Criteria**
 
-- [ ] Runs stop cleanly when budget breached.
-- [ ] Approval flow audited.
-- [ ] Cost telemetry accurate.
+- [x] Runs stop cleanly when budget breached.
+- [x] Approval flow audited.
+- [x] Cost telemetry accurate.
 
 ---
 
