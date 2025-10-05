@@ -96,6 +96,21 @@
       "enabled": false
     }
   },
+  "memory": {
+    "episodic": {
+      "enabled": true,
+      "retention_days": 90
+    },
+    "semantic": {
+      "enabled": false,
+      "embedding_model": "text-embedding-3-large",
+      "embedding_dimensions": 1536,
+      "search_top_k": 5,
+      "search_threshold": 0.8,
+      "writer_batch_size": 32,
+      "rebuild_on_startup": false
+    }
+  },
   "storage": {
     "redis": {
       "host": "localhost",

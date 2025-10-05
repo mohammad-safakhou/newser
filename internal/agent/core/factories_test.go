@@ -19,6 +19,10 @@ func (stubLLM) GenerateWithTokens(ctx context.Context, prompt string, model stri
 	return "", 0, 0, nil
 }
 
+func (stubLLM) Embed(ctx context.Context, model string, input []string) ([][]float32, error) {
+	return nil, nil
+}
+
 func (stubLLM) GetAvailableModels() []string { return []string{"stub"} }
 
 func (stubLLM) GetModelInfo(model string) (ModelInfo, error) { return ModelInfo{Name: model}, nil }

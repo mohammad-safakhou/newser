@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,24 +19,60 @@ import (
 	core "github.com/mohammad-safakhou/newser/internal/agent/core"
 	"github.com/mohammad-safakhou/newser/internal/budget"
 	"github.com/mohammad-safakhou/newser/internal/helpers"
+	"github.com/mohammad-safakhou/newser/internal/memory/semantic"
+	"github.com/mohammad-safakhou/newser/internal/planner"
 	policy "github.com/mohammad-safakhou/newser/internal/policy"
 	"github.com/mohammad-safakhou/newser/internal/runtime"
 	"github.com/mohammad-safakhou/newser/internal/store"
 )
 
 type RunsHandler struct {
-	store *store.Store
-	orch  *core.Orchestrator
-	cfg   *config.Config
+	store  *store.Store
+	orch   *core.Orchestrator
+	cfg    *config.Config
+	sem    *semantic.Ingestor
+	embed  core.LLMProvider
+	logger *log.Logger
+}
+
+type episodeResponse struct {
+	RunID        string                `json:"run_id"`
+	TopicID      string                `json:"topic_id"`
+	Thought      core.UserThought      `json:"thought"`
+	PlanDocument *planner.PlanDocument `json:"plan_document,omitempty"`
+	PlanRaw      json.RawMessage       `json:"plan_raw,omitempty"`
+	PlanPrompt   string                `json:"plan_prompt,omitempty"`
+	Result       core.ProcessingResult `json:"result"`
+	Steps        []episodeStepResponse `json:"steps"`
+	CreatedAt    time.Time             `json:"created_at"`
+}
+
+type episodeStepResponse struct {
+	StepIndex     int                      `json:"step_index"`
+	Task          core.AgentTask           `json:"task"`
+	InputSnapshot map[string]interface{}   `json:"input_snapshot,omitempty"`
+	Prompt        string                   `json:"prompt,omitempty"`
+	Result        core.AgentResult         `json:"result"`
+	Artifacts     []map[string]interface{} `json:"artifacts,omitempty"`
+	StartedAt     *time.Time               `json:"started_at,omitempty"`
+	CompletedAt   *time.Time               `json:"completed_at,omitempty"`
+	CreatedAt     time.Time                `json:"created_at"`
 }
 
 var htmlSanitizer = bluemonday.StrictPolicy()
 
-func NewRunsHandler(cfg *config.Config, store *store.Store, orch *core.Orchestrator) *RunsHandler {
+func NewRunsHandler(cfg *config.Config, store *store.Store, orch *core.Orchestrator, provider core.LLMProvider, ingest *semantic.Ingestor) *RunsHandler {
+	logger := log.New(log.Writer(), "[RUNS] ", log.LstdFlags)
+	if cfg != nil && cfg.Memory.Semantic.Enabled && provider == nil {
+		logger.Printf("warn: semantic memory enabled but embedding provider not configured")
+	}
 	return &RunsHandler{
-		store: store,
-		orch:  orch,
-		cfg:   cfg,
+		store:  store,
+		orch:   orch,
+		cfg:    cfg,
+		sem:    ingest,
+		embed:  provider,
+		logger: logger,
 	}
 }
 
@@ -49,7 +86,158 @@ func (h *RunsHandler) Register(g *echo.Group, secret []byte) {
 	g.GET("/:topic_id/runs/:run_id/markdown", h.markdown)
 	g.POST("/:topic_id/runs/:run_id/expand_all", h.expandAll)
 	g.GET("/:topic_id/runs/:run_id/html", h.html)
+	g.GET("/:topic_id/runs/:run_id/episode", h.episode)
 	g.POST("/:topic_id/runs/:run_id/budget_decision", h.budgetDecision)
+}
+
+func newEpisodeResponse(ep store.Episode) episodeResponse {
+	resp := episodeResponse{
+		RunID:        ep.RunID,
+		TopicID:      ep.TopicID,
+		Thought:      ep.Thought,
+		PlanDocument: ep.PlanDocument,
+		PlanPrompt:   ep.PlanPrompt,
+		Result:       ep.Result,
+		CreatedAt:    ep.CreatedAt,
+	}
+	if len(ep.PlanRaw) > 0 {
+		resp.PlanRaw = append(json.RawMessage{}, ep.PlanRaw...)
+	}
+	if len(ep.Steps) > 0 {
+		resp.Steps = make([]episodeStepResponse, len(ep.Steps))
+		for i, step := range ep.Steps {
+			resp.Steps[i] = episodeStepResponse{
+				StepIndex:     step.StepIndex,
+				Task:          step.Task,
+				InputSnapshot: step.InputSnapshot,
+				Prompt:        step.Prompt,
+				Result:        step.Result,
+				Artifacts:     step.Artifacts,
+				CreatedAt:     step.CreatedAt,
+			}
+			if step.StartedAt != nil {
+				resp.Steps[i].StartedAt = step.StartedAt
+			}
+			if step.CompletedAt != nil {
+				resp.Steps[i].CompletedAt = step.CompletedAt
+			}
+		}
+	}
+	return resp
+}
+
+// episode returns the stored episodic snapshot for a completed run
+//
+//	@Summary	Run episode snapshot
+//	@Tags		runs
+//	@Security	BearerAuth
+//	@Security	CookieAuth
+//	@Param		topic_id	path	string	true	"Topic ID"
+//	@Param		run_id		path	string	true	"Run ID"
+//	@Produce	json
+//	@Success	200	{object}	episodeResponse
+//	@Failure	403	{object}	HTTPError
+//	@Failure	404	{object}	HTTPError
+//	@Router		/api/topics/{topic_id}/runs/{run_id}/episode [get]
+func (h *RunsHandler) episode(c echo.Context) error {
+	ctx := c.Request().Context()
+	userID := c.Get("user_id").(string)
+	topicID := c.Param("topic_id")
+	if _, _, _, err := h.store.GetTopicByID(ctx, topicID, userID); err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	runID := c.Param("run_id")
+	ep, ok, err := h.store.GetEpisodeByRunID(ctx, runID)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok {
+		return echo.NewHTTPError(http.StatusNotFound, "episode not found")
+	}
+	if ep.TopicID != topicID {
+		return echo.NewHTTPError(http.StatusForbidden, "episode does not belong to topic")
+	}
+	resp := newEpisodeResponse(ep)
+	return c.JSON(http.StatusOK, resp)
+}
+
+func loadPlanDocument(ctx context.Context, st *store.Store, thoughtID string) (*planner.PlanDocument, error) {
+	if thoughtID == "" {
+		return nil, fmt.Errorf("thought_id required")
+	}
+	rec, ok, err := st.GetLatestPlanGraph(ctx, thoughtID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	var doc planner.PlanDocument
+	if err := json.Unmarshal(rec.PlanJSON, &doc); err != nil {
+		return nil, err
+	}
+	return &doc, nil
+}
+
+func attachSemanticContext(ctx context.Context, cfg *config.Config, st *store.Store, provider core.LLMProvider, topicID string, content string, ctxMap map[string]interface{}) {
+	if cfg == nil || !cfg.Memory.Semantic.Enabled {
+		return
+	}
+	if provider == nil {
+		return
+	}
+	query := strings.TrimSpace(content)
+	if query == "" {
+		return
+	}
+	vectors, err := provider.Embed(ctx, cfg.Memory.Semantic.EmbeddingModel, []string{query})
+	if err != nil {
+		log.Printf("warn: semantic context embedding failed: %v", err)
+		return
+	}
+	if len(vectors) == 0 {
+		return
+	}
+	topK := cfg.Memory.Semantic.SearchTopK
+	if topK <= 0 {
+		topK = 5
+	}
+	threshold := cfg.Memory.Semantic.SearchThreshold
+	results, err := st.SearchRunEmbeddings(ctx, topicID, vectors[0], topK, threshold)
+	if err != nil {
+		log.Printf("warn: semantic context search failed: %v", err)
+		return
+	}
+	if len(results) == 0 {
+		return
+	}
+	entries := make([]map[string]interface{}, 0, len(results))
+	for _, hit := range results {
+		entry := map[string]interface{}{
+			"run_id":     hit.RunID,
+			"topic_id":   hit.TopicID,
+			"kind":       hit.Kind,
+			"distance":   hit.Distance,
+			"similarity": similarityFromDistance(hit.Distance),
+			"created_at": hit.CreatedAt,
+		}
+		if hit.Metadata != nil {
+			entry["metadata"] = hit.Metadata
+		}
+		entries = append(entries, entry)
+	}
+	ctxMap["semantic_similar_runs"] = entries
+}
+
+func similarityFromDistance(distance float64) float64 {
+	sim := 1 - distance
+	if sim < 0 {
+		sim = 0
+	}
+	if sim > 1 {
+		sim = 1
+	}
+	return sim
 }
 
 // Trigger a new run for a topic
@@ -85,7 +273,7 @@ func (h *RunsHandler) trigger(c echo.Context) error {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
-		if err := processRun(ctx, h.cfg, h.store, h.orch, topicID, userID, runID); err != nil {
+		if err := processRun(ctx, h.cfg, h.store, h.orch, h.embed, h.sem, topicID, userID, runID); err != nil {
 			var approval budget.ErrApprovalRequired
 			if errors.As(err, &approval) {
 				// run remains pending approval; do not mark failed yet
@@ -501,7 +689,7 @@ func (h *RunsHandler) budgetDecision(c echo.Context) error {
 			go func() {
 				workerCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 				defer cancel()
-				if err := processRun(workerCtx, h.cfg, h.store, h.orch, topicID, userID, runID); err != nil {
+				if err := processRun(workerCtx, h.cfg, h.store, h.orch, h.embed, h.sem, topicID, userID, runID); err != nil {
 					_ = h.store.FinishRun(workerCtx, runID, "failed", strPtr(err.Error()))
 				}
 			}()
@@ -553,7 +741,7 @@ func (h *RunsHandler) html(c echo.Context) error {
 }
 
 // processRun executes the full run pipeline shared by HTTP trigger and scheduler
-func processRun(ctx context.Context, cfg *config.Config, st *store.Store, orch *core.Orchestrator, topicID string, userID string, runID string) error {
+func processRun(ctx context.Context, cfg *config.Config, st *store.Store, orch *core.Orchestrator, embed core.LLMProvider, sem *semantic.Ingestor, topicID string, userID string, runID string) error {
 	// Build context from previous runs and knowledge graph
 	ctxMap := map[string]interface{}{}
 	if ts, _ := st.LatestRunTime(ctx, topicID); ts != nil {
@@ -580,6 +768,9 @@ func processRun(ctx context.Context, cfg *config.Config, st *store.Store, orch *
 	if kg, err := st.GetKnowledgeGraph(ctx, topicID); err == nil {
 		ctxMap["knowledge_graph"] = map[string]interface{}{"nodes": kg.Nodes, "edges": kg.Edges, "last_updated": kg.LastUpdated}
 	}
+	ctxMap["topic_id"] = topicID
+	ctxMap["user_id"] = userID
+	ctxMap["run_id"] = runID
 
 	// Load temporal update policy for the topic (defaults when not configured).
 	pol := policy.NewDefault()
@@ -615,6 +806,7 @@ func processRun(ctx context.Context, cfg *config.Config, st *store.Store, orch *
 
 	// Construct thought from preferences (not user-defined name)
 	content := deriveThoughtContentFromPrefs(prefs)
+	attachSemanticContext(ctx, cfg, st, embed, topicID, content, ctxMap)
 	budgetCfg, hasBudget, err := st.GetTopicBudgetConfig(ctx, topicID)
 	if err != nil {
 		return fmt.Errorf("load budget config: %w", err)
@@ -648,7 +840,7 @@ func processRun(ctx context.Context, cfg *config.Config, st *store.Store, orch *
 		}
 	}
 	policyCopy := pol.Clone()
-	thought := core.UserThought{ID: runID, Content: content, Preferences: prefs, Timestamp: time.Now(), Context: ctxMap, Policy: &policyCopy, Budget: thoughtBudget}
+	thought := core.UserThought{ID: runID, UserID: userID, TopicID: topicID, Content: content, Preferences: prefs, Timestamp: time.Now(), Context: ctxMap, Policy: &policyCopy, Budget: thoughtBudget}
 
 	result, err := orch.ProcessThought(ctx, thought)
 	if err != nil {
@@ -672,6 +864,14 @@ func processRun(ctx context.Context, cfg *config.Config, st *store.Store, orch *
 		_ = st.SaveHighlights(ctx, topicID, result.Highlights)
 	}
 	_ = st.SaveKnowledgeGraphFromMetadata(ctx, topicID, result.Metadata)
+	if sem != nil {
+		planDoc, err := loadPlanDocument(ctx, st, runID)
+		if err != nil {
+			log.Printf("warn: load plan for semantic ingest failed: %v", err)
+		} else if err := sem.IngestRun(ctx, topicID, runID, result, planDoc); err != nil {
+			log.Printf("warn: semantic ingest failed: %v", err)
+		}
+	}
 	if resJSON, err := st.GetProcessingResultByID(ctx, runID); err == nil {
 		if md, derr := generateFullReport(ctx, cfg, name, prefs, resJSON); derr == nil && md != "" {
 			_ = writeRunMarkdown(topicID, runID, md)

@@ -12,15 +12,16 @@ import (
 
 // Config holds all configuration for the agent system
 type Config struct {
-	General   GeneralConfig   `mapstructure:"general"`
-	Server    ServerConfig    `mapstructure:"server"`
-	LLM       LLMConfig       `mapstructure:"llm"`
-	Telemetry TelemetryConfig `mapstructure:"telemetry"`
+	General    GeneralConfig    `mapstructure:"general"`
+	Server     ServerConfig     `mapstructure:"server"`
+	LLM        LLMConfig        `mapstructure:"llm"`
+	Telemetry  TelemetryConfig  `mapstructure:"telemetry"`
 	Capability CapabilityConfig `mapstructure:"capability"`
-	Agents    AgentsConfig    `mapstructure:"agents"`
-	Sources   SourcesConfig   `mapstructure:"sources"`
-	Storage   StorageConfig   `mapstructure:"storage"`
-	Security  SecurityConfig  `mapstructure:"security"`
+	Agents     AgentsConfig     `mapstructure:"agents"`
+	Sources    SourcesConfig    `mapstructure:"sources"`
+	Storage    StorageConfig    `mapstructure:"storage"`
+	Memory     MemoryConfig     `mapstructure:"memory"`
+	Security   SecurityConfig   `mapstructure:"security"`
 }
 
 // ServerConfig contains HTTP server and auth settings
@@ -96,8 +97,8 @@ type SecurityConfig struct {
 	SandboxProvider string        `mapstructure:"sandbox_provider"`
 	PolicyFile      string        `mapstructure:"policy_file"`
 	DefaultTimeout  time.Duration `mapstructure:"default_timeout"`
-    DefaultCPU      float64       `mapstructure:"default_cpu"`
-    DefaultMemory   string        `mapstructure:"default_memory"`
+	DefaultCPU      float64       `mapstructure:"default_cpu"`
+	DefaultMemory   string        `mapstructure:"default_memory"`
 }
 
 // AgentsConfig contains agent-specific settings
@@ -148,6 +149,29 @@ type StorageConfig struct {
 	Redis    RedisConfig    `mapstructure:"redis"`
 	File     FileConfig     `mapstructure:"file"`
 	Postgres PostgresConfig `mapstructure:"postgres"`
+}
+
+// MemoryConfig controls episodic/semantic memory behaviour.
+type MemoryConfig struct {
+	Episodic EpisodicMemoryConfig `mapstructure:"episodic"`
+	Semantic SemanticMemoryConfig `mapstructure:"semantic"`
+}
+
+// EpisodicMemoryConfig defines retention settings for episodic traces.
+type EpisodicMemoryConfig struct {
+	Enabled       bool `mapstructure:"enabled"`
+	RetentionDays int  `mapstructure:"retention_days"`
+}
+
+// SemanticMemoryConfig defines behaviour for semantic embedding storage and search.
+type SemanticMemoryConfig struct {
+	Enabled             bool    `mapstructure:"enabled"`
+	EmbeddingModel      string  `mapstructure:"embedding_model"`
+	EmbeddingDimensions int     `mapstructure:"embedding_dimensions"`
+	SearchTopK          int     `mapstructure:"search_top_k"`
+	SearchThreshold     float64 `mapstructure:"search_threshold"`
+	WriterBatchSize     int     `mapstructure:"writer_batch_size"`
+	RebuildOnStartup    bool    `mapstructure:"rebuild_on_startup"`
 }
 
 // RedisConfig contains Redis connection settings

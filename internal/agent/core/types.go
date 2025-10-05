@@ -14,6 +14,8 @@ type UserThought struct {
 	ID          string                  `json:"id"`
 	Content     string                  `json:"content"`
 	Timestamp   time.Time               `json:"timestamp"`
+	UserID      string                  `json:"user_id,omitempty"`
+	TopicID     string                  `json:"topic_id,omitempty"`
 	Preferences map[string]interface{}  `json:"preferences,omitempty"`
 	Context     map[string]interface{}  `json:"context,omitempty"`
 	Policy      *policypkg.UpdatePolicy `json:"temporal_policy,omitempty"`
@@ -102,6 +104,7 @@ type AgentResult struct {
 	Cost           float64                `json:"cost"`
 	TokensUsed     int64                  `json:"tokens_used"`
 	ModelUsed      string                 `json:"model_used"`
+	Prompt         string                 `json:"prompt,omitempty"`
 	CreatedAt      time.Time              `json:"created_at"`
 }
 
@@ -120,6 +123,7 @@ type PlanningResult struct {
 	TemporalPolicy         *policypkg.UpdatePolicy `json:"temporal_policy,omitempty"`
 	BudgetConfig           *budget.Config          `json:"-"`
 	BudgetApprovalRequired bool                    `json:"budget_approval_required"`
+	Prompt                 string                  `json:"-"`
 }
 
 // KnowledgeGraph represents the knowledge graph for a topic
@@ -226,6 +230,9 @@ type LLMProvider interface {
 	// GenerateWithTokens generates text and returns token usage
 	GenerateWithTokens(ctx context.Context, prompt string, model string, options map[string]interface{}) (string, int64, int64, error)
 
+	// Embed generates vector embeddings for the provided inputs.
+	Embed(ctx context.Context, model string, input []string) ([][]float32, error)
+
 	// GetAvailableModels returns available models
 	GetAvailableModels() []string
 
@@ -302,4 +309,34 @@ type StoredPlanGraph struct {
 	Document  *planner.PlanDocument
 	RawJSON   []byte
 	UpdatedAt time.Time
+}
+
+// EpisodeRepository persists episodic snapshots for replay and auditing.
+type EpisodeRepository interface {
+	SaveEpisode(ctx context.Context, snapshot EpisodicSnapshot) error
+}
+
+// EpisodicSnapshot captures a run trace suitable for episodic memory storage.
+type EpisodicSnapshot struct {
+	RunID        string
+	TopicID      string
+	UserID       string
+	Thought      UserThought
+	PlanDocument *planner.PlanDocument
+	PlanRaw      []byte
+	PlanPrompt   string
+	Result       ProcessingResult
+	Steps        []EpisodicStep
+}
+
+// EpisodicStep represents a single agent execution within an episodic snapshot.
+type EpisodicStep struct {
+	StepIndex     int
+	Task          AgentTask
+	InputSnapshot map[string]interface{}
+	Prompt        string
+	Result        AgentResult
+	Artifacts     []map[string]interface{}
+	StartedAt     time.Time
+	CompletedAt   time.Time
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/mohammad-safakhou/newser/config"
 	agentcore "github.com/mohammad-safakhou/newser/internal/agent/core"
 	agenttele "github.com/mohammad-safakhou/newser/internal/agent/telemetry"
+	"github.com/mohammad-safakhou/newser/internal/memory/semantic"
 	"github.com/mohammad-safakhou/newser/internal/runtime"
 	"github.com/mohammad-safakhou/newser/internal/store"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -113,9 +114,20 @@ func Run(cfg *config.Config) error {
 	}
 
 	planRepo := newPlanRepository(auth.Store, orchLogger)
-	orch, err := agentcore.NewOrchestrator(cfg, orchLogger, tele, capRegistry, planRepo)
+	episodesRepo := newEpisodicRepository(auth.Store)
+	orch, err := agentcore.NewOrchestrator(cfg, orchLogger, tele, capRegistry, planRepo, episodesRepo)
 	if err != nil {
 		return err
+	}
+
+	var semIngestor *semantic.Ingestor
+	if cfg.Memory.Semantic.Enabled {
+		semLogger := log.New(log.Writer(), "[SEMANTIC] ", log.LstdFlags)
+		if ing, err := semantic.NewIngestor(auth.Store, llmProvider, cfg.Memory.Semantic, semLogger); err != nil {
+			log.Printf("warn: semantic ingestor unavailable: %v", err)
+		} else {
+			semIngestor = ing
+		}
 	}
 
 	api := e.Group("/api")
@@ -129,8 +141,12 @@ func Run(cfg *config.Config) error {
 	th := &TopicsHandler{Store: auth.Store, LLM: llmProvider, Model: cfg.LLM.Routing.Chatting}
 	th.Register(api.Group("/topics"), auth.Secret)
 
-	rh := NewRunsHandler(cfg, auth.Store, orch)
+	rh := NewRunsHandler(cfg, auth.Store, orch, llmProvider, semIngestor)
 	rh.Register(api.Group("/topics"), auth.Secret)
+
+	if memoryHandler := NewMemoryHandler(cfg, auth.Store, llmProvider, log.New(log.Writer(), "[MEMORY] ", log.LstdFlags)); memoryHandler != nil {
+		memoryHandler.Register(api.Group("/memory"), auth.Secret)
+	}
 
 	toolsH := &ToolsHandler{Store: auth.Store, Config: cfg}
 	toolsH.Register(api.Group("/tools"), auth.Secret)
@@ -151,7 +167,7 @@ func Run(cfg *config.Config) error {
 	if err := rdb.Ping(context.Background()).Err(); err != nil {
 		return fmt.Errorf("redis connection failed (%s:%s): %w", cfg.Storage.Redis.Host, cfg.Storage.Redis.Port, err)
 	}
-	sched := NewScheduler(cfg, auth.Store, rdb, orch)
+	sched := NewScheduler(cfg, auth.Store, rdb, orch, semIngestor, llmProvider)
 	sched.Start()
 
 	// Note: Web UI is served by a separate container; backend only exposes APIs

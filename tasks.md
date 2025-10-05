@@ -185,16 +185,16 @@ Monitor and restrict cost/time/token budgets.
 Store complete run history with traceable outputs.
 
 **Tasks**
-- [ ] Design DB schema to capture plan, prompts, tool outputs, and artifacts.
-- [ ] Persist episodic data transactionally.
-- [ ] Build replay API/CLI to inspect or re-execute.
-- [ ] Add retention/cleanup jobs.
+- [x] Design DB schema to capture plan, prompts, tool outputs, and artifacts.
+- [x] Persist episodic data transactionally.
+- [x] Build replay API/CLI to inspect or re-execute.
+- [x] Add retention/cleanup jobs.
 
 **Acceptance Criteria**
 
-- [ ] Runs replay identically.
-- [ ] Retention job deletes old records.
-- [ ] Replay verified in tests.
+- [x] Runs replay identically.
+- [x] Retention job deletes old records.
+- [x] Replay verified in tests.
 
 ---
 
@@ -203,11 +203,11 @@ Store complete run history with traceable outputs.
 Provide vector-based semantic search for past runs.
 
 **Tasks**
-- [ ] Enable pgvector extension and run migrations.
-- [ ] Generate embeddings per run/sub-plan.
-- [ ] Expose `/memory.search` API returning similar runs.
-- [ ] Integrate `memory.search` pre-flight in planner.
-- [ ] Evaluate recall/precision.
+- [x] Enable pgvector extension and run migrations.
+- [x] Generate embeddings per run/sub-plan.
+- [x] Expose `/memory.search` API returning similar runs.
+- [x] Integrate `memory.search` pre-flight in planner.
+- [x] Evaluate recall/precision.
 
 **Acceptance Criteria**
 

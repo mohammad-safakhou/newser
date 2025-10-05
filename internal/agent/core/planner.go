@@ -132,6 +132,7 @@ func (p *Planner) Plan(ctx context.Context, thought UserThought) (PlanningResult
 
 	processingTime := time.Since(startTime)
 	p.logger.Printf("Planning completed in %v with %d tasks", processingTime, len(plan.Tasks))
+	plan.Prompt = prompt
 
 	return plan, nil
 }

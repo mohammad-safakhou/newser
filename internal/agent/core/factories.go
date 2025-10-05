@@ -239,6 +239,71 @@ func (p *OpenAIProvider) GenerateWithTokens(ctx context.Context, prompt string, 
 	return out.Choices[0].Message.Content, int64(out.Usage.PromptTokens), int64(out.Usage.CompletionTokens), nil
 }
 
+// Embed returns vector embeddings for the provided inputs using OpenAI.
+func (p *OpenAIProvider) Embed(ctx context.Context, model string, input []string) ([][]float32, error) {
+	if len(input) == 0 {
+		return nil, nil
+	}
+	apiKey := p.config.APIKey
+	if apiKey == "" {
+		apiKey = os.Getenv("OPENAI_API_KEY")
+	}
+	if apiKey == "" {
+		return nil, fmt.Errorf("OpenAI API key not configured")
+	}
+	if model == "" {
+		return nil, fmt.Errorf("embedding model must be provided")
+	}
+	payload := map[string]interface{}{
+		"model":           model,
+		"input":           input,
+		"encoding_format": "float",
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal embedding payload: %w", err)
+	}
+	baseURL := p.config.BaseURL
+	if baseURL == "" {
+		baseURL = "https://api.openai.com/v1"
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/embeddings", bytes.NewBuffer(body))
+	if err != nil {
+		return nil, fmt.Errorf("embedding request build: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := p.client.Do(req)
+	if err != nil {
+		var bodyResp []byte
+		if resp != nil && resp.Body != nil {
+			bodyResp, _ = helpers.ReadAllAndClose(resp.Body)
+		}
+		return nil, fmt.Errorf("embedding request failed: %w %s", err, string(bodyResp))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		bodyResp, _ := helpers.ReadAllAndClose(resp.Body)
+		return nil, fmt.Errorf("OpenAI embedding status %d, %s", resp.StatusCode, string(bodyResp))
+	}
+	var out struct {
+		Data []struct {
+			Embedding []float32 `json:"embedding"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode embedding response: %w", err)
+	}
+	if len(out.Data) == 0 {
+		return nil, fmt.Errorf("embedding response empty")
+	}
+	result := make([][]float32, len(out.Data))
+	for i := range out.Data {
+		result[i] = out.Data[i].Embedding
+	}
+	return result, nil
+}
+
 // GetAvailableModels returns available models
 func (p *OpenAIProvider) GetAvailableModels() []string {
 	var models []string
@@ -321,6 +386,11 @@ func (p *AnthropicProvider) GenerateWithTokens(ctx context.Context, prompt strin
 	outputTokens := int64(len(response) / 4)
 
 	return response, inputTokens, outputTokens, nil
+}
+
+// Embed returns an error because Anthropic does not currently provide embedding APIs in this implementation.
+func (p *AnthropicProvider) Embed(ctx context.Context, model string, input []string) ([][]float32, error) {
+	return nil, fmt.Errorf("anthropic provider does not support embeddings")
 }
 
 // GetAvailableModels returns available models
@@ -1483,12 +1553,12 @@ Respond ONLY as strict JSON with keys:
 
 	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, nil)
 	if err != nil {
-		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
+		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model, Prompt: prompt}
 	}
 	jOut, err := helpers.ExtractJSON(out)
 	if err != nil {
 		a.logger.Printf("Analysis agent JSON parse error: %v, raw output: %s", err, out)
-		return AgentResult{Data: map[string]interface{}{"error": "failed to parse analysis output"}, Success: false, AgentType: a.agentType, ModelUsed: model}
+		return AgentResult{Data: map[string]interface{}{"error": "failed to parse analysis output"}, Success: false, AgentType: a.agentType, ModelUsed: model, Prompt: prompt}
 	}
 
 	var parsed analysisParseResult
@@ -1520,6 +1590,7 @@ Respond ONLY as strict JSON with keys:
 		Cost:       cost,
 		TokensUsed: inTok + outTok,
 		ModelUsed:  model,
+		Prompt:     prompt,
 	}
 }
 
@@ -1686,13 +1757,13 @@ Return ONLY strict JSON with keys:
 
 	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, nil)
 	if err != nil {
-		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
+		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model, Prompt: prompt}
 	}
 
 	jOut, err := helpers.ExtractJSON(out)
 	if err != nil {
 		a.logger.Printf("Analysis agent JSON parse error: %v, raw output: %s", err, out)
-		return AgentResult{Data: map[string]interface{}{"error": "failed to parse analysis output"}, Success: false, AgentType: a.agentType, ModelUsed: model}
+		return AgentResult{Data: map[string]interface{}{"error": "failed to parse analysis output"}, Success: false, AgentType: a.agentType, ModelUsed: model, Prompt: prompt}
 	}
 
 	// Parse JSON
@@ -1792,6 +1863,7 @@ Return ONLY strict JSON with keys:
 		Cost:       cost,
 		TokensUsed: inTok + outTok,
 		ModelUsed:  model,
+		Prompt:     prompt,
 	}
 }
 
@@ -1868,12 +1940,12 @@ Return ONLY strict JSON: { "conflicts": [ { "description": string, "severity": "
 
 	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, nil)
 	if err != nil {
-		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
+		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model, Prompt: prompt}
 	}
 	jOut, err := helpers.ExtractJSON(out)
 	if err != nil {
 		a.logger.Printf("Analysis agent JSON parse error: %v, raw output: %s", err, out)
-		return AgentResult{Data: map[string]interface{}{"error": "failed to parse analysis output"}, Success: false, AgentType: a.agentType, ModelUsed: model}
+		return AgentResult{Data: map[string]interface{}{"error": "failed to parse analysis output"}, Success: false, AgentType: a.agentType, ModelUsed: model, Prompt: prompt}
 	}
 
 	var parsed struct {
@@ -1902,6 +1974,7 @@ Return ONLY strict JSON: { "conflicts": [ { "description": string, "severity": "
 		Cost:       cost,
 		TokensUsed: inTok + outTok,
 		ModelUsed:  model,
+		Prompt:     prompt,
 	}
 }
 
@@ -1953,12 +2026,12 @@ Return ONLY strict JSON: { "highlights": [ { "title": string, "content": string,
 SOURCES:\n%s`, buf.String())
 	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, nil)
 	if err != nil {
-		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
+		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model, Prompt: prompt}
 	}
 	jOut, err := helpers.ExtractJSON(out)
 	if err != nil {
 		a.logger.Printf("Analysis agent JSON parse error: %v, raw output: %s", err, out)
-		return AgentResult{Data: map[string]interface{}{"error": "failed to parse analysis output"}, Success: false, AgentType: a.agentType, ModelUsed: model}
+		return AgentResult{Data: map[string]interface{}{"error": "failed to parse analysis output"}, Success: false, AgentType: a.agentType, ModelUsed: model, Prompt: prompt}
 	}
 
 	var parsed struct {
@@ -1999,6 +2072,7 @@ SOURCES:\n%s`, buf.String())
 		Cost:       cost,
 		TokensUsed: inTok + outTok,
 		ModelUsed:  model,
+		Prompt:     prompt,
 	}
 }
 
@@ -2088,12 +2162,12 @@ Return ONLY strict JSON:
 NOTES:\n%s`, topic, entityTypes, relationTypes, minConf, includeAliases, kgLang, maxNodes, maxEdges, buf.String())
 	out, inTok, outTok, err := a.llmProvider.GenerateWithTokens(ctx, prompt, model, nil)
 	if err != nil {
-		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model}
+		return AgentResult{Data: map[string]interface{}{"error": err.Error()}, Success: false, AgentType: a.agentType, ModelUsed: model, Prompt: prompt}
 	}
 	jOut, err := helpers.ExtractJSON(out)
 	if err != nil {
 		a.logger.Printf("Analysis agent JSON parse error: %v, raw output: %s", err, out)
-		return AgentResult{Data: map[string]interface{}{"error": "failed to parse analysis output"}, Success: false, AgentType: a.agentType, ModelUsed: model}
+		return AgentResult{Data: map[string]interface{}{"error": "failed to parse analysis output"}, Success: false, AgentType: a.agentType, ModelUsed: model, Prompt: prompt}
 	}
 
 	var parsed struct {
@@ -2152,5 +2226,6 @@ NOTES:\n%s`, topic, entityTypes, relationTypes, minConf, includeAliases, kgLang,
 		Cost:       cost,
 		TokensUsed: inTok + outTok,
 		ModelUsed:  model,
+		Prompt:     prompt,
 	}
 }

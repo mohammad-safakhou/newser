@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -31,6 +32,7 @@ type Orchestrator struct {
 	sources     []SourceProvider
 	storage     Storage
 	planRepo    PlanRepository
+	episodes    EpisodeRepository
 
 	// Processing state
 	processing map[string]*ProcessingStatus
@@ -41,7 +43,7 @@ type Orchestrator struct {
 }
 
 // NewOrchestrator creates a new orchestrator instance
-func NewOrchestrator(cfg *config.Config, logger *log.Logger, telemetry *telemetry.Telemetry, registry *capability.Registry, plans PlanRepository) (*Orchestrator, error) {
+func NewOrchestrator(cfg *config.Config, logger *log.Logger, telemetry *telemetry.Telemetry, registry *capability.Registry, plans PlanRepository, episodes EpisodeRepository) (*Orchestrator, error) {
 	// Initialize LLM provider
 	llmProvider, err := NewLLMProvider(cfg.LLM)
 	if err != nil {
@@ -77,6 +79,7 @@ func NewOrchestrator(cfg *config.Config, logger *log.Logger, telemetry *telemetr
 		sources:     sources,
 		storage:     storage,
 		planRepo:    plans,
+		episodes:    episodes,
 		processing:  make(map[string]*ProcessingStatus),
 		semaphore:   make(chan struct{}, cfg.Agents.MaxConcurrentAgents),
 	}
@@ -170,7 +173,7 @@ func (o *Orchestrator) ProcessThought(ctx context.Context, thought UserThought) 
 	if plan.BudgetConfig != nil && !plan.BudgetConfig.IsZero() {
 		monitor = budget.NewMonitor(*plan.BudgetConfig)
 	}
-	results, err := o.executeTasks(ctx, thought, plan, status, monitor)
+	results, traces, err := o.executeTasks(ctx, thought, plan, status, monitor)
 	if err != nil {
 		o.updateStatus(status, "failed", 0.0, fmt.Sprintf("Execution failed: %v", err))
 		processingEvent.Success = false
@@ -197,6 +200,12 @@ func (o *Orchestrator) ProcessThought(ctx context.Context, thought UserThought) 
 		return ProcessingResult{}, fmt.Errorf("synthesis failed: %w", err)
 	}
 
+	if o.episodes != nil {
+		if err := o.persistEpisode(ctx, thought, plan, traces, result); err != nil {
+			o.logger.Printf("episode persistence failed: %v", err)
+		}
+	}
+
 	// Update processing event with final data
 	processingEvent.Success = true
 	processingEvent.Cost = result.CostEstimate
@@ -217,35 +226,27 @@ func (o *Orchestrator) ProcessThought(ctx context.Context, thought UserThought) 
 }
 
 // executeTasks executes all planned tasks in the correct order
-func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, plan PlanningResult, status *ProcessingStatus, monitor *budget.Monitor) ([]AgentResult, error) {
-	var results []AgentResult
-	var mu sync.Mutex
-	// Keep a map of completed results by task ID to feed dependent tasks
+func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, plan PlanningResult, status *ProcessingStatus, monitor *budget.Monitor) ([]AgentResult, []EpisodicStep, error) {
+	var (
+		results []AgentResult
+		traces  []EpisodicStep
+		mu      sync.Mutex
+	)
 	resultsByID := make(map[string]AgentResult)
-
-	// Create a map for quick task lookup
-	taskMap := make(map[string]AgentTask)
-	for _, task := range plan.Tasks {
-		taskMap[task.ID] = task
-	}
-
-	// Execute tasks in dependency order
 	executed := make(map[string]bool)
 
 	for len(executed) < len(plan.Tasks) {
 		if monitor != nil {
 			if err := monitor.CheckTime(); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
-		// Find tasks that are ready to execute (all dependencies satisfied)
+
 		var readyTasks []AgentTask
 		for _, task := range plan.Tasks {
 			if executed[task.ID] {
 				continue
 			}
-
-			// Check if all dependencies are satisfied
 			ready := true
 			for _, depID := range task.DependsOn {
 				if !executed[depID] {
@@ -253,33 +254,29 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 					break
 				}
 			}
-
 			if ready {
 				readyTasks = append(readyTasks, task)
 			}
 		}
 
 		if len(readyTasks) == 0 {
-			return nil, fmt.Errorf("circular dependency detected or missing tasks")
+			return nil, nil, fmt.Errorf("circular dependency detected or missing tasks")
 		}
 
-		// Execute ready tasks concurrently
 		var wg sync.WaitGroup
-		errors := make(chan error, len(readyTasks))
+		errCh := make(chan error, len(readyTasks))
 
 		for _, task := range readyTasks {
 			wg.Add(1)
 			go func(t AgentTask) {
 				defer wg.Done()
 
-				// Find the appropriate agent for this task
 				agent := o.findBestAgent(t)
 				if agent == nil {
-					errors <- fmt.Errorf("no suitable agent found for task: %s", t.ID)
+					errCh <- fmt.Errorf("no suitable agent found for task: %s", t.ID)
 					return
 				}
 
-				// Enrich the task with dependency results and aggregated sources
 				enriched := t
 				params := make(map[string]interface{}, len(t.Parameters)+3)
 				for k, v := range t.Parameters {
@@ -291,8 +288,10 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 				if thought.Preferences != nil {
 					params["preferences"] = thought.Preferences
 				}
-				var inputs []AgentResult
-				var aggSources []Source
+				var (
+					inputs     []AgentResult
+					aggSources []Source
+				)
 				for _, depID := range t.DependsOn {
 					mu.Lock()
 					if r, ok := resultsByID[depID]; ok {
@@ -311,25 +310,23 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 				}
 				enriched.Parameters = params
 
-				// Execute the task
 				result, err := agent.Execute(ctx, enriched)
 				if err != nil {
-					errors <- fmt.Errorf("task %s failed: %w", t.ID, err)
+					errCh <- fmt.Errorf("task %s failed: %w", t.ID, err)
 					return
 				}
 
 				if monitor != nil {
 					if err := monitor.Add(result.Cost, result.TokensUsed); err != nil {
-						errors <- err
+						errCh <- err
 						return
 					}
 					if err := monitor.CheckTime(); err != nil {
-						errors <- err
+						errCh <- err
 						return
 					}
 				}
 
-				// Record agent event
 				agentEvent := telemetry.AgentEvent{
 					ID:         result.ID,
 					AgentType:  result.AgentType,
@@ -345,11 +342,21 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 				}
 				o.telemetry.RecordAgentEvent(ctx, agentEvent)
 
-				// Add result to results slice
 				mu.Lock()
 				results = append(results, result)
 				executed[t.ID] = true
 				resultsByID[t.ID] = result
+				trace := EpisodicStep{
+					StepIndex:     len(traces),
+					Task:          enriched,
+					InputSnapshot: enriched.Parameters,
+					Prompt:        result.Prompt,
+					Result:        result,
+					Artifacts:     collectArtifacts(result),
+					StartedAt:     result.CreatedAt.Add(-result.ProcessingTime),
+					CompletedAt:   result.CreatedAt,
+				}
+				traces = append(traces, trace)
 				status.CompletedTasks++
 				status.Progress = float64(status.CompletedTasks) / float64(status.TotalTasks)
 				status.CurrentTask = t.Description
@@ -361,15 +368,16 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 		}
 
 		wg.Wait()
-		close(errors)
+		close(errCh)
 
-		// Check for errors
-		for err := range errors {
-			return nil, err
+		for err := range errCh {
+			if err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 
-	return results, nil
+	return results, traces, nil
 }
 
 // synthesizeResults synthesizes all agent results into a final processing result
@@ -613,6 +621,59 @@ func (o *Orchestrator) synthesizeResults(ctx context.Context, thought UserThough
 	}
 
 	return result, nil
+}
+
+func (o *Orchestrator) persistEpisode(ctx context.Context, thought UserThought, plan PlanningResult, traces []EpisodicStep, result ProcessingResult) error {
+	if o.episodes == nil {
+		return nil
+	}
+	if thought.ID == "" || thought.TopicID == "" || thought.UserID == "" {
+		return nil
+	}
+	snapshot := EpisodicSnapshot{
+		RunID:        thought.ID,
+		TopicID:      thought.TopicID,
+		UserID:       thought.UserID,
+		Thought:      thought,
+		PlanDocument: plan.Graph,
+		PlanRaw:      plan.RawJSON,
+		PlanPrompt:   plan.Prompt,
+		Result:       result,
+	}
+	if len(traces) > 0 {
+		snapshot.Steps = make([]EpisodicStep, len(traces))
+		copy(snapshot.Steps, traces)
+	}
+	if len(snapshot.PlanRaw) == 0 && plan.Graph != nil {
+		if b, err := json.Marshal(plan.Graph); err == nil {
+			snapshot.PlanRaw = b
+		}
+	}
+	return o.episodes.SaveEpisode(ctx, snapshot)
+}
+
+func collectArtifacts(res AgentResult) []map[string]interface{} {
+	if res.Data == nil {
+		return nil
+	}
+	raw, ok := res.Data["artifacts"]
+	if !ok {
+		return nil
+	}
+	switch v := raw.(type) {
+	case []map[string]interface{}:
+		return v
+	case []interface{}:
+		var out []map[string]interface{}
+		for _, item := range v {
+			if m, ok := item.(map[string]interface{}); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // toDomain extracts the hostname from a URL string.

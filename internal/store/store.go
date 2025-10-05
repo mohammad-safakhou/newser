@@ -8,12 +8,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/lib/pq"
 	core "github.com/mohammad-safakhou/newser/internal/agent/core"
 	"github.com/mohammad-safakhou/newser/internal/budget"
+	"github.com/mohammad-safakhou/newser/internal/planner"
 	"github.com/mohammad-safakhou/newser/internal/policy"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -30,6 +33,9 @@ const (
 	CheckpointStatusDispatched = "dispatched"
 	CheckpointStatusCompleted  = "completed"
 )
+
+// DefaultEmbeddingDimensions indicates the expected length of semantic vectors stored in pgvector columns.
+const DefaultEmbeddingDimensions = 1536
 
 // Checkpoint captures durable progress for a run/task stage.
 type Checkpoint struct {
@@ -78,6 +84,78 @@ type PlanGraphRecord struct {
 	PlanJSON       []byte
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+}
+
+// RunEmbeddingRecord represents a stored semantic vector for a run-level artifact.
+type RunEmbeddingRecord struct {
+	ID        string
+	RunID     string
+	TopicID   string
+	Kind      string
+	Vector    []float32
+	Metadata  map[string]interface{}
+	CreatedAt time.Time
+}
+
+// PlanStepEmbeddingRecord stores semantic vectors for fine-grained plan nodes or sub-plans.
+type PlanStepEmbeddingRecord struct {
+	ID        string
+	RunID     string
+	TopicID   string
+	TaskID    string
+	Kind      string
+	Vector    []float32
+	Metadata  map[string]interface{}
+	CreatedAt time.Time
+}
+
+// RunEmbeddingSearchResult represents a semantic search hit for a run-level embedding.
+type RunEmbeddingSearchResult struct {
+	RunID     string
+	TopicID   string
+	Kind      string
+	Distance  float64
+	Metadata  map[string]interface{}
+	CreatedAt time.Time
+}
+
+// PlanStepEmbeddingSearchResult represents a semantic search hit for a plan-step embedding.
+type PlanStepEmbeddingSearchResult struct {
+	RunID     string
+	TopicID   string
+	TaskID    string
+	Kind      string
+	Distance  float64
+	Metadata  map[string]interface{}
+	CreatedAt time.Time
+}
+
+// Episode captures the full episodic memory snapshot for a run.
+type Episode struct {
+	ID           string
+	RunID        string
+	TopicID      string
+	UserID       string
+	Thought      core.UserThought
+	PlanDocument *planner.PlanDocument
+	PlanRaw      json.RawMessage
+	PlanPrompt   string
+	Result       core.ProcessingResult
+	Steps        []EpisodeStep
+	CreatedAt    time.Time
+}
+
+// EpisodeStep records a single agent execution within an episode trace.
+type EpisodeStep struct {
+	StepIndex     int
+	Task          core.AgentTask
+	InputSnapshot map[string]interface{}
+	Prompt        string
+	Result        core.AgentResult
+	Artifacts     []map[string]interface{}
+	StartedAt     *time.Time
+	CompletedAt   *time.Time
+	CreatedAt     time.Time
 }
 
 type BudgetApprovalRecord struct {
@@ -974,6 +1052,442 @@ LIMIT 1
 	return rec, true, nil
 }
 
+// UpsertRunEmbedding stores or updates the semantic vector for a run-level artifact (e.g., summary).
+func (s *Store) UpsertRunEmbedding(ctx context.Context, rec RunEmbeddingRecord) error {
+	if rec.RunID == "" {
+		return fmt.Errorf("run_id required")
+	}
+	if rec.TopicID == "" {
+		return fmt.Errorf("topic_id required")
+	}
+	if len(rec.Vector) == 0 {
+		return fmt.Errorf("embedding vector required")
+	}
+	vectorLiteral, err := encodeVectorLiteral(rec.Vector)
+	if err != nil {
+		return err
+	}
+	meta := rec.Metadata
+	if meta == nil {
+		meta = map[string]interface{}{}
+	}
+	metaBytes, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("marshal metadata: %w", err)
+	}
+	if rec.Kind == "" {
+		rec.Kind = "run_summary"
+	}
+	_, err = s.DB.ExecContext(ctx, `
+INSERT INTO run_embeddings (run_id, topic_id, kind, embedding, metadata, created_at)
+VALUES ($1,$2,$3,$4::vector,$5,NOW())
+ON CONFLICT (run_id, kind) DO UPDATE SET
+  topic_id = EXCLUDED.topic_id,
+  embedding = EXCLUDED.embedding,
+  metadata = EXCLUDED.metadata,
+  created_at = NOW();
+`, rec.RunID, rec.TopicID, rec.Kind, vectorLiteral, metaBytes)
+	return err
+}
+
+// ReplacePlanStepEmbeddings replaces all plan-step embeddings for a run with the provided records.
+func (s *Store) ReplacePlanStepEmbeddings(ctx context.Context, runID string, records []PlanStepEmbeddingRecord) error {
+	if runID == "" {
+		return fmt.Errorf("run_id required")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		} else {
+			err = tx.Commit()
+		}
+	}()
+
+	if _, err = tx.ExecContext(ctx, `DELETE FROM plan_step_embeddings WHERE run_id=$1`, runID); err != nil {
+		return fmt.Errorf("delete existing plan step embeddings: %w", err)
+	}
+	if len(records) == 0 {
+		return nil
+	}
+	stmt, err := tx.PrepareContext(ctx, `
+INSERT INTO plan_step_embeddings (run_id, topic_id, task_id, kind, embedding, metadata, created_at)
+VALUES ($1,$2,$3,$4,$5::vector,$6,NOW())
+ON CONFLICT (run_id, task_id, kind) DO UPDATE SET
+  topic_id = EXCLUDED.topic_id,
+  embedding = EXCLUDED.embedding,
+  metadata = EXCLUDED.metadata,
+  created_at = NOW();
+`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, rec := range records {
+		if rec.TopicID == "" {
+			return fmt.Errorf("topic_id required for plan step embedding")
+		}
+		if rec.TaskID == "" {
+			return fmt.Errorf("task_id required for plan step embedding")
+		}
+		if len(rec.Vector) == 0 {
+			return fmt.Errorf("embedding vector required for task %s", rec.TaskID)
+		}
+		vectorLiteral, err := encodeVectorLiteral(rec.Vector)
+		if err != nil {
+			return err
+		}
+		meta := rec.Metadata
+		if meta == nil {
+			meta = map[string]interface{}{}
+		}
+		metaBytes, err := json.Marshal(meta)
+		if err != nil {
+			return fmt.Errorf("marshal metadata: %w", err)
+		}
+		kind := rec.Kind
+		if kind == "" {
+			kind = "plan_step"
+		}
+		if _, err := stmt.ExecContext(ctx, rec.RunID, rec.TopicID, rec.TaskID, kind, vectorLiteral, metaBytes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SearchRunEmbeddings returns the closest run-level embeddings for the supplied vector.
+func (s *Store) SearchRunEmbeddings(ctx context.Context, topicID string, vector []float32, topK int, threshold float64) ([]RunEmbeddingSearchResult, error) {
+	if len(vector) == 0 {
+		return nil, fmt.Errorf("vector must not be empty")
+	}
+	if topK <= 0 {
+		topK = 5
+	}
+	vecLiteral, err := encodeVectorLiteral(vector)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT run_id, topic_id, kind, metadata, created_at, embedding <=> $1::vector AS distance
+FROM run_embeddings
+WHERE ($2 = '' OR topic_id = $2)
+ORDER BY embedding <=> $1::vector
+LIMIT $3
+`, vecLiteral, topicID, topK)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []RunEmbeddingSearchResult
+	for rows.Next() {
+		var (
+			res       RunEmbeddingSearchResult
+			metaBytes []byte
+		)
+		if err := rows.Scan(&res.RunID, &res.TopicID, &res.Kind, &metaBytes, &res.CreatedAt, &res.Distance); err != nil {
+			return nil, err
+		}
+		if threshold > 0 && res.Distance > threshold {
+			continue
+		}
+		if len(metaBytes) > 0 {
+			_ = json.Unmarshal(metaBytes, &res.Metadata)
+		}
+		results = append(results, res)
+	}
+	return results, rows.Err()
+}
+
+// SearchPlanStepEmbeddings returns the closest plan-step embeddings for the supplied vector.
+func (s *Store) SearchPlanStepEmbeddings(ctx context.Context, topicID string, vector []float32, topK int, threshold float64) ([]PlanStepEmbeddingSearchResult, error) {
+	if len(vector) == 0 {
+		return nil, fmt.Errorf("vector must not be empty")
+	}
+	if topK <= 0 {
+		topK = 10
+	}
+	vecLiteral, err := encodeVectorLiteral(vector)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT run_id, topic_id, task_id, kind, metadata, created_at, embedding <=> $1::vector AS distance
+FROM plan_step_embeddings
+WHERE ($2 = '' OR topic_id = $2)
+ORDER BY embedding <=> $1::vector
+LIMIT $3
+`, vecLiteral, topicID, topK)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []PlanStepEmbeddingSearchResult
+	for rows.Next() {
+		var (
+			res       PlanStepEmbeddingSearchResult
+			metaBytes []byte
+		)
+		if err := rows.Scan(&res.RunID, &res.TopicID, &res.TaskID, &res.Kind, &metaBytes, &res.CreatedAt, &res.Distance); err != nil {
+			return nil, err
+		}
+		if threshold > 0 && res.Distance > threshold {
+			continue
+		}
+		if len(metaBytes) > 0 {
+			_ = json.Unmarshal(metaBytes, &res.Metadata)
+		}
+		results = append(results, res)
+	}
+	return results, rows.Err()
+}
+
+// SaveEpisode persists or updates an episodic memory snapshot for a run.
+func (s *Store) SaveEpisode(ctx context.Context, ep Episode) (err error) {
+	if ep.RunID == "" {
+		return fmt.Errorf("run_id required")
+	}
+	if ep.TopicID == "" {
+		return fmt.Errorf("topic_id required")
+	}
+	if ep.UserID == "" {
+		return fmt.Errorf("user_id required")
+	}
+
+	thoughtBytes, err := json.Marshal(ep.Thought)
+	if err != nil {
+		return fmt.Errorf("marshal thought: %w", err)
+	}
+
+	var planDocBytes []byte
+	if ep.PlanDocument != nil {
+		planDocBytes, err = json.Marshal(ep.PlanDocument)
+		if err != nil {
+			return fmt.Errorf("marshal plan document: %w", err)
+		}
+	}
+	planRawBytes := []byte(ep.PlanRaw)
+	if len(planRawBytes) == 0 && len(planDocBytes) > 0 {
+		planRawBytes = planDocBytes
+	}
+
+	resultBytes, err := json.Marshal(ep.Result)
+	if err != nil {
+		return fmt.Errorf("marshal result: %w", err)
+	}
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		} else {
+			err = tx.Commit()
+		}
+	}()
+
+	rawPlanDocArg := interface{}(nil)
+	if len(planDocBytes) > 0 {
+		rawPlanDocArg = planDocBytes
+	}
+	rawPlanArg := interface{}(nil)
+	if len(planRawBytes) > 0 {
+		rawPlanArg = planRawBytes
+	}
+
+	row := tx.QueryRowContext(ctx, `
+INSERT INTO run_episodes (run_id, topic_id, user_id, thought, plan_document, plan_raw, plan_prompt, result)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+ON CONFLICT (run_id) DO UPDATE SET
+  topic_id = EXCLUDED.topic_id,
+  user_id = EXCLUDED.user_id,
+  thought = EXCLUDED.thought,
+  plan_document = EXCLUDED.plan_document,
+  plan_raw = EXCLUDED.plan_raw,
+  plan_prompt = EXCLUDED.plan_prompt,
+  result = EXCLUDED.result
+RETURNING id, created_at;
+`, ep.RunID, ep.TopicID, ep.UserID, thoughtBytes, rawPlanDocArg, rawPlanArg, ep.PlanPrompt, resultBytes)
+
+	var episodeID string
+	if err := row.Scan(&episodeID, &ep.CreatedAt); err != nil {
+		return fmt.Errorf("upsert run_episodes: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM run_episode_steps WHERE episode_id=$1`, episodeID); err != nil {
+		return fmt.Errorf("delete episode steps: %w", err)
+	}
+
+	for idx, step := range ep.Steps {
+		if step.StepIndex == 0 {
+			step.StepIndex = idx
+		}
+		taskBytes, err := json.Marshal(step.Task)
+		if err != nil {
+			return fmt.Errorf("marshal step task: %w", err)
+		}
+		var inputBytes []byte
+		if step.InputSnapshot != nil {
+			inputBytes, err = json.Marshal(step.InputSnapshot)
+			if err != nil {
+				return fmt.Errorf("marshal step input: %w", err)
+			}
+		}
+		resultBytes, err := json.Marshal(step.Result)
+		if err != nil {
+			return fmt.Errorf("marshal step result: %w", err)
+		}
+		var artifactsBytes []byte
+		if step.Artifacts != nil {
+			artifactsBytes, err = json.Marshal(step.Artifacts)
+			if err != nil {
+				return fmt.Errorf("marshal step artifacts: %w", err)
+			}
+		}
+		toInterface := func(b []byte) interface{} {
+			if len(b) == 0 {
+				return nil
+			}
+			return b
+		}
+		var started, completed sql.NullTime
+		if step.StartedAt != nil && !step.StartedAt.IsZero() {
+			started = sql.NullTime{Time: *step.StartedAt, Valid: true}
+		}
+		if step.CompletedAt != nil && !step.CompletedAt.IsZero() {
+			completed = sql.NullTime{Time: *step.CompletedAt, Valid: true}
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO run_episode_steps (episode_id, step_index, task, input_snapshot, prompt, result, artifacts, started_at, completed_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+`, episodeID, step.StepIndex, taskBytes, toInterface(inputBytes), nullableString(step.Prompt), resultBytes, toInterface(artifactsBytes), started, completed); err != nil {
+			return fmt.Errorf("insert episode step: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// GetEpisodeByRunID fetches the stored episode trace for a run.
+func (s *Store) GetEpisodeByRunID(ctx context.Context, runID string) (Episode, bool, error) {
+	if runID == "" {
+		return Episode{}, false, fmt.Errorf("run_id required")
+	}
+	row := s.DB.QueryRowContext(ctx, `
+SELECT id, run_id, topic_id, user_id, thought, plan_document, plan_raw, plan_prompt, result, created_at
+FROM run_episodes
+WHERE run_id=$1
+`, runID)
+	var (
+		ep           Episode
+		thoughtBytes []byte
+		planDocBytes []byte
+		planRawBytes []byte
+		resultBytes  []byte
+	)
+	if err := row.Scan(&ep.ID, &ep.RunID, &ep.TopicID, &ep.UserID, &thoughtBytes, &planDocBytes, &planRawBytes, &ep.PlanPrompt, &resultBytes, &ep.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return Episode{}, false, nil
+		}
+		return Episode{}, false, fmt.Errorf("select run_episodes: %w", err)
+	}
+	if err := json.Unmarshal(thoughtBytes, &ep.Thought); err != nil {
+		return Episode{}, false, fmt.Errorf("unmarshal thought: %w", err)
+	}
+	if len(planDocBytes) > 0 {
+		var doc planner.PlanDocument
+		if err := json.Unmarshal(planDocBytes, &doc); err != nil {
+			return Episode{}, false, fmt.Errorf("unmarshal plan document: %w", err)
+		}
+		ep.PlanDocument = &doc
+	}
+	if len(planRawBytes) > 0 {
+		ep.PlanRaw = json.RawMessage(planRawBytes)
+	}
+	if err := json.Unmarshal(resultBytes, &ep.Result); err != nil {
+		return Episode{}, false, fmt.Errorf("unmarshal result: %w", err)
+	}
+
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT step_index, task, input_snapshot, prompt, result, artifacts, started_at, completed_at, created_at
+FROM run_episode_steps
+WHERE episode_id=$1
+ORDER BY step_index
+`, ep.ID)
+	if err != nil {
+		return Episode{}, false, fmt.Errorf("select episode steps: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			step           EpisodeStep
+			taskBytes      []byte
+			inputBytes     []byte
+			prompt         sql.NullString
+			resultStep     []byte
+			artifactsBytes []byte
+			started        sql.NullTime
+			completed      sql.NullTime
+		)
+		if err := rows.Scan(&step.StepIndex, &taskBytes, &inputBytes, &prompt, &resultStep, &artifactsBytes, &started, &completed, &step.CreatedAt); err != nil {
+			return Episode{}, false, fmt.Errorf("scan episode step: %w", err)
+		}
+		if err := json.Unmarshal(taskBytes, &step.Task); err != nil {
+			return Episode{}, false, fmt.Errorf("unmarshal step task: %w", err)
+		}
+		if len(inputBytes) > 0 {
+			if err := json.Unmarshal(inputBytes, &step.InputSnapshot); err != nil {
+				return Episode{}, false, fmt.Errorf("unmarshal step input: %w", err)
+			}
+		}
+		if prompt.Valid {
+			step.Prompt = prompt.String
+		}
+		if err := json.Unmarshal(resultStep, &step.Result); err != nil {
+			return Episode{}, false, fmt.Errorf("unmarshal step result: %w", err)
+		}
+		if len(artifactsBytes) > 0 {
+			if err := json.Unmarshal(artifactsBytes, &step.Artifacts); err != nil {
+				return Episode{}, false, fmt.Errorf("unmarshal step artifacts: %w", err)
+			}
+		}
+		if started.Valid {
+			step.StartedAt = &started.Time
+		}
+		if completed.Valid {
+			step.CompletedAt = &completed.Time
+		}
+		ep.Steps = append(ep.Steps, step)
+	}
+	if err := rows.Err(); err != nil {
+		return Episode{}, false, fmt.Errorf("iterate episode steps: %w", err)
+	}
+
+	return ep, true, nil
+}
+
+// PruneEpisodesBefore deletes episodes older than the supplied cutoff timestamp.
+func (s *Store) PruneEpisodesBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	if cutoff.IsZero() {
+		return 0, fmt.Errorf("cutoff must be provided")
+	}
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM run_episodes WHERE created_at < $1`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // GetKnowledgeGraph retrieves the most recent knowledge graph for a given topic
 func (s *Store) GetKnowledgeGraph(ctx context.Context, topic string) (core.KnowledgeGraph, error) {
 	var (
@@ -1044,4 +1558,50 @@ func (s *Store) ListChatMessages(ctx context.Context, topicID, userID string, li
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+func nullableString(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func encodeVectorLiteral(vec []float32) (string, error) {
+	if len(vec) == 0 {
+		return "", fmt.Errorf("vector must not be empty")
+	}
+	var builder strings.Builder
+	builder.WriteByte('[')
+	for i, f := range vec {
+		if i > 0 {
+			builder.WriteByte(',')
+		}
+		builder.WriteString(strconv.FormatFloat(float64(f), 'f', -1, 32))
+	}
+	builder.WriteByte(']')
+	return builder.String(), nil
+}
+
+func decodeVectorLiteral(lit string) ([]float32, error) {
+	lit = strings.TrimSpace(lit)
+	if lit == "" {
+		return nil, fmt.Errorf("empty vector literal")
+	}
+	lit = strings.TrimPrefix(lit, "[")
+	lit = strings.TrimSuffix(lit, "]")
+	parts := strings.Split(lit, ",")
+	vec := make([]float32, 0, len(parts))
+	for _, part := range parts {
+		value := strings.TrimSpace(part)
+		if value == "" {
+			continue
+		}
+		f, err := strconv.ParseFloat(value, 32)
+		if err != nil {
+			return nil, fmt.Errorf("parse vector value %q: %w", value, err)
+		}
+		vec = append(vec, float32(f))
+	}
+	return vec, nil
 }
