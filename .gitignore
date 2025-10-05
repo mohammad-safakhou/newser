@@ -7,3 +7,6 @@ config/local.config.json
 .env
 todos/
 tools
+!cmd/tools/
+cmd/tools/*
+!cmd/tools/TASKS.md
