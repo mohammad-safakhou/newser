@@ -65,7 +65,7 @@ func (s *stubPlanRepo) GetLatestPlanGraph(ctx context.Context, thoughtID string)
 
 func TestPlansHandlerDryRunSuccess(t *testing.T) {
 	repo := &stubPlanRepo{planID: "plan-xyz"}
-	handler := NewPlansHandler(repo)
+	handler := NewPlansHandler(repo, true, PlanEstimateModeAuto)
 
 	payload := `{"thought_id":"thought-1","plan":{"version":"v1","tasks":[{"id":"t1","type":"research"}],"estimates":{"total_cost":3.5,"total_time":"9m"}}}`
 
@@ -98,7 +98,7 @@ func TestPlansHandlerDryRunSuccess(t *testing.T) {
 }
 
 func TestPlansHandlerDryRunRejectsInvalidPlan(t *testing.T) {
-	handler := NewPlansHandler(nil)
+	handler := NewPlansHandler(nil, true, PlanEstimateModeAuto)
 	payload := `{"plan":{"version":"v1"}}`
 
 	e := echo.New()
@@ -119,7 +119,7 @@ func TestPlansHandlerDryRunRejectsInvalidPlan(t *testing.T) {
 
 func TestPlansHandlerDryRunPropagatesSaveError(t *testing.T) {
 	repo := &stubPlanRepo{saveErr: context.DeadlineExceeded}
-	handler := NewPlansHandler(repo)
+	handler := NewPlansHandler(repo, true, PlanEstimateModeAuto)
 
 	payload := `{"thought_id":"thought-1","plan":{"version":"v1","tasks":[{"id":"t1","type":"research"}]}}`
 	e := echo.New()
@@ -138,6 +138,26 @@ func TestPlansHandlerDryRunPropagatesSaveError(t *testing.T) {
 	}
 }
 
+func TestPlansHandlerDryRunDisabled(t *testing.T) {
+	repo := &stubPlanRepo{}
+	handler := NewPlansHandler(repo, false, PlanEstimateModeAuto)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/plans/dry-run", strings.NewReader(`{}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	ctx := e.NewContext(req, rec)
+
+	err := handler.dryRun(ctx)
+	if err == nil {
+		t.Fatalf("expected 404 when dry-run disabled")
+	}
+	httpErr, ok := err.(*echo.HTTPError)
+	if !ok || httpErr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 http error, got %#v", err)
+	}
+}
+
 func TestPlansHandlerGetLatest(t *testing.T) {
 	repo := &stubPlanRepo{}
 	repo.planID = "plan-1"
@@ -149,7 +169,7 @@ func TestPlansHandlerGetLatest(t *testing.T) {
 		UpdatedAt: time.Unix(1700000000, 0),
 	}
 	repo.found = true
-	handler := NewPlansHandler(repo)
+	handler := NewPlansHandler(repo, true, PlanEstimateModeAuto)
 
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodGet, "/api/plans/thought-1", nil)
@@ -170,6 +190,42 @@ func TestPlansHandlerGetLatest(t *testing.T) {
 	}
 	if resp.PlanID != "plan-1" || resp.ThoughtID != "thought-1" {
 		t.Fatalf("unexpected response: %+v", resp)
+	}
+}
+
+func TestPlansHandlerEstimateModes(t *testing.T) {
+	doc := &planner.PlanDocument{
+		Tasks:     []planner.PlanTask{{ID: "t1", Type: "research", EstimatedCost: 1.25}, {ID: "t2", Type: "analysis", EstimatedCost: 2.75}},
+		Estimates: &planner.PlanEstimates{TotalCost: 10.5, TotalTime: "12m"},
+	}
+	tests := []struct {
+		name     string
+		mode     string
+		wantCost float64
+		wantTime string
+	}{
+		{"auto uses document estimates", PlanEstimateModeAuto, 10.5, "12m"},
+		{"document prefers totals", PlanEstimateModeDocument, 10.5, "12m"},
+		{"task sum fallback", PlanEstimateModeTaskSum, 4.0, ""},
+		{"none disables estimates", PlanEstimateModeNone, 0, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewPlansHandler(nil, true, tc.mode)
+			cost, duration := h.estimatePlan(doc)
+			if cost != tc.wantCost || duration != tc.wantTime {
+				t.Fatalf("mode %s: expected cost %v time %q, got cost %v time %q", tc.mode, tc.wantCost, tc.wantTime, cost, duration)
+			}
+		})
+	}
+
+	// Verify document fallback to task sum when totals missing.
+	clone := *doc
+	clone.Estimates = nil
+	h := NewPlansHandler(nil, true, PlanEstimateModeDocument)
+	cost, duration := h.estimatePlan(&clone)
+	if cost != 4.0 || duration != "" {
+		t.Fatalf("expected fallback to task sum, got cost %v time %q", cost, duration)
 	}
 }
 

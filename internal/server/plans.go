@@ -12,18 +12,32 @@ import (
 	"github.com/mohammad-safakhou/newser/internal/runtime"
 )
 
+const (
+	PlanEstimateModeAuto     = "auto"
+	PlanEstimateModeDocument = "document"
+	PlanEstimateModeTaskSum  = "task-sum"
+	PlanEstimateModeNone     = "none"
+)
+
 // PlansHandler exposes plan validation utilities (dry-run).
 type PlansHandler struct {
-	Repo agentcore.PlanRepository
+	Repo         agentcore.PlanRepository
+	EstimateMode string
+	EnableDryRun bool
 }
 
-func NewPlansHandler(repo agentcore.PlanRepository) *PlansHandler {
-	return &PlansHandler{Repo: repo}
+func NewPlansHandler(repo agentcore.PlanRepository, enableDryRun bool, estimateMode string) *PlansHandler {
+	if estimateMode == "" {
+		estimateMode = PlanEstimateModeAuto
+	}
+	return &PlansHandler{Repo: repo, EstimateMode: estimateMode, EnableDryRun: enableDryRun}
 }
 
 func (h *PlansHandler) Register(g *echo.Group, secret []byte) {
 	g.Use(runtime.EchoAuthMiddleware(secret))
-	g.POST("/dry-run", h.dryRun)
+	if h.EnableDryRun {
+		g.POST("/dry-run", h.dryRun)
+	}
 	g.GET(":thought_id", h.getLatest)
 }
 
@@ -51,6 +65,10 @@ type planGetResponse struct {
 }
 
 func (h *PlansHandler) dryRun(c echo.Context) error {
+	if !h.EnableDryRun {
+		return echo.NewHTTPError(http.StatusNotFound, "plan dry-run disabled")
+	}
+
 	var req planDryRunRequest
 	if err := c.Bind(&req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
@@ -69,18 +87,7 @@ func (h *PlansHandler) dryRun(c echo.Context) error {
 
 	// Derive metrics
 	taskCount := len(doc.Tasks)
-	estimatedCost := 0.0
-	if doc.Estimates != nil {
-		estimatedCost = doc.Estimates.TotalCost
-	} else {
-		for _, t := range doc.Tasks {
-			estimatedCost += t.EstimatedCost
-		}
-	}
-	estimatedTime := ""
-	if doc.Estimates != nil {
-		estimatedTime = doc.Estimates.TotalTime
-	}
+	estimatedCost, estimatedTime := h.estimatePlan(&doc)
 	confidence := doc.Confidence
 
 	planID := doc.PlanID
@@ -102,6 +109,39 @@ func (h *PlansHandler) dryRun(c echo.Context) error {
 		Message:       "plan validated",
 	}
 	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *PlansHandler) estimatePlan(doc *planner.PlanDocument) (float64, string) {
+	mode := h.EstimateMode
+	if mode == "" {
+		mode = PlanEstimateModeAuto
+	}
+	switch mode {
+	case PlanEstimateModeNone:
+		return 0, ""
+	case PlanEstimateModeDocument:
+		if doc.Estimates != nil {
+			return doc.Estimates.TotalCost, doc.Estimates.TotalTime
+		}
+		return h.sumTaskEstimates(doc), ""
+	case PlanEstimateModeTaskSum:
+		return h.sumTaskEstimates(doc), ""
+	case PlanEstimateModeAuto:
+		fallthrough
+	default:
+		if doc.Estimates != nil {
+			return doc.Estimates.TotalCost, doc.Estimates.TotalTime
+		}
+		return h.sumTaskEstimates(doc), ""
+	}
+}
+
+func (h *PlansHandler) sumTaskEstimates(doc *planner.PlanDocument) float64 {
+	sum := 0.0
+	for _, t := range doc.Tasks {
+		sum += t.EstimatedCost
+	}
+	return sum
 }
 
 func (h *PlansHandler) getLatest(c echo.Context) error {

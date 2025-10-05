@@ -151,7 +151,7 @@ func Run(cfg *config.Config) error {
 	toolsH := &ToolsHandler{Store: auth.Store, Config: cfg}
 	toolsH.Register(api.Group("/tools"), auth.Secret)
 
-	plansH := NewPlansHandler(planRepo)
+	plansH := NewPlansHandler(planRepo, cfg.Server.PlanDryRunEnabled, cfg.Server.PlanEstimateMode)
 	plansH.Register(api.Group("/plans"), auth.Secret)
 
 	// ops endpoints (authenticated)

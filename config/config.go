@@ -26,8 +26,10 @@ type Config struct {
 
 // ServerConfig contains HTTP server and auth settings
 type ServerConfig struct {
-	Address   string `mapstructure:"address"`
-	JWTSecret string `mapstructure:"jwt_secret"`
+	Address           string `mapstructure:"address"`
+	JWTSecret         string `mapstructure:"jwt_secret"`
+	PlanDryRunEnabled bool   `mapstructure:"plan_dry_run_enabled"`
+	PlanEstimateMode  string `mapstructure:"plan_estimate_mode"`
 }
 
 // GeneralConfig contains general application settings
@@ -205,6 +207,8 @@ type PostgresConfig struct {
 func LoadConfig(path string) *Config {
 	viper.SetConfigName("config") // name of config file (without extension)
 	viper.SetConfigType("json")   // REQUIRED if the config file does not have the extension in the name
+	viper.SetDefault("server.plan_dry_run_enabled", true)
+	viper.SetDefault("server.plan_estimate_mode", "auto")
 
 	if path == "" {
 		viper.AddConfigPath("./app/config") // path to look for the config file in

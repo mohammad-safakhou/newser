@@ -4,23 +4,40 @@ import (
 	"context"
 	"flag"
 	"log"
-	"os"
-	"os/signal"
-	"syscall"
+	"strings"
 	"time"
 
 	"github.com/mohammad-safakhou/newser/config"
 	"github.com/mohammad-safakhou/newser/internal/runtime"
+	srv "github.com/mohammad-safakhou/newser/internal/server"
 )
 
 func main() {
 	cfgPath := flag.String("config", "", "path to config file")
+	planEstimateMode := flag.String("plan-estimate-mode", "", "plan estimation mode (auto|document|task-sum|none)")
+	planDryRunEnabled := flag.Bool("enable-plan-dry-run", true, "expose /api/plans/dry-run endpoint")
 	flag.Parse()
 
 	cfg := config.LoadConfig(*cfgPath)
+	flag.CommandLine.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "plan-estimate-mode":
+			cfg.Server.PlanEstimateMode = strings.TrimSpace(*planEstimateMode)
+		case "enable-plan-dry-run":
+			cfg.Server.PlanDryRunEnabled = *planDryRunEnabled
+		}
+	})
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
+	switch cfg.Server.PlanEstimateMode {
+	case "", srv.PlanEstimateModeAuto, srv.PlanEstimateModeDocument, srv.PlanEstimateModeTaskSum, srv.PlanEstimateModeNone:
+		if cfg.Server.PlanEstimateMode == "" {
+			cfg.Server.PlanEstimateMode = srv.PlanEstimateModeAuto
+		}
+	default:
+		log.Fatalf("invalid plan estimate mode: %s", cfg.Server.PlanEstimateMode)
+	}
+
+	ctx := context.Background()
 
 	telemetry, _, _, err := runtime.SetupTelemetry(ctx, cfg.Telemetry, runtime.TelemetryOptions{ServiceName: "api", ServiceVersion: "dev", MetricsPort: cfg.Telemetry.MetricsPort})
 	if err != nil {
@@ -36,7 +53,7 @@ func main() {
 		log.Fatalf("api schema registry init: %v", err)
 	}
 
-	if err := runtime.RunPlaceholder(ctx, "api"); err != nil {
+	if err := srv.Run(cfg); err != nil {
 		log.Fatalf("api service exited: %v", err)
 	}
 

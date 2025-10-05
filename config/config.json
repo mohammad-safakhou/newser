@@ -7,7 +7,9 @@
   },
   "server": {
     "address": ":10001",
-    "jwt_secret": ""
+    "jwt_secret": "",
+    "plan_dry_run_enabled": true,
+    "plan_estimate_mode": "auto"
   },
   "llm": {
     "providers": {
