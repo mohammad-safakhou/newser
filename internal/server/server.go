@@ -141,11 +141,17 @@ func Run(cfg *config.Config) error {
 	th := &TopicsHandler{Store: auth.Store, LLM: llmProvider, Model: cfg.LLM.Routing.Chatting}
 	th.Register(api.Group("/topics"), auth.Secret)
 
+	topicsGroup := api.Group("/topics")
+
 	rh := NewRunsHandler(cfg, auth.Store, orch, llmProvider, semIngestor)
-	rh.Register(api.Group("/topics"), auth.Secret)
+	rh.Register(topicsGroup, auth.Secret)
 
 	if memoryHandler := NewMemoryHandler(cfg, auth.Store, llmProvider, log.New(log.Writer(), "[MEMORY] ", log.LstdFlags)); memoryHandler != nil {
 		memoryHandler.Register(api.Group("/memory"), auth.Secret)
+	}
+
+	if budgetHandler := NewBudgetHandler(auth.Store); budgetHandler != nil {
+		budgetHandler.Register(topicsGroup, auth.Secret)
 	}
 
 	toolsH := &ToolsHandler{Store: auth.Store, Config: cfg}

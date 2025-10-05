@@ -3,7 +3,7 @@
 Roadmap references: `Ix.Ey` = Initiative/Epic from `tasks.md`, `FG` = Feasibility Gate.
 
 - [x] [I2.E2] Implement the plan JSON dry-run endpoint with schema validation, cost estimation, and clear error responses.
-- [ ] [I2.E4] Add budget configuration APIs, breach reporting, and manual approval flows with audit trails.
+- [x] [I2.E4] Add budget configuration APIs, breach reporting, and manual approval flows with audit trails.
 - [x] [I3.E2] Expose `/memory.search` and related semantic memory routes with pgvector-backed queries.
 - [ ] [I3.E4] Wire `memory.write/summarize/delta` endpoints once the memory manager is available, enforcing auth scopes.
 - [ ] [I6.E1] Include source IDs/snippets in aggregation responses and reject unreferenced claims server-side.
