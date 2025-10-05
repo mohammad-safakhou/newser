@@ -16,6 +16,8 @@ func main() {
 	cfgPath := flag.String("config", "", "path to config file")
 	planEstimateMode := flag.String("plan-estimate-mode", "", "plan estimation mode (auto|document|task-sum|none)")
 	planDryRunEnabled := flag.Bool("enable-plan-dry-run", true, "expose /api/plans/dry-run endpoint")
+	enableSemanticMemory := flag.Bool("enable-semantic-memory", false, "force enable semantic memory endpoints")
+	disableSemanticMemory := flag.Bool("disable-semantic-memory", false, "force disable semantic memory endpoints")
 	flag.Parse()
 
 	cfg := config.LoadConfig(*cfgPath)
@@ -25,8 +27,16 @@ func main() {
 			cfg.Server.PlanEstimateMode = strings.TrimSpace(*planEstimateMode)
 		case "enable-plan-dry-run":
 			cfg.Server.PlanDryRunEnabled = *planDryRunEnabled
+		case "enable-semantic-memory":
+			cfg.Memory.Semantic.Enabled = true
+		case "disable-semantic-memory":
+			cfg.Memory.Semantic.Enabled = false
 		}
 	})
+
+	if *enableSemanticMemory && *disableSemanticMemory {
+		log.Fatal("enable-semantic-memory and disable-semantic-memory cannot both be set")
+	}
 
 	switch cfg.Server.PlanEstimateMode {
 	case "", srv.PlanEstimateModeAuto, srv.PlanEstimateModeDocument, srv.PlanEstimateModeTaskSum, srv.PlanEstimateModeNone:

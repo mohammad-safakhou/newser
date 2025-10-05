@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"strings"
@@ -13,15 +14,20 @@ import (
 	"github.com/mohammad-safakhou/newser/internal/store"
 )
 
+type semanticStore interface {
+	SearchRunEmbeddings(ctx context.Context, topicID string, vector []float32, topK int, threshold float64) ([]store.RunEmbeddingSearchResult, error)
+	SearchPlanStepEmbeddings(ctx context.Context, topicID string, vector []float32, topK int, threshold float64) ([]store.PlanStepEmbeddingSearchResult, error)
+}
+
 // MemoryHandler exposes semantic memory search APIs.
 type MemoryHandler struct {
-	store    *store.Store
+	store    semanticStore
 	cfg      *config.Config
 	provider agentcore.LLMProvider
 	logger   *log.Logger
 }
 
-func NewMemoryHandler(cfg *config.Config, st *store.Store, provider agentcore.LLMProvider, logger *log.Logger) *MemoryHandler {
+func NewMemoryHandler(cfg *config.Config, st semanticStore, provider agentcore.LLMProvider, logger *log.Logger) *MemoryHandler {
 	if cfg == nil || !cfg.Memory.Semantic.Enabled {
 		return nil
 	}
