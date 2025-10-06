@@ -17,7 +17,9 @@ import (
 	"github.com/mohammad-safakhou/newser/config"
 	agentcore "github.com/mohammad-safakhou/newser/internal/agent/core"
 	agenttele "github.com/mohammad-safakhou/newser/internal/agent/telemetry"
+	memorymanager "github.com/mohammad-safakhou/newser/internal/memory/manager"
 	"github.com/mohammad-safakhou/newser/internal/memory/semantic"
+	memorysvc "github.com/mohammad-safakhou/newser/internal/memory/service"
 	"github.com/mohammad-safakhou/newser/internal/runtime"
 	"github.com/mohammad-safakhou/newser/internal/store"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -130,6 +132,11 @@ func Run(cfg *config.Config) error {
 		}
 	}
 
+	var episodicManager memorysvc.Manager
+	if mgr := memorymanager.New(auth.Store, cfg.Memory, log.New(log.Writer(), "[EPISODIC] ", log.LstdFlags)); mgr != nil {
+		episodicManager = mgr
+	}
+
 	api := e.Group("/api")
 	auth.Register(api.Group("/auth"))
 
@@ -146,12 +153,16 @@ func Run(cfg *config.Config) error {
 	rh := NewRunsHandler(cfg, auth.Store, orch, llmProvider, semIngestor)
 	rh.Register(topicsGroup, auth.Secret)
 
-	if memoryHandler := NewMemoryHandler(cfg, auth.Store, llmProvider, log.New(log.Writer(), "[MEMORY] ", log.LstdFlags)); memoryHandler != nil {
+	if memoryHandler := NewMemoryHandler(cfg, auth.Store, llmProvider, episodicManager, log.New(log.Writer(), "[MEMORY] ", log.LstdFlags)); memoryHandler != nil {
 		memoryHandler.Register(api.Group("/memory"), auth.Secret)
 	}
 
 	if budgetHandler := NewBudgetHandler(auth.Store); budgetHandler != nil {
 		budgetHandler.Register(topicsGroup, auth.Secret)
+	}
+
+	if builderHandler := NewBuilderHandler(cfg, auth.Store); builderHandler != nil {
+		builderHandler.Register(topicsGroup, auth.Secret)
 	}
 
 	toolsH := &ToolsHandler{Store: auth.Store, Config: cfg}

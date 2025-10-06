@@ -11,5 +11,5 @@ Roadmap references: `Ix.Ey` = Initiative/Epic from `tasks.md`.
 - [ ] [I4.E4] Store artifact metadata (S3 URIs, retention info) for the attachment store.
 - [ ] [I5.E1] Persist crawl state (visited URLs, retry depth, last_seen_at) and dedup hashes.
 - [ ] [I6.E1] Link evidence metadata (source IDs, snippets) to every claim/output.
-- [ ] [I6.E3] Maintain immutable signed run manifests with hash verification fields.
+- [x] [I6.E3] Maintain immutable signed run manifests with hash verification fields.
 - [ ] [I7.E3] Aggregate run status/cost metrics for dashboards and alert hooks.

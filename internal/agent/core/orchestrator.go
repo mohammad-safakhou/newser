@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -515,31 +516,18 @@ func (o *Orchestrator) synthesizeResults(ctx context.Context, thought UserThough
 		}
 		result.Metadata["budget_usage"] = budgetMeta
 	}
+	if len(allSources) > 0 {
+		ensureSourceIDs(&allSources)
+	}
+
 	if len(items) > 0 {
-		// Normalize item sources: add domain if missing, de-prioritize Wikipedia, and attach archived_url for known paywalled domains
-		for i := range items {
-			if srcs, ok := items[i]["sources"].([]interface{}); ok && len(srcs) > 0 {
-				// normalize each source map
-				var norm []map[string]interface{}
-				for _, s := range srcs {
-					if sm, ok := s.(map[string]interface{}); ok {
-						u, _ := sm["url"].(string)
-						d := toDomain(u)
-						if sm["domain"] == nil && d != "" {
-							sm["domain"] = d
-						}
-						if sm["archived_url"] == nil || sm["archived_url"] == "" {
-							if isPaywalledDomain(d) {
-								sm["archived_url"] = archiveHint(u)
-							}
-						}
-						norm = append(norm, sm)
-					}
-				}
-				// reorder: non-wikipedia first
-				sort.SliceStable(norm, func(a, b int) bool {
-					da, _ := norm[a]["domain"].(string)
-					db, _ := norm[b]["domain"].(string)
+		sourceLookup := buildSourceLookup(allSources)
+		var filtered []map[string]interface{}
+		for _, item := range items {
+			if normSources, sourceIDs := normalizeItemSources(item, sourceLookup); len(sourceIDs) > 0 {
+				sort.SliceStable(normSources, func(a, b int) bool {
+					da, _ := normSources[a]["domain"].(string)
+					db, _ := normSources[b]["domain"].(string)
 					wa := isWikipediaDomain(da)
 					wb := isWikipediaDomain(db)
 					if wa == wb {
@@ -547,77 +535,97 @@ func (o *Orchestrator) synthesizeResults(ctx context.Context, thought UserThough
 					}
 					return !wa && wb
 				})
-				// write back as []interface{}
-				arr := make([]interface{}, len(norm))
-				for k := range norm {
-					arr[k] = norm[k]
+				arr := make([]interface{}, len(normSources))
+				for idx := range normSources {
+					arr[idx] = normSources[idx]
 				}
-				items[i]["sources"] = arr
+				item["sources"] = arr
+				item["source_ids"] = sourceIDs
+				filtered = append(filtered, item)
+			} else {
+				title := ""
+				if t, ok := item["title"].(string); ok {
+					title = strings.TrimSpace(t)
+				}
+				if title == "" {
+					title = "(unknown)"
+				}
+				o.logger.Printf("dropping digest item %q due to missing verified sources", title)
 			}
 		}
-		result.Metadata["items"] = items
-		// Compute digest stats
-		stats := map[string]interface{}{}
-		stats["count"] = len(items)
-		// categories
-		cat := map[string]int{}
-		var earliest, latest time.Time
-		domains := map[string]int{}
-		now := time.Now()
-		for i, it := range items {
-			if c, ok := it["category"].(string); ok && c != "" {
-				cat[c]++
+		if len(filtered) == 0 {
+			delete(result.Metadata, "items")
+			delete(result.Metadata, "digest_stats")
+		} else {
+			items = filtered
+			arr := make([]interface{}, len(items))
+			for i := range items {
+				arr[i] = items[i]
 			}
-			if pubs, ok := it["published_at"].(string); ok && pubs != "" {
-				if t, err := time.Parse(time.RFC3339, pubs); err == nil {
-					if earliest.IsZero() || t.Before(earliest) {
-						earliest = t
-					}
-					if latest.IsZero() || t.After(latest) {
-						latest = t
+			result.Metadata["items"] = arr
+			stats := map[string]interface{}{}
+			stats["count"] = len(items)
+			cat := map[string]int{}
+			var earliest, latest time.Time
+			domains := map[string]int{}
+			now := time.Now()
+			for idx, it := range items {
+				if c, ok := it["category"].(string); ok && c != "" {
+					cat[c]++
+				}
+				if pubs, ok := it["published_at"].(string); ok && pubs != "" {
+					if t, err := time.Parse(time.RFC3339, pubs); err == nil {
+						if earliest.IsZero() || t.Before(earliest) {
+							earliest = t
+						}
+						if latest.IsZero() || t.After(latest) {
+							latest = t
+						}
 					}
 				}
-			}
-			if _, ok := it["seen_at"]; !ok {
-				items[i]["seen_at"] = now.Format(time.RFC3339)
-			}
-			if srcs, ok := it["sources"].([]interface{}); ok {
-				for _, s := range srcs {
-					if sm, ok := s.(map[string]interface{}); ok {
-						if d, ok := sm["domain"].(string); ok && d != "" {
-							domains[d]++
+				if _, ok := it["seen_at"]; !ok {
+					items[idx]["seen_at"] = now.Format(time.RFC3339)
+				}
+				if srcs, ok := it["sources"].([]interface{}); ok {
+					for _, s := range srcs {
+						if sm, ok := s.(map[string]interface{}); ok {
+							if d, ok := sm["domain"].(string); ok && d != "" {
+								domains[d]++
+							}
 						}
 					}
 				}
 			}
-		}
-		stats["categories"] = cat
-		if !earliest.IsZero() && !latest.IsZero() {
-			stats["span_hours"] = latest.Sub(earliest).Hours()
-			stats["earliest"] = earliest.Format(time.RFC3339)
-			stats["latest"] = latest.Format(time.RFC3339)
-		}
-		// top domains (first 5)
-		type kv struct {
-			k string
-			v int
-		}
-		var kvs []kv
-		for k, v := range domains {
-			kvs = append(kvs, kv{k, v})
-		}
-		sort.Slice(kvs, func(i, j int) bool {
-			if kvs[i].v == kvs[j].v {
-				return kvs[i].k < kvs[j].k
+			stats["categories"] = cat
+			if !earliest.IsZero() && !latest.IsZero() {
+				stats["span_hours"] = latest.Sub(earliest).Hours()
+				stats["earliest"] = earliest.Format(time.RFC3339)
+				stats["latest"] = latest.Format(time.RFC3339)
 			}
-			return kvs[i].v > kvs[j].v
-		})
-		top := []string{}
-		for i := 0; i < len(kvs) && i < 5; i++ {
-			top = append(top, kvs[i].k)
+			type kv struct {
+				k string
+				v int
+			}
+			var kvs []kv
+			for k, v := range domains {
+				kvs = append(kvs, kv{k, v})
+			}
+			sort.Slice(kvs, func(i, j int) bool {
+				if kvs[i].v == kvs[j].v {
+					return kvs[i].k < kvs[j].k
+				}
+				return kvs[i].v > kvs[j].v
+			})
+			top := []string{}
+			for i := 0; i < len(kvs) && i < 5; i++ {
+				top = append(top, kvs[i].k)
+			}
+			stats["top_domains"] = top
+			result.Metadata["digest_stats"] = stats
 		}
-		stats["top_domains"] = top
-		result.Metadata["digest_stats"] = stats
+	} else {
+		delete(result.Metadata, "items")
+		delete(result.Metadata, "digest_stats")
 	}
 
 	return result, nil
@@ -674,6 +682,146 @@ func collectArtifacts(res AgentResult) []map[string]interface{} {
 	default:
 		return nil
 	}
+}
+
+func ensureSourceIDs(sources *[]Source) {
+	if sources == nil {
+		return
+	}
+	for i := range *sources {
+		if (*sources)[i].ID == "" {
+			(*sources)[i].ID = uuid.NewString()
+		}
+	}
+}
+
+func buildSourceLookup(sources []Source) map[string]*Source {
+	lookup := make(map[string]*Source, len(sources))
+	for i := range sources {
+		norm := normalizeSourceURL(sources[i].URL)
+		if norm == "" {
+			continue
+		}
+		lookup[norm] = &sources[i]
+		if trimmed := strings.TrimSuffix(norm, "/"); trimmed != norm {
+			lookup[trimmed] = &sources[i]
+		}
+	}
+	return lookup
+}
+
+func normalizeItemSources(item map[string]interface{}, lookup map[string]*Source) ([]map[string]interface{}, []string) {
+	if len(lookup) == 0 {
+		return nil, nil
+	}
+	var rawSources []map[string]interface{}
+	switch v := item["sources"].(type) {
+	case []map[string]interface{}:
+		rawSources = v
+	case []interface{}:
+		for _, s := range v {
+			if sm, ok := s.(map[string]interface{}); ok {
+				rawSources = append(rawSources, sm)
+			}
+		}
+	default:
+		return nil, nil
+	}
+	if len(rawSources) == 0 {
+		return nil, nil
+	}
+	var out []map[string]interface{}
+	var ids []string
+	seen := make(map[string]struct{})
+	for _, sm := range rawSources {
+		if sm == nil {
+			continue
+		}
+		urlVal, _ := sm["url"].(string)
+		urlVal = strings.TrimSpace(urlVal)
+		if urlVal == "" {
+			continue
+		}
+		norm := normalizeSourceURL(urlVal)
+		src, ok := lookup[norm]
+		if !ok {
+			if alt := strings.TrimSuffix(norm, "/"); alt != norm {
+				src, ok = lookup[alt]
+			}
+		}
+		if !ok {
+			continue
+		}
+		m := make(map[string]interface{}, len(sm)+3)
+		for k, v := range sm {
+			m[k] = v
+		}
+		domain := toDomain(urlVal)
+		if m["domain"] == nil && domain != "" {
+			m["domain"] = domain
+		}
+		if m["archived_url"] == nil || strings.TrimSpace(fmt.Sprint(m["archived_url"])) == "" {
+			if isPaywalledDomain(domain) {
+				m["archived_url"] = archiveHint(urlVal)
+			}
+		}
+		m["url"] = urlVal
+		m["id"] = src.ID
+		snippet := trimSnippet(src.Summary)
+		if snippet == "" {
+			snippet = trimSnippet(src.Content)
+		}
+		if snippet != "" {
+			m["snippet"] = snippet
+		} else {
+			delete(m, "snippet")
+		}
+		out = append(out, m)
+		if _, exists := seen[src.ID]; !exists {
+			ids = append(ids, src.ID)
+			seen[src.ID] = struct{}{}
+		}
+	}
+	return out, ids
+}
+
+func normalizeSourceURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return strings.TrimSuffix(strings.ToLower(raw), "/")
+	}
+	u.Fragment = ""
+	if u.Scheme == "" {
+		u.Scheme = "https"
+	} else {
+		u.Scheme = strings.ToLower(u.Scheme)
+	}
+	u.Host = strings.ToLower(u.Host)
+	if len(u.Path) > 1 {
+		u.Path = strings.TrimRight(u.Path, "/")
+	}
+	return u.String()
+}
+
+func trimSnippet(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	const maxRunes = 280
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	trimmed := strings.TrimSpace(string(runes[:maxRunes]))
+	if strings.HasSuffix(trimmed, "…") || strings.HasSuffix(trimmed, "...") {
+		return trimmed
+	}
+	return trimmed + "…"
 }
 
 // toDomain extracts the hostname from a URL string.

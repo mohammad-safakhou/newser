@@ -9,7 +9,7 @@ Roadmap references: `Ix.Ey` = Initiative/Epic from `tasks.md`.
 - [ ] [I4.E4] Create attachment metadata tables referencing S3-compatible storage.
 - [ ] [I5.E1] Store crawler state (visited URLs, last_seen_at, dedup hashes, budgets) with indexes for incremental fetch.
 - [ ] [I6.E1] Add evidence metadata tables linking outputs to source snippets.
-- [ ] [I6.E3] Persist signed run manifests and hash verification records.
-- [ ] [I7.E1] Create Topic/Blueprint/View/Route schema tables with rollback history.
+- [x] [I6.E3] Persist signed run manifests and hash verification records.
+- [x] [I7.E1] Create Topic/Blueprint/View/Route schema tables with rollback history.
 - [ ] [I7.E3] Build aggregated run/cost metrics tables for dashboards and alerting.
 - [ ] [I8.E2] Support plugin registry models (manifests, signatures, installation state).

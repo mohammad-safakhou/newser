@@ -9,7 +9,9 @@
     "address": ":10001",
     "jwt_secret": "",
     "plan_dry_run_enabled": true,
-    "plan_estimate_mode": "auto"
+    "plan_estimate_mode": "auto",
+    "run_manifest_enabled": true,
+    "run_stream_enabled": true
   },
   "llm": {
     "providers": {

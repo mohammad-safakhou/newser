@@ -22,14 +22,17 @@ type Config struct {
 	Storage    StorageConfig    `mapstructure:"storage"`
 	Memory     MemoryConfig     `mapstructure:"memory"`
 	Security   SecurityConfig   `mapstructure:"security"`
+	Builder    BuilderConfig    `mapstructure:"builder"`
 }
 
 // ServerConfig contains HTTP server and auth settings
 type ServerConfig struct {
-	Address           string `mapstructure:"address"`
-	JWTSecret         string `mapstructure:"jwt_secret"`
-	PlanDryRunEnabled bool   `mapstructure:"plan_dry_run_enabled"`
-	PlanEstimateMode  string `mapstructure:"plan_estimate_mode"`
+	Address            string `mapstructure:"address"`
+	JWTSecret          string `mapstructure:"jwt_secret"`
+	PlanDryRunEnabled  bool   `mapstructure:"plan_dry_run_enabled"`
+	PlanEstimateMode   string `mapstructure:"plan_estimate_mode"`
+	RunManifestEnabled bool   `mapstructure:"run_manifest_enabled"`
+	RunStreamEnabled   bool   `mapstructure:"run_stream_enabled"`
 }
 
 // GeneralConfig contains general application settings
@@ -101,6 +104,19 @@ type SecurityConfig struct {
 	DefaultTimeout  time.Duration `mapstructure:"default_timeout"`
 	DefaultCPU      float64       `mapstructure:"default_cpu"`
 	DefaultMemory   string        `mapstructure:"default_memory"`
+}
+
+// BuilderConfig defines conversational builder defaults.
+type BuilderConfig struct {
+	Defaults BuilderDefaultsConfig `mapstructure:"defaults"`
+}
+
+// BuilderDefaultsConfig captures default schemas per builder kind.
+type BuilderDefaultsConfig struct {
+	Topic     string `mapstructure:"topic"`
+	Blueprint string `mapstructure:"blueprint"`
+	View      string `mapstructure:"view"`
+	Route     string `mapstructure:"route"`
 }
 
 // AgentsConfig contains agent-specific settings
@@ -209,6 +225,12 @@ func LoadConfig(path string) *Config {
 	viper.SetConfigType("json")   // REQUIRED if the config file does not have the extension in the name
 	viper.SetDefault("server.plan_dry_run_enabled", true)
 	viper.SetDefault("server.plan_estimate_mode", "auto")
+	viper.SetDefault("server.run_manifest_enabled", true)
+	viper.SetDefault("server.run_stream_enabled", true)
+	viper.SetDefault("builder.defaults.topic", DefaultTopicSchema)
+	viper.SetDefault("builder.defaults.blueprint", DefaultBlueprintSchema)
+	viper.SetDefault("builder.defaults.view", DefaultViewSchema)
+	viper.SetDefault("builder.defaults.route", DefaultRouteSchema)
 
 	if path == "" {
 		viper.AddConfigPath("./app/config") // path to look for the config file in

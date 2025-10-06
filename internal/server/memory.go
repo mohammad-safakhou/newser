@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -10,6 +11,8 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/mohammad-safakhou/newser/config"
 	agentcore "github.com/mohammad-safakhou/newser/internal/agent/core"
+	memorysvc "github.com/mohammad-safakhou/newser/internal/memory/service"
+	"github.com/mohammad-safakhou/newser/internal/planner"
 	"github.com/mohammad-safakhou/newser/internal/runtime"
 	"github.com/mohammad-safakhou/newser/internal/store"
 )
@@ -24,20 +27,35 @@ type MemoryHandler struct {
 	store    semanticStore
 	cfg      *config.Config
 	provider agentcore.LLMProvider
+	manager  memorysvc.Manager
 	logger   *log.Logger
+	semantic bool
 }
 
-func NewMemoryHandler(cfg *config.Config, st semanticStore, provider agentcore.LLMProvider, logger *log.Logger) *MemoryHandler {
-	if cfg == nil || !cfg.Memory.Semantic.Enabled {
+type episodicSnapshotPayload struct {
+	RunID        string                     `json:"run_id"`
+	TopicID      string                     `json:"topic_id"`
+	UserID       string                     `json:"user_id"`
+	Thought      agentcore.UserThought      `json:"thought"`
+	PlanDocument *planner.PlanDocument      `json:"plan_document"`
+	PlanRaw      []byte                     `json:"plan_raw"`
+	PlanPrompt   string                     `json:"plan_prompt"`
+	Result       agentcore.ProcessingResult `json:"result"`
+	Steps        []agentcore.EpisodicStep   `json:"steps"`
+}
+
+func NewMemoryHandler(cfg *config.Config, st semanticStore, provider agentcore.LLMProvider, manager memorysvc.Manager, logger *log.Logger) *MemoryHandler {
+	if cfg == nil {
 		return nil
 	}
-	if provider == nil {
+	semanticEnabled := cfg.Memory.Semantic.Enabled && st != nil && provider != nil
+	if !semanticEnabled && manager == nil {
 		return nil
 	}
 	if logger == nil {
 		logger = log.New(log.Writer(), "[MEMORY] ", log.LstdFlags)
 	}
-	return &MemoryHandler{store: st, cfg: cfg, provider: provider, logger: logger}
+	return &MemoryHandler{store: st, cfg: cfg, provider: provider, manager: manager, logger: logger, semantic: semanticEnabled}
 }
 
 func (h *MemoryHandler) Register(g *echo.Group, secret []byte) {
@@ -45,7 +63,14 @@ func (h *MemoryHandler) Register(g *echo.Group, secret []byte) {
 		return
 	}
 	g.Use(runtime.EchoAuthMiddleware(secret))
-	g.POST("/search", h.search)
+	if h.semantic {
+		g.POST("/search", h.search)
+	}
+	if h.manager != nil {
+		g.POST("/write", h.write, runtime.RequireScopes("memory:write"))
+		g.POST("/summarize", h.summarize, runtime.RequireScopes("memory:summarize"))
+		g.POST("/delta", h.delta, runtime.RequireScopes("memory:delta"))
+	}
 }
 
 type semanticSearchRequest struct {
@@ -84,7 +109,7 @@ type semanticSearchResponse struct {
 }
 
 func (h *MemoryHandler) search(c echo.Context) error {
-	if h == nil {
+	if h == nil || !h.semantic || h.store == nil || h.provider == nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "semantic memory disabled")
 	}
 	var req semanticSearchRequest
@@ -166,4 +191,91 @@ func clampSimilarity(val float64) float64 {
 		return 1
 	}
 	return val
+}
+
+func (h *MemoryHandler) write(c echo.Context) error {
+	if h.manager == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "memory manager disabled")
+	}
+	var payload episodicSnapshotPayload
+	if err := c.Bind(&payload); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	snapshot := agentcore.EpisodicSnapshot{
+		RunID:        payload.RunID,
+		TopicID:      payload.TopicID,
+		UserID:       payload.UserID,
+		Thought:      payload.Thought,
+		PlanDocument: payload.PlanDocument,
+		PlanRaw:      payload.PlanRaw,
+		PlanPrompt:   payload.PlanPrompt,
+		Result:       payload.Result,
+		Steps:        payload.Steps,
+	}
+	if snapshot.UserID == "" {
+		if userID, ok := c.Get("user_id").(string); ok && userID != "" {
+			snapshot.UserID = userID
+		}
+	}
+	if err := h.manager.WriteEpisode(c.Request().Context(), snapshot); err != nil {
+		return h.toHTTPError(err)
+	}
+	return c.NoContent(http.StatusAccepted)
+}
+
+func (h *MemoryHandler) summarize(c echo.Context) error {
+	if h.manager == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "memory manager disabled")
+	}
+	var req memorysvc.SummaryRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	if req.TopicID == "" {
+		req.TopicID = c.QueryParam("topic_id")
+	}
+	resp, err := h.manager.Summarize(c.Request().Context(), req)
+	if err != nil {
+		return h.toHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *MemoryHandler) delta(c echo.Context) error {
+	if h.manager == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "memory manager disabled")
+	}
+	var req memorysvc.DeltaRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	if req.TopicID == "" {
+		req.TopicID = c.QueryParam("topic_id")
+	}
+	resp, err := h.manager.Delta(c.Request().Context(), req)
+	if err != nil {
+		return h.toHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *MemoryHandler) toHTTPError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) {
+		return echo.NewHTTPError(http.StatusRequestTimeout, "request cancelled")
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return echo.NewHTTPError(http.StatusRequestTimeout, "request timeout")
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "required"):
+		return echo.NewHTTPError(http.StatusBadRequest, msg)
+	case strings.Contains(msg, "unavailable"):
+		return echo.NewHTTPError(http.StatusServiceUnavailable, msg)
+	default:
+		return echo.NewHTTPError(http.StatusInternalServerError, msg)
+	}
 }

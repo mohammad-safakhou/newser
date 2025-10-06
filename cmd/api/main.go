@@ -18,9 +18,22 @@ func main() {
 	planDryRunEnabled := flag.Bool("enable-plan-dry-run", true, "expose /api/plans/dry-run endpoint")
 	enableSemanticMemory := flag.Bool("enable-semantic-memory", false, "force enable semantic memory endpoints")
 	disableSemanticMemory := flag.Bool("disable-semantic-memory", false, "force disable semantic memory endpoints")
+	enableRunManifest := flag.Bool("enable-run-manifest", false, "expose run manifest endpoints")
+	disableRunManifest := flag.Bool("disable-run-manifest", false, "hide run manifest endpoints")
+	enableRunStream := flag.Bool("enable-run-stream", false, "expose run metrics stream endpoint")
+	disableRunStream := flag.Bool("disable-run-stream", false, "hide run metrics stream endpoint")
 	flag.Parse()
 
 	cfg := config.LoadConfig(*cfgPath)
+	if *enableSemanticMemory && *disableSemanticMemory {
+		log.Fatal("enable-semantic-memory and disable-semantic-memory cannot both be set")
+	}
+	if *enableRunManifest && *disableRunManifest {
+		log.Fatal("enable-run-manifest and disable-run-manifest cannot both be set")
+	}
+	if *enableRunStream && *disableRunStream {
+		log.Fatal("enable-run-stream and disable-run-stream cannot both be set")
+	}
 	flag.CommandLine.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "plan-estimate-mode":
@@ -31,12 +44,16 @@ func main() {
 			cfg.Memory.Semantic.Enabled = true
 		case "disable-semantic-memory":
 			cfg.Memory.Semantic.Enabled = false
+		case "enable-run-manifest":
+			cfg.Server.RunManifestEnabled = true
+		case "disable-run-manifest":
+			cfg.Server.RunManifestEnabled = false
+		case "enable-run-stream":
+			cfg.Server.RunStreamEnabled = true
+		case "disable-run-stream":
+			cfg.Server.RunStreamEnabled = false
 		}
 	})
-
-	if *enableSemanticMemory && *disableSemanticMemory {
-		log.Fatal("enable-semantic-memory and disable-semantic-memory cannot both be set")
-	}
 
 	switch cfg.Server.PlanEstimateMode {
 	case "", srv.PlanEstimateModeAuto, srv.PlanEstimateModeDocument, srv.PlanEstimateModeTaskSum, srv.PlanEstimateModeNone:

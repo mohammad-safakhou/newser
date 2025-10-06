@@ -13,6 +13,8 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/mohammad-safakhou/newser/config"
 	core "github.com/mohammad-safakhou/newser/internal/agent/core"
+	memorysvc "github.com/mohammad-safakhou/newser/internal/memory/service"
+	"github.com/mohammad-safakhou/newser/internal/runtime"
 	"github.com/mohammad-safakhou/newser/internal/store"
 )
 
@@ -68,6 +70,41 @@ func (p *stubLLMProvider) GetModelInfo(string) (core.ModelInfo, error) {
 
 func (p *stubLLMProvider) CalculateCost(int64, int64, string) float64 { return 0 }
 
+type stubMemoryManager struct {
+	lastSnapshot core.EpisodicSnapshot
+	writeErr     error
+	summaryReq   memorysvc.SummaryRequest
+	summaryResp  memorysvc.SummaryResponse
+	summaryErr   error
+	deltaReq     memorysvc.DeltaRequest
+	deltaResp    memorysvc.DeltaResponse
+	deltaErr     error
+}
+
+func (m *stubMemoryManager) WriteEpisode(ctx context.Context, snapshot core.EpisodicSnapshot) error {
+	if ctx == nil {
+		return errors.New("missing context")
+	}
+	m.lastSnapshot = snapshot
+	return m.writeErr
+}
+
+func (m *stubMemoryManager) Summarize(ctx context.Context, req memorysvc.SummaryRequest) (memorysvc.SummaryResponse, error) {
+	if ctx == nil {
+		return memorysvc.SummaryResponse{}, errors.New("missing context")
+	}
+	m.summaryReq = req
+	return m.summaryResp, m.summaryErr
+}
+
+func (m *stubMemoryManager) Delta(ctx context.Context, req memorysvc.DeltaRequest) (memorysvc.DeltaResponse, error) {
+	if ctx == nil {
+		return memorysvc.DeltaResponse{}, errors.New("missing context")
+	}
+	m.deltaReq = req
+	return m.deltaResp, m.deltaErr
+}
+
 func TestMemoryHandlerSearchSuccess(t *testing.T) {
 	storeStub := &stubSemanticStore{
 		runResults: []store.RunEmbeddingSearchResult{
@@ -84,7 +121,7 @@ func TestMemoryHandlerSearchSuccess(t *testing.T) {
 		SearchTopK:      5,
 		SearchThreshold: 0.5,
 	}}}
-	h := NewMemoryHandler(cfg, storeStub, providerStub, nil)
+	h := NewMemoryHandler(cfg, storeStub, providerStub, nil, nil)
 	if h == nil {
 		t.Fatalf("expected handler")
 	}
@@ -135,7 +172,7 @@ func TestMemoryHandlerSearchSuccess(t *testing.T) {
 
 func TestMemoryHandlerRequiresQuery(t *testing.T) {
 	cfg := &config.Config{Memory: config.MemoryConfig{Semantic: config.SemanticMemoryConfig{Enabled: true}}}
-	h := NewMemoryHandler(cfg, &stubSemanticStore{}, &stubLLMProvider{embedVectors: [][]float32{{1}}}, nil)
+	h := NewMemoryHandler(cfg, &stubSemanticStore{}, &stubLLMProvider{embedVectors: [][]float32{{1}}}, nil, nil)
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPost, "/api/memory/search", strings.NewReader(`{"query":"   "}`))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
@@ -154,8 +191,120 @@ func TestMemoryHandlerRequiresQuery(t *testing.T) {
 
 func TestNewMemoryHandlerDisabled(t *testing.T) {
 	cfg := &config.Config{Memory: config.MemoryConfig{Semantic: config.SemanticMemoryConfig{Enabled: false}}}
-	h := NewMemoryHandler(cfg, &stubSemanticStore{}, &stubLLMProvider{}, nil)
+	h := NewMemoryHandler(cfg, &stubSemanticStore{}, &stubLLMProvider{}, nil, nil)
 	if h != nil {
 		t.Fatalf("expected nil handler when semantic memory disabled")
+	}
+}
+
+func TestNewMemoryHandlerWithManagerOnly(t *testing.T) {
+	cfg := &config.Config{Memory: config.MemoryConfig{Semantic: config.SemanticMemoryConfig{Enabled: false}, Episodic: config.EpisodicMemoryConfig{Enabled: true}}}
+	manager := &stubMemoryManager{}
+	h := NewMemoryHandler(cfg, nil, nil, manager, nil)
+	if h == nil {
+		t.Fatalf("expected handler when manager present")
+	}
+}
+
+func TestMemoryHandlerWriteSuccess(t *testing.T) {
+	cfg := &config.Config{Memory: config.MemoryConfig{Semantic: config.SemanticMemoryConfig{Enabled: false}, Episodic: config.EpisodicMemoryConfig{Enabled: true}}}
+	manager := &stubMemoryManager{}
+	h := NewMemoryHandler(cfg, nil, nil, manager, nil)
+	if h == nil {
+		t.Fatalf("expected handler")
+	}
+	secret := []byte("secret")
+	e := echo.New()
+	group := e.Group("/memory")
+	h.Register(group, secret)
+	token, err := runtime.SignJWT("user-1", secret, time.Hour, "memory:write")
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+	payload := `{"run_id":"run-1","topic_id":"topic-42","user_id":"user-1"}`
+	req := httptest.NewRequest(http.MethodPost, "/memory/write", strings.NewReader(payload))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer "+token)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", rec.Code)
+	}
+	if manager.lastSnapshot.RunID != "run-1" {
+		t.Fatalf("snapshot not forwarded")
+	}
+}
+
+func TestMemoryHandlerWriteRequiresScope(t *testing.T) {
+	cfg := &config.Config{Memory: config.MemoryConfig{Semantic: config.SemanticMemoryConfig{Enabled: false}, Episodic: config.EpisodicMemoryConfig{Enabled: true}}}
+	manager := &stubMemoryManager{}
+	h := NewMemoryHandler(cfg, nil, nil, manager, nil)
+	secret := []byte("secret")
+	e := echo.New()
+	h.Register(e.Group("/memory"), secret)
+	token, err := runtime.SignJWT("user-1", secret, time.Hour)
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/memory/write", strings.NewReader(`{"run_id":"run-1","topic_id":"topic-42","user_id":"user-1"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer "+token)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for missing scope, got %d", rec.Code)
+	}
+}
+
+func TestMemoryHandlerSummarize(t *testing.T) {
+	cfg := &config.Config{Memory: config.MemoryConfig{Semantic: config.SemanticMemoryConfig{Enabled: false}, Episodic: config.EpisodicMemoryConfig{Enabled: true}}}
+	manager := &stubMemoryManager{
+		summaryResp: memorysvc.SummaryResponse{TopicID: "topic-42", Summary: "- latest", GeneratedAt: time.Unix(170000, 0)},
+	}
+	h := NewMemoryHandler(cfg, nil, nil, manager, nil)
+	secret := []byte("secret")
+	e := echo.New()
+	h.Register(e.Group("/memory"), secret)
+	token, _ := runtime.SignJWT("svc", secret, time.Hour, "memory:summarize")
+	req := httptest.NewRequest(http.MethodPost, "/memory/summarize", strings.NewReader(`{"topic_id":"topic-42","max_runs":3}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer "+token)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var resp memorysvc.SummaryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.TopicID != "topic-42" {
+		t.Fatalf("unexpected topic: %s", resp.TopicID)
+	}
+	if manager.summaryReq.MaxRuns != 3 {
+		t.Fatalf("expected max_runs forwarded")
+	}
+}
+
+func TestMemoryHandlerDelta(t *testing.T) {
+	cfg := &config.Config{Memory: config.MemoryConfig{Semantic: config.SemanticMemoryConfig{Enabled: false}, Episodic: config.EpisodicMemoryConfig{Enabled: true}}}
+	manager := &stubMemoryManager{
+		deltaResp: memorysvc.DeltaResponse{TopicID: "topic-42", Novel: []memorysvc.DeltaItem{{ID: "a"}}},
+	}
+	h := NewMemoryHandler(cfg, nil, nil, manager, nil)
+	secret := []byte("secret")
+	e := echo.New()
+	h.Register(e.Group("/memory"), secret)
+	token, _ := runtime.SignJWT("svc", secret, time.Hour, "memory:delta")
+	req := httptest.NewRequest(http.MethodPost, "/memory/delta", strings.NewReader(`{"topic_id":"topic-42","items":[{"id":"a"}]}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer "+token)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if manager.deltaReq.TopicID != "topic-42" {
+		t.Fatalf("delta request topic not forwarded")
 	}
 }

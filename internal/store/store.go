@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -170,6 +171,32 @@ type BudgetApprovalRecord struct {
 	DecidedBy     *string
 	Reason        *string
 }
+
+// BuilderSchemaRecord captures a conversational builder schema version.
+type BuilderSchemaRecord struct {
+	ID        string
+	TopicID   string
+	Kind      string
+	Version   int
+	Content   json.RawMessage
+	AuthorID  *string
+	CreatedAt time.Time
+}
+
+// RunManifestRecord captures a persisted signed manifest for a run.
+type RunManifestRecord struct {
+	RunID     string
+	TopicID   string
+	Manifest  json.RawMessage
+	Checksum  string
+	Signature string
+	Algorithm string
+	SignedAt  time.Time
+	CreatedAt time.Time
+}
+
+// ErrRunManifestExists indicates a manifest already exists with different contents.
+var ErrRunManifestExists = errors.New("run manifest already exists")
 
 var (
 	metricsOnce    sync.Once
@@ -562,6 +589,73 @@ func (s *Store) GetLatestRunID(ctx context.Context, topicID string) (string, err
 		return "", nil
 	}
 	return id, err
+}
+
+// InsertRunManifest stores a signed manifest for a run. Manifests are immutable; attempting to persist
+// a manifest with different checksum/signature will return ErrRunManifestExists.
+func (s *Store) InsertRunManifest(ctx context.Context, rec RunManifestRecord) error {
+	if rec.RunID == "" {
+		return fmt.Errorf("run_id required")
+	}
+	if rec.TopicID == "" {
+		return fmt.Errorf("topic_id required")
+	}
+	if len(rec.Manifest) == 0 {
+		return fmt.Errorf("manifest payload required")
+	}
+	if rec.Checksum == "" || rec.Signature == "" {
+		return fmt.Errorf("checksum and signature required")
+	}
+	if rec.Algorithm == "" {
+		rec.Algorithm = "hmac-sha256"
+	}
+	res, err := s.DB.ExecContext(ctx, `
+INSERT INTO run_manifests (run_id, topic_id, manifest, checksum, signature, algorithm, signed_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7)
+ON CONFLICT DO NOTHING
+`, rec.RunID, rec.TopicID, rec.Manifest, rec.Checksum, rec.Signature, rec.Algorithm, rec.SignedAt)
+	if err != nil {
+		return err
+	}
+	if rows, err := res.RowsAffected(); err == nil && rows > 0 {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	// Manifest already exists; verify it matches input
+	existing, ok, err := s.GetRunManifest(ctx, rec.RunID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("run manifest insert conflict but existing record missing")
+	}
+	if existing.Checksum == rec.Checksum && existing.Signature == rec.Signature {
+		return nil
+	}
+	return ErrRunManifestExists
+}
+
+// GetRunManifest fetches the stored signed manifest for a run.
+func (s *Store) GetRunManifest(ctx context.Context, runID string) (RunManifestRecord, bool, error) {
+	if runID == "" {
+		return RunManifestRecord{}, false, fmt.Errorf("run_id required")
+	}
+	row := s.DB.QueryRowContext(ctx, `
+SELECT run_id, topic_id, manifest, checksum, signature, algorithm, signed_at, created_at
+FROM run_manifests
+WHERE run_id=$1
+`, runID)
+	var rec RunManifestRecord
+	var manifestBytes []byte
+	if err := row.Scan(&rec.RunID, &rec.TopicID, &manifestBytes, &rec.Checksum, &rec.Signature, &rec.Algorithm, &rec.SignedAt, &rec.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return RunManifestRecord{}, false, nil
+		}
+		return RunManifestRecord{}, false, err
+	}
+	rec.Manifest = append(json.RawMessage{}, manifestBytes...)
+	return rec, true, nil
 }
 
 // Processing results persistence bridging Postgres storage in agent
@@ -1049,6 +1143,116 @@ LIMIT 1
 		return PlanGraphRecord{}, false, err
 	}
 	rec.ExecutionOrder = []string(execOrder)
+	return rec, true, nil
+}
+
+// SaveBuilderSchema persists a new schema version for the supplied topic and kind.
+func (s *Store) SaveBuilderSchema(ctx context.Context, topicID, kind, authorID string, content json.RawMessage) (BuilderSchemaRecord, error) {
+	if topicID == "" {
+		return BuilderSchemaRecord{}, fmt.Errorf("topic_id required")
+	}
+	if strings.TrimSpace(kind) == "" {
+		return BuilderSchemaRecord{}, fmt.Errorf("kind required")
+	}
+	if len(content) == 0 {
+		return BuilderSchemaRecord{}, fmt.Errorf("content required")
+	}
+	var author interface{}
+	if strings.TrimSpace(authorID) != "" {
+		author = authorID
+	} else {
+		author = nil
+	}
+	row := s.DB.QueryRowContext(ctx, `
+WITH next_version AS (
+    SELECT COALESCE(MAX(version), 0) + 1 AS version
+    FROM builder_schemas
+    WHERE topic_id = $1 AND kind = $2
+)
+INSERT INTO builder_schemas (id, topic_id, kind, version, content, author_id)
+SELECT gen_random_uuid(), $1, $2, version, $3, $4 FROM next_version
+RETURNING id, topic_id, kind, version, content, author_id, created_at
+`, topicID, kind, content, author)
+	var rec BuilderSchemaRecord
+	var raw []byte
+	var authorNull sql.NullString
+	if err := row.Scan(&rec.ID, &rec.TopicID, &rec.Kind, &rec.Version, &raw, &authorNull, &rec.CreatedAt); err != nil {
+		return BuilderSchemaRecord{}, err
+	}
+	rec.Content = append(json.RawMessage{}, raw...)
+	if authorNull.Valid {
+		val := authorNull.String
+		rec.AuthorID = &val
+	}
+	return rec, nil
+}
+
+// GetLatestBuilderSchema returns the most recent schema for a topic/kind.
+func (s *Store) GetLatestBuilderSchema(ctx context.Context, topicID, kind string) (BuilderSchemaRecord, bool, error) {
+	row := s.DB.QueryRowContext(ctx, `
+SELECT id, topic_id, kind, version, content, author_id, created_at
+FROM builder_schemas
+WHERE topic_id=$1 AND kind=$2
+ORDER BY version DESC
+LIMIT 1
+`, topicID, kind)
+	return scanBuilderSchema(row)
+}
+
+// GetBuilderSchemaByVersion fetches a specific schema version.
+func (s *Store) GetBuilderSchemaByVersion(ctx context.Context, topicID, kind string, version int) (BuilderSchemaRecord, bool, error) {
+	row := s.DB.QueryRowContext(ctx, `
+SELECT id, topic_id, kind, version, content, author_id, created_at
+FROM builder_schemas
+WHERE topic_id=$1 AND kind=$2 AND version=$3
+`, topicID, kind, version)
+	return scanBuilderSchema(row)
+}
+
+// ListBuilderSchemaHistory returns recent schema versions ordered by descending version.
+func (s *Store) ListBuilderSchemaHistory(ctx context.Context, topicID, kind string, limit int) ([]BuilderSchemaRecord, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT id, topic_id, kind, version, content, author_id, created_at
+FROM builder_schemas
+WHERE topic_id=$1 AND kind=$2
+ORDER BY version DESC
+LIMIT $3
+`, topicID, kind, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BuilderSchemaRecord
+	for rows.Next() {
+		rec, _, err := scanBuilderSchema(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+func scanBuilderSchema(row interface {
+	Scan(dest ...interface{}) error
+}) (BuilderSchemaRecord, bool, error) {
+	var rec BuilderSchemaRecord
+	var raw []byte
+	var author sql.NullString
+	if err := row.Scan(&rec.ID, &rec.TopicID, &rec.Kind, &rec.Version, &raw, &author, &rec.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return BuilderSchemaRecord{}, false, nil
+		}
+		return BuilderSchemaRecord{}, false, err
+	}
+	rec.Content = append(json.RawMessage{}, raw...)
+	if author.Valid {
+		val := author.String
+		rec.AuthorID = &val
+	}
 	return rec, true, nil
 }
 

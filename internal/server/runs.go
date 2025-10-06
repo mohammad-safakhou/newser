@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,11 +20,16 @@ import (
 	core "github.com/mohammad-safakhou/newser/internal/agent/core"
 	"github.com/mohammad-safakhou/newser/internal/budget"
 	"github.com/mohammad-safakhou/newser/internal/helpers"
+	"github.com/mohammad-safakhou/newser/internal/manifest"
 	"github.com/mohammad-safakhou/newser/internal/memory/semantic"
 	"github.com/mohammad-safakhou/newser/internal/planner"
 	policy "github.com/mohammad-safakhou/newser/internal/policy"
 	"github.com/mohammad-safakhou/newser/internal/runtime"
 	"github.com/mohammad-safakhou/newser/internal/store"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type RunsHandler struct {
@@ -59,7 +65,56 @@ type episodeStepResponse struct {
 	CreatedAt     time.Time                `json:"created_at"`
 }
 
-var htmlSanitizer = bluemonday.StrictPolicy()
+type planExplainResponse struct {
+	PlanID         string                `json:"plan_id"`
+	ThoughtID      string                `json:"thought_id"`
+	Version        string                `json:"version"`
+	Confidence     float64               `json:"confidence"`
+	ExecutionOrder []string              `json:"execution_order,omitempty"`
+	UpdatedAt      time.Time             `json:"updated_at"`
+	Plan           *planner.PlanDocument `json:"plan,omitempty"`
+	Raw            json.RawMessage       `json:"raw_plan,omitempty"`
+}
+
+type memoryHit struct {
+	RunID      string                 `json:"run_id"`
+	TopicID    string                 `json:"topic_id"`
+	TaskID     string                 `json:"task_id,omitempty"`
+	Kind       string                 `json:"kind"`
+	Distance   float64                `json:"distance"`
+	Similarity float64                `json:"similarity"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	CreatedAt  time.Time              `json:"created_at"`
+}
+
+type memoryHitsResponse struct {
+	Query           string      `json:"query"`
+	TopK            int         `json:"top_k"`
+	Threshold       float64     `json:"threshold"`
+	RunMatches      []memoryHit `json:"run_matches,omitempty"`
+	PlanStepMatches []memoryHit `json:"plan_step_matches,omitempty"`
+}
+
+type runStreamItem struct {
+	RunID        string     `json:"run_id"`
+	Status       string     `json:"status"`
+	StartedAt    time.Time  `json:"started_at"`
+	FinishedAt   *time.Time `json:"finished_at,omitempty"`
+	CostEstimate *float64   `json:"cost_estimate,omitempty"`
+}
+
+type runStreamPayload struct {
+	TopicID           string          `json:"topic_id"`
+	GeneratedAt       time.Time       `json:"generated_at"`
+	IntervalSeconds   int             `json:"interval_seconds"`
+	Runs              []runStreamItem `json:"runs"`
+	TotalCostEstimate float64         `json:"total_cost_estimate"`
+}
+
+var (
+	htmlSanitizer = bluemonday.StrictPolicy()
+	runsTracer    = otel.Tracer("newser/internal/server/runs")
+)
 
 func NewRunsHandler(cfg *config.Config, store *store.Store, orch *core.Orchestrator, provider core.LLMProvider, ingest *semantic.Ingestor) *RunsHandler {
 	logger := log.New(log.Writer(), "[RUNS] ", log.LstdFlags)
@@ -88,6 +143,15 @@ func (h *RunsHandler) Register(g *echo.Group, secret []byte) {
 	g.GET("/:topic_id/runs/:run_id/html", h.html)
 	g.GET("/:topic_id/runs/:run_id/episode", h.episode)
 	g.POST("/:topic_id/runs/:run_id/budget_decision", h.budgetDecision)
+	g.GET("/:topic_id/runs/:run_id/plan", h.planExplain)
+	g.GET("/:topic_id/runs/:run_id/memory_hits", h.memoryHits)
+	if h.cfg == nil || h.cfg.Server.RunStreamEnabled {
+		g.GET("/:topic_id/runs/stream", h.streamRuns)
+	}
+	if h.cfg == nil || h.cfg.Server.RunManifestEnabled {
+		g.POST("/:topic_id/runs/:run_id/manifest", h.createManifest)
+		g.GET("/:topic_id/runs/:run_id/manifest", h.fetchManifest)
+	}
 }
 
 func newEpisodeResponse(ep store.Episode) episodeResponse {
@@ -159,6 +223,474 @@ func (h *RunsHandler) episode(c echo.Context) error {
 	}
 	resp := newEpisodeResponse(ep)
 	return c.JSON(http.StatusOK, resp)
+}
+
+// planExplain returns the stored planner graph for a run thought.
+//
+//	@Summary	Run plan graph
+//	@Tags		runs
+//	@Security	BearerAuth
+//	@Security	CookieAuth
+//	@Param		topic_id	path	string	true	"Topic ID"
+//	@Param		run_id		path	string	true	"Run ID"
+//	@Produce	json
+//	@Success	200	{object}	planExplainResponse
+//	@Failure	404	{object}	HTTPError
+//	@Router		/api/topics/{topic_id}/runs/{run_id}/plan [get]
+func (h *RunsHandler) planExplain(c echo.Context) error {
+	ctx := c.Request().Context()
+	userID := c.Get("user_id").(string)
+	topicID := c.Param("topic_id")
+	if _, _, _, err := h.store.GetTopicByID(ctx, topicID, userID); err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	runID := c.Param("run_id")
+	rec, ok, err := h.store.GetLatestPlanGraph(ctx, runID)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok {
+		return echo.NewHTTPError(http.StatusNotFound, "plan graph not found")
+	}
+	if rec.ThoughtID != "" && rec.ThoughtID != runID {
+		return echo.NewHTTPError(http.StatusForbidden, "plan graph does not belong to run")
+	}
+	var doc planner.PlanDocument
+	if err := json.Unmarshal(rec.PlanJSON, &doc); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("decode plan document: %v", err))
+	}
+	if doc.PlanID == "" {
+		doc.PlanID = rec.PlanID
+	}
+	resp := planExplainResponse{
+		PlanID:         rec.PlanID,
+		ThoughtID:      rec.ThoughtID,
+		Version:        rec.Version,
+		Confidence:     rec.Confidence,
+		ExecutionOrder: rec.ExecutionOrder,
+		UpdatedAt:      rec.UpdatedAt,
+		Plan:           &doc,
+		Raw:            append(json.RawMessage{}, rec.PlanJSON...),
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// memoryHits returns semantic memory matches relevant to a run summary.
+//
+//	@Summary	Run memory hits
+//	@Tags		runs
+//	@Security	BearerAuth
+//	@Security	CookieAuth
+//	@Param		topic_id	path	string	true	"Topic ID"
+//	@Param		run_id		path	string	true	"Run ID"
+//	@Param		q		query	string	false	"Override query text"
+//	@Param		top_k	query	int	false	"Maximum matches to return"
+//	@Param		threshold	query	number	false	"Maximum embedding distance"
+//	@Param		include_steps	query	bool	false	"Include plan step matches"
+//	@Produce	json
+//	@Success	200	{object}	memoryHitsResponse
+//	@Failure	400	{object}	HTTPError
+//	@Failure	404	{object}	HTTPError
+//	@Failure	503	{object}	HTTPError
+//	@Router		/api/topics/{topic_id}/runs/{run_id}/memory_hits [get]
+func (h *RunsHandler) memoryHits(c echo.Context) error {
+	ctx := c.Request().Context()
+	if h.cfg == nil || !h.cfg.Memory.Semantic.Enabled {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "semantic memory disabled")
+	}
+	if h.embed == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "embedding provider unavailable")
+	}
+	userID := c.Get("user_id").(string)
+	topicID := c.Param("topic_id")
+	if _, _, _, err := h.store.GetTopicByID(ctx, topicID, userID); err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	runID := c.Param("run_id")
+	res, err := h.store.GetProcessingResultByID(ctx, runID)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	query := strings.TrimSpace(c.QueryParam("q"))
+	if query == "" {
+		if summary, ok := res["summary"].(string); ok {
+			query = strings.TrimSpace(summary)
+		}
+	}
+	if query == "" {
+		if detailed, ok := res["detailed_report"].(string); ok {
+			query = strings.TrimSpace(detailed)
+		}
+	}
+	if query == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "query parameter or run summary required")
+	}
+	topK := h.cfg.Memory.Semantic.SearchTopK
+	if topK <= 0 {
+		topK = 5
+	}
+	if tk := strings.TrimSpace(c.QueryParam("top_k")); tk != "" {
+		if v, err := strconv.Atoi(tk); err == nil && v > 0 {
+			topK = v
+		}
+	}
+	threshold := h.cfg.Memory.Semantic.SearchThreshold
+	if th := strings.TrimSpace(c.QueryParam("threshold")); th != "" {
+		if v, err := strconv.ParseFloat(th, 64); err == nil && v > 0 {
+			threshold = v
+		}
+	}
+	includeSteps := true
+	if inc := strings.TrimSpace(c.QueryParam("include_steps")); inc != "" {
+		if v, err := strconv.ParseBool(inc); err == nil {
+			includeSteps = v
+		}
+	}
+	model := h.cfg.Memory.Semantic.EmbeddingModel
+	if model == "" {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "semantic embedding model not configured")
+	}
+	vectors, err := h.embed.Embed(ctx, model, []string{query})
+	if err != nil {
+		h.logger.Printf("memoryHits: embed failed: %v", err)
+		return echo.NewHTTPError(http.StatusBadGateway, "failed to embed query")
+	}
+	if len(vectors) == 0 {
+		return c.JSON(http.StatusOK, memoryHitsResponse{Query: query, TopK: topK, Threshold: threshold})
+	}
+	resp := memoryHitsResponse{Query: query, TopK: topK, Threshold: threshold}
+	vector := vectors[0]
+	runMatches, err := h.store.SearchRunEmbeddings(ctx, topicID, vector, topK, threshold)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	for _, hit := range runMatches {
+		if hit.RunID == runID {
+			continue
+		}
+		resp.RunMatches = append(resp.RunMatches, memoryHit{
+			RunID:      hit.RunID,
+			TopicID:    hit.TopicID,
+			Kind:       hit.Kind,
+			Distance:   hit.Distance,
+			Similarity: clampSimilarity(1 - hit.Distance),
+			Metadata:   hit.Metadata,
+			CreatedAt:  hit.CreatedAt,
+		})
+	}
+	if includeSteps {
+		stepMatches, err := h.store.SearchPlanStepEmbeddings(ctx, topicID, vector, topK, threshold)
+		if err != nil {
+			h.logger.Printf("memoryHits: plan step search failed: %v", err)
+		} else {
+			for _, hit := range stepMatches {
+				resp.PlanStepMatches = append(resp.PlanStepMatches, memoryHit{
+					RunID:      hit.RunID,
+					TopicID:    hit.TopicID,
+					TaskID:     hit.TaskID,
+					Kind:       hit.Kind,
+					Distance:   hit.Distance,
+					Similarity: clampSimilarity(1 - hit.Distance),
+					Metadata:   hit.Metadata,
+					CreatedAt:  hit.CreatedAt,
+				})
+			}
+		}
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// streamRuns streams run status and cost metrics via Server-Sent Events.
+//
+//	@Summary	Run metrics stream
+//	@Tags		runs
+//	@Security	BearerAuth
+//	@Security	CookieAuth
+//	@Param		topic_id	path	string	true	"Topic ID"
+//	@Param		interval	query	int	false	"Refresh cadence in seconds (default 5)"
+//	@Produce	text/event-stream
+//	@Success	200	{string}	string
+//	@Failure	400	{object}	HTTPError
+//	@Failure	404	{object}	HTTPError
+//	@Failure	503	{object}	HTTPError
+//	@Router		/api/topics/{topic_id}/runs/stream [get]
+func (h *RunsHandler) streamRuns(c echo.Context) error {
+	if h.cfg != nil && !h.cfg.Server.RunStreamEnabled {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "run stream disabled")
+	}
+	req := c.Request()
+	ctx := req.Context()
+	topicID := c.Param("topic_id")
+	ctx, span := runsTracer.Start(ctx, "RunsHandler.streamRuns")
+	defer span.End()
+	span.SetAttributes(attribute.String("topic_id", topicID))
+	c.SetRequest(req.WithContext(ctx))
+	userID, _ := c.Get("user_id").(string)
+	if strings.TrimSpace(topicID) == "" {
+		span.SetStatus(codes.Error, "topic_id required")
+		return echo.NewHTTPError(http.StatusBadRequest, "topic_id required")
+	}
+	if _, _, _, err := h.store.GetTopicByID(ctx, topicID, userID); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	interval := 5 * time.Second
+	if val := strings.TrimSpace(c.QueryParam("interval")); val != "" {
+		if sec, err := strconv.Atoi(val); err == nil && sec > 0 {
+			interval = time.Duration(sec) * time.Second
+		}
+	}
+	span.SetAttributes(attribute.Int("interval_seconds", int(interval/time.Second)))
+	resp := c.Response()
+	resp.Header().Set(echo.HeaderContentType, "text/event-stream")
+	resp.Header().Set(echo.HeaderCacheControl, "no-cache")
+	resp.Header().Set("Connection", "keep-alive")
+	resp.WriteHeader(http.StatusOK)
+	flusher, ok := resp.Writer.(http.Flusher)
+	if !ok {
+		span.SetStatus(codes.Error, "streaming unsupported")
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "streaming unsupported")
+	}
+
+	sendSnapshot := func() error {
+		runs, err := h.store.ListRuns(ctx, topicID)
+		if err != nil {
+			trace.SpanFromContext(ctx).RecordError(err)
+			return err
+		}
+		payload := runStreamPayload{
+			TopicID:         topicID,
+			GeneratedAt:     time.Now().UTC(),
+			IntervalSeconds: int(interval / time.Second),
+		}
+		maxRuns := 25
+		for idx, run := range runs {
+			if idx >= maxRuns {
+				break
+			}
+			item := runStreamItem{
+				RunID:      run.ID,
+				Status:     run.Status,
+				StartedAt:  run.StartedAt,
+				FinishedAt: run.FinishedAt,
+			}
+			if run.Status == "succeeded" || run.Status == "running" {
+				if pr, err := h.store.GetProcessingResultByID(ctx, run.ID); err == nil {
+					if cost, ok := extractCostEstimate(pr["cost_estimate"]); ok {
+						payload.TotalCostEstimate += cost
+						item.CostEstimate = &cost
+					}
+				}
+			}
+			payload.Runs = append(payload.Runs, item)
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		if _, err := resp.Write([]byte("event: update\n")); err != nil {
+			return err
+		}
+		if _, err := resp.Write([]byte("data: " + string(data) + "\n\n")); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+
+	if err := sendSnapshot(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := sendSnapshot(); err != nil {
+				span.RecordError(err)
+				h.logger.Printf("runs stream snapshot failed: %v", err)
+			}
+		}
+	}
+}
+
+// createManifest generates, signs, and persists a run manifest.
+func (h *RunsHandler) createManifest(c echo.Context) error {
+	if h.cfg != nil && !h.cfg.Server.RunManifestEnabled {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "run manifest disabled")
+	}
+	req := c.Request()
+	ctx := req.Context()
+	topicID := c.Param("topic_id")
+	runID := c.Param("run_id")
+	ctx, span := runsTracer.Start(ctx, "RunsHandler.createManifest")
+	defer span.End()
+	span.SetAttributes(attribute.String("topic_id", topicID), attribute.String("run_id", runID))
+	c.SetRequest(req.WithContext(ctx))
+	userID := c.Get("user_id").(string)
+	if _, _, _, err := h.store.GetTopicByID(ctx, topicID, userID); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	if rec, ok, err := h.store.GetRunManifest(ctx, runID); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	} else if ok {
+		if rec.TopicID != topicID {
+			span.SetStatus(codes.Error, "manifest does not belong to topic")
+			return echo.NewHTTPError(http.StatusForbidden, "manifest does not belong to topic")
+		}
+		var signed manifest.SignedRunManifest
+		if err := json.Unmarshal(rec.Manifest, &signed); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		}
+		c.Response().Header().Set("X-Run-Manifest-Checksum", rec.Checksum)
+		c.Response().Header().Set("X-Run-Manifest-Signature", rec.Signature)
+		span.SetAttributes(attribute.String("result", "conflict"))
+		return c.JSON(http.StatusConflict, signed)
+	}
+
+	ep, ok, err := h.store.GetEpisodeByRunID(ctx, runID)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok {
+		span.SetStatus(codes.Error, "episode not found")
+		return echo.NewHTTPError(http.StatusNotFound, "episode not found")
+	}
+	if ep.TopicID != topicID {
+		span.SetStatus(codes.Error, "episode does not belong to topic")
+		return echo.NewHTTPError(http.StatusForbidden, "episode does not belong to topic")
+	}
+	payload, err := manifest.BuildRunManifest(ep)
+	if err != nil {
+		h.logger.Printf("manifest build failed: %v", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return echo.NewHTTPError(http.StatusInternalServerError, "unable to build run manifest")
+	}
+	secret := h.cfg.Capability.SigningSecret
+	if secret == "" {
+		span.SetStatus(codes.Error, "signing secret not configured")
+		return echo.NewHTTPError(http.StatusInternalServerError, "capability.signing_secret not configured")
+	}
+	signed, err := manifest.SignRunManifest(payload, secret, time.Now().UTC())
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	raw, err := json.Marshal(signed)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	rec := store.RunManifestRecord{
+		RunID:     runID,
+		TopicID:   topicID,
+		Manifest:  raw,
+		Checksum:  signed.Checksum,
+		Signature: signed.Signature,
+		Algorithm: signed.Algorithm,
+		SignedAt:  signed.SignedAt,
+	}
+	if err := h.store.InsertRunManifest(ctx, rec); err != nil {
+		if errors.Is(err, store.ErrRunManifestExists) {
+			existing, ok, fetchErr := h.store.GetRunManifest(ctx, runID)
+			if fetchErr != nil {
+				span.RecordError(fetchErr)
+				span.SetStatus(codes.Error, fetchErr.Error())
+				return echo.NewHTTPError(http.StatusInternalServerError, fetchErr.Error())
+			}
+			if ok {
+				var current manifest.SignedRunManifest
+				if err := json.Unmarshal(existing.Manifest, &current); err == nil {
+					c.Response().Header().Set("X-Run-Manifest-Checksum", existing.Checksum)
+					c.Response().Header().Set("X-Run-Manifest-Signature", existing.Signature)
+					span.SetAttributes(attribute.String("result", "conflict"))
+					return c.JSON(http.StatusConflict, current)
+				}
+			}
+			span.SetStatus(codes.Error, "run manifest already exists")
+			return echo.NewHTTPError(http.StatusConflict, "run manifest already exists")
+		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if err := manifest.VerifyRunManifest(signed, secret); err != nil {
+		h.logger.Printf("manifest verify failed after insert: %v", err)
+		span.AddEvent("manifest verification warning", trace.WithAttributes(attribute.String("error", err.Error())))
+	}
+	c.Response().Header().Set("X-Run-Manifest-Checksum", signed.Checksum)
+	c.Response().Header().Set("X-Run-Manifest-Signature", signed.Signature)
+	span.SetStatus(codes.Ok, "created")
+	return c.JSON(http.StatusCreated, signed)
+}
+
+// fetchManifest returns the persisted signed manifest for a run.
+func (h *RunsHandler) fetchManifest(c echo.Context) error {
+	if h.cfg != nil && !h.cfg.Server.RunManifestEnabled {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "run manifest disabled")
+	}
+	req := c.Request()
+	ctx := req.Context()
+	topicID := c.Param("topic_id")
+	runID := c.Param("run_id")
+	ctx, span := runsTracer.Start(ctx, "RunsHandler.fetchManifest")
+	defer span.End()
+	span.SetAttributes(attribute.String("topic_id", topicID), attribute.String("run_id", runID))
+	c.SetRequest(req.WithContext(ctx))
+	userID := c.Get("user_id").(string)
+	if _, _, _, err := h.store.GetTopicByID(ctx, topicID, userID); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	rec, ok, err := h.store.GetRunManifest(ctx, runID)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok {
+		span.SetStatus(codes.Error, "manifest not found")
+		return echo.NewHTTPError(http.StatusNotFound, "manifest not found")
+	}
+	if rec.TopicID != topicID {
+		span.SetStatus(codes.Error, "manifest does not belong to topic")
+		return echo.NewHTTPError(http.StatusForbidden, "manifest does not belong to topic")
+	}
+	var signed manifest.SignedRunManifest
+	if err := json.Unmarshal(rec.Manifest, &signed); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	secret := h.cfg.Capability.SigningSecret
+	if secret != "" {
+		if err := manifest.VerifyRunManifest(signed, secret); err != nil {
+			h.logger.Printf("manifest verification warning for run %s: %v", runID, err)
+			span.AddEvent("manifest verification warning", trace.WithAttributes(attribute.String("error", err.Error())))
+		}
+	}
+	c.Response().Header().Set("X-Run-Manifest-Checksum", rec.Checksum)
+	c.Response().Header().Set("X-Run-Manifest-Signature", rec.Signature)
+	span.SetStatus(codes.Ok, "fetched")
+	return c.JSON(http.StatusOK, signed)
 }
 
 func loadPlanDocument(ctx context.Context, st *store.Store, thoughtID string) (*planner.PlanDocument, error) {
@@ -1438,6 +1970,36 @@ func badgeFor(cat string) string {
 		return "•"
 	}
 }
+
+func extractCostEstimate(v interface{}) (float64, bool) {
+	switch val := v.(type) {
+	case float64:
+		return val, true
+	case json.Number:
+		if f, err := val.Float64(); err == nil {
+			return f, true
+		}
+	case int:
+		return float64(val), true
+	case int64:
+		return float64(val), true
+	case uint64:
+		return float64(val), true
+	case string:
+		if num, err := strconv.ParseFloat(val, 64); err == nil {
+			return num, true
+		}
+	case json.RawMessage:
+		var num json.Number
+		if err := json.Unmarshal(val, &num); err == nil {
+			if f, err := num.Float64(); err == nil {
+				return f, true
+			}
+		}
+	}
+	return 0, false
+}
+
 func normCategory(c string) string {
 	switch c {
 	case "top", "breaking":
