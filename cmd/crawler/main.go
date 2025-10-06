@@ -32,6 +32,11 @@ func main() {
 		_ = telemetry.Shutdown(shutdownCtx)
 	}()
 
+	sandboxLogger := log.New(os.Stdout, "[CRAWLER] ", log.LstdFlags)
+	if _, _, err := runtime.EnsureSandbox(ctx, cfg, "crawler", sandboxLogger, runtime.SandboxRequest{}); err != nil {
+		log.Fatalf("crawler sandbox: %v", err)
+	}
+
 	if _, _, err := runtime.InitSchemaRegistry(ctx, cfg); err != nil {
 		log.Fatalf("crawler schema registry init: %v", err)
 	}

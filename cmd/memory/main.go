@@ -32,6 +32,11 @@ func main() {
 		_ = telemetry.Shutdown(shutdownCtx)
 	}()
 
+	sandboxLogger := log.New(os.Stdout, "[MEMORY] ", log.LstdFlags)
+	if _, _, err := runtime.EnsureSandbox(ctx, cfg, "memory", sandboxLogger, runtime.SandboxRequest{}); err != nil {
+		log.Fatalf("memory sandbox: %v", err)
+	}
+
 	if _, _, err := runtime.InitSchemaRegistry(ctx, cfg); err != nil {
 		log.Fatalf("memory schema registry init: %v", err)
 	}
