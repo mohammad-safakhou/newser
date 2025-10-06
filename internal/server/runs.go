@@ -14,12 +14,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/labstack/echo/v4"
-	"github.com/microcosm-cc/bluemonday"
-	"github.com/mohammad-safakhou/newser/config"
-	core "github.com/mohammad-safakhou/newser/internal/agent/core"
-	"github.com/mohammad-safakhou/newser/internal/budget"
-	"github.com/mohammad-safakhou/newser/internal/helpers"
+        "github.com/labstack/echo/v4"
+        "github.com/mohammad-safakhou/newser/config"
+        core "github.com/mohammad-safakhou/newser/internal/agent/core"
+        "github.com/mohammad-safakhou/newser/internal/budget"
+        "github.com/mohammad-safakhou/newser/internal/helpers"
 	"github.com/mohammad-safakhou/newser/internal/manifest"
 	"github.com/mohammad-safakhou/newser/internal/memory/semantic"
 	"github.com/mohammad-safakhou/newser/internal/planner"
@@ -112,8 +111,7 @@ type runStreamPayload struct {
 }
 
 var (
-	htmlSanitizer = bluemonday.StrictPolicy()
-	runsTracer    = otel.Tracer("newser/internal/server/runs")
+        runsTracer = otel.Tracer("newser/internal/server/runs")
 )
 
 func NewRunsHandler(cfg *config.Config, store *store.Store, orch *core.Orchestrator, provider core.LLMProvider, ingest *semantic.Ingestor) *RunsHandler {
@@ -1883,11 +1881,11 @@ func safeString(v interface{}) string {
 	if v == nil {
 		return ""
 	}
-	if s, ok := v.(string); ok {
-		return strings.TrimSpace(htmlSanitizer.Sanitize(s))
-	}
-	b, _ := json.Marshal(v)
-	return strings.TrimSpace(htmlSanitizer.Sanitize(string(b)))
+        if s, ok := v.(string); ok {
+                return helpers.SanitizeHTMLStrict(s)
+        }
+        b, _ := json.Marshal(v)
+        return helpers.SanitizeHTMLStrict(string(b))
 }
 func safeFloat(v interface{}) float64 {
 	switch t := v.(type) {

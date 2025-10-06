@@ -27,6 +27,12 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	logger := log.New(os.Stdout, "[WORKER] ", log.LstdFlags)
+
+	if _, err := runtime.EnsureSandbox(ctx, cfg, "worker", logger, runtime.SandboxRequest{}); err != nil {
+		log.Fatalf("worker sandbox: %v", err)
+	}
+
 	telemetry, meter, tracer, err := runtime.SetupTelemetry(ctx, cfg.Telemetry, runtime.TelemetryOptions{ServiceName: "worker", ServiceVersion: "dev", MetricsPort: cfg.Telemetry.MetricsPort + 1})
 	if err != nil {
 		log.Fatalf("worker telemetry init: %v", err)
@@ -58,7 +64,6 @@ func main() {
 	consumer := streams.NewConsumer(rdb, registry, groupName, consumerName)
 	publisher := streams.NewPublisher(rdb, registry)
 
-	logger := log.New(os.Stdout, "[WORKER] ", log.LstdFlags)
 	processor := worker.NewProcessor(logger, st, publisher, consumer, worker.StreamRunEnqueued, worker.StreamTaskDispatch, meter, tracer)
 
 	if err := processor.Start(ctx); err != nil {

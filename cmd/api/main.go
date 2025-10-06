@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -78,6 +79,11 @@ func main() {
 
 	if _, _, err := runtime.InitSchemaRegistry(ctx, cfg); err != nil {
 		log.Fatalf("api schema registry init: %v", err)
+	}
+
+	sandboxLogger := log.New(os.Stdout, "[API] ", log.LstdFlags)
+	if _, err := runtime.EnsureSandbox(ctx, cfg, "api", sandboxLogger, runtime.SandboxRequest{}); err != nil {
+		log.Fatalf("api sandbox: %v", err)
 	}
 
 	if err := srv.Run(cfg); err != nil {
