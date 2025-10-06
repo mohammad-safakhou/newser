@@ -33,7 +33,7 @@ func main() {
 	}()
 
 	sandboxLogger := log.New(os.Stdout, "[MEMORY] ", log.LstdFlags)
-	if _, err := runtime.EnsureSandbox(ctx, cfg, "memory", sandboxLogger, runtime.SandboxRequest{}); err != nil {
+	if _, _, err := runtime.EnsureSandbox(ctx, cfg, "memory", sandboxLogger, runtime.SandboxRequest{}); err != nil {
 		log.Fatalf("memory sandbox: %v", err)
 	}
 

@@ -34,7 +34,7 @@ func main() {
 
 	sandboxLogger := log.New(os.Stdout, "[EXECUTOR] ", log.LstdFlags)
 
-	if _, err := runtime.EnsureSandbox(ctx, cfg, "executor", sandboxLogger, runtime.SandboxRequest{}); err != nil {
+	if _, _, err := runtime.EnsureSandbox(ctx, cfg, "executor", sandboxLogger, runtime.SandboxRequest{}); err != nil {
 		log.Fatalf("executor sandbox: %v", err)
 	}
 

@@ -29,7 +29,7 @@ func main() {
 
 	logger := log.New(os.Stdout, "[WORKER] ", log.LstdFlags)
 
-	if _, err := runtime.EnsureSandbox(ctx, cfg, "worker", logger, runtime.SandboxRequest{}); err != nil {
+	if _, _, err := runtime.EnsureSandbox(ctx, cfg, "worker", logger, runtime.SandboxRequest{}); err != nil {
 		log.Fatalf("worker sandbox: %v", err)
 	}
 

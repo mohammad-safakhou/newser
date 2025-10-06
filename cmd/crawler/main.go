@@ -33,7 +33,7 @@ func main() {
 	}()
 
 	sandboxLogger := log.New(os.Stdout, "[CRAWLER] ", log.LstdFlags)
-	if _, err := runtime.EnsureSandbox(ctx, cfg, "crawler", sandboxLogger, runtime.SandboxRequest{}); err != nil {
+	if _, _, err := runtime.EnsureSandbox(ctx, cfg, "crawler", sandboxLogger, runtime.SandboxRequest{}); err != nil {
 		log.Fatalf("crawler sandbox: %v", err)
 	}
 

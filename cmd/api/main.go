@@ -82,7 +82,7 @@ func main() {
 	}
 
 	sandboxLogger := log.New(os.Stdout, "[API] ", log.LstdFlags)
-	if _, err := runtime.EnsureSandbox(ctx, cfg, "api", sandboxLogger, runtime.SandboxRequest{}); err != nil {
+	if _, _, err := runtime.EnsureSandbox(ctx, cfg, "api", sandboxLogger, runtime.SandboxRequest{}); err != nil {
 		log.Fatalf("api sandbox: %v", err)
 	}
 

@@ -73,16 +73,20 @@ func NewSandboxEnforcer(policy *SandboxPolicy) *SandboxEnforcer {
 	return &SandboxEnforcer{policy: policy}
 }
 
-// Validate ensures settings meet policy requirements.
-func (e *SandboxEnforcer) Validate(ctx context.Context, req SandboxRequest) error {
+// Validate ensures settings meet policy requirements and applies default values
+// from the loaded policy to the supplied request. The request is mutated in
+// place so callers can rely on the returned values for downstream execution.
+func (e *SandboxEnforcer) Validate(ctx context.Context, req *SandboxRequest) error {
 	if e == nil || e.policy == nil {
 		return nil
 	}
-	if req.Provider != "" && req.Provider != e.policy.Provider {
-		return fmt.Errorf("provider %s not allowed (configured %s)", req.Provider, e.policy.Provider)
+	if req == nil {
+		return fmt.Errorf("sandbox request is nil")
 	}
-	if req.Provider == "" && e.policy.Provider != "" {
+	if req.Provider == "" {
 		req.Provider = e.policy.Provider
+	} else if req.Provider != e.policy.Provider {
+		return fmt.Errorf("provider %s not allowed (configured %s)", req.Provider, e.policy.Provider)
 	}
 	if req.CPU <= 0 {
 		req.CPU = e.policy.CPU
@@ -91,7 +95,6 @@ func (e *SandboxEnforcer) Validate(ctx context.Context, req SandboxRequest) erro
 		return fmt.Errorf("cpu %.2f exceeds policy %.2f", req.CPU, e.policy.CPU)
 	}
 	if req.Timeout <= 0 {
-		// Use policy timeout
 		if d, err := time.ParseDuration(e.policy.Timeout); err == nil {
 			req.Timeout = d
 		}
@@ -125,15 +128,16 @@ func (e *SandboxEnforcer) Policy() *SandboxPolicy {
 
 // EnsureSandbox loads the sandbox policy, validates the provided request against
 // the policy and logs a standard "sandbox=true" message for observability.
-func EnsureSandbox(ctx context.Context, cfg *config.Config, service string, logger *log.Logger, req SandboxRequest) (*SandboxEnforcer, error) {
+func EnsureSandbox(ctx context.Context, cfg *config.Config, service string, logger *log.Logger, req SandboxRequest) (*SandboxEnforcer, SandboxRequest, error) {
 	policy, err := LoadSandboxPolicy(cfg)
 	if err != nil {
-		return nil, err
+		return nil, SandboxRequest{}, err
 	}
 
 	enforcer := NewSandboxEnforcer(policy)
-	if err := enforcer.Validate(ctx, req); err != nil {
-		return nil, err
+	normalized := req
+	if err := enforcer.Validate(ctx, &normalized); err != nil {
+		return nil, SandboxRequest{}, err
 	}
 
 	if logger == nil {
@@ -144,7 +148,7 @@ func EnsureSandbox(ctx context.Context, cfg *config.Config, service string, logg
 		logger = log.New(os.Stdout, fmt.Sprintf("[%s] ", strings.ToUpper(prefix)), log.LstdFlags)
 	}
 
-	logger.Printf("sandbox=true provider=%s cpu=%.2f memory=%s timeout=%s network_enabled=%t allowlist=%d", policy.Provider, policy.CPU, policy.Memory, policy.Timeout, policy.Network.Enabled, len(policy.Network.Allowlist))
+	logger.Printf("sandbox=true provider=%s cpu=%.2f memory=%s timeout=%s network_enabled=%t allowlist=%d", normalized.Provider, normalized.CPU, policy.Memory, normalized.Timeout, policy.Network.Enabled, len(policy.Network.Allowlist))
 
-	return enforcer, nil
+	return enforcer, normalized, nil
 }
