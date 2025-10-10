@@ -2,7 +2,7 @@
 
 Roadmap references: `Ix.Ey` = Initiative/Epic from `tasks.md`, `FG` = Feasibility Gate.
 
-- [ ] [I1.E3] Expand OTEL collector, Prometheus, and Grafana configs to cover all new services and metrics.
+- [x] [I1.E3] Expand OTEL collector, Prometheus, and Grafana configs to cover all new services and metrics.
 - [ ] [I2.E3] Visualise executor metrics (retry counts, checkpoint age, queue depth) and set alert thresholds.
 - [ ] [I3.E4] Build dashboards for memory health (hit/miss, summarisation latency, delta rate).
 - [ ] [I4.E1] Track sandboxed execution metrics (run duration, resource usage, cost per tool).

@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: up down logs fmt build test tidy serve cli migrate webui-install webui-build webui-clean serve-all swagger-install swagger swagger-clean gitleaks
+.PHONY: up down logs fmt build test tidy serve cli migrate webui-install webui-build webui-clean serve-all swagger-install swagger swagger-clean gitleaks secrets-decrypt secrets-edit
 
 up:
 	docker compose up -d
@@ -25,6 +25,13 @@ test:
 
 gitleaks:
 	docker run --rm -v $(PWD):/repo zricethezav/gitleaks:latest detect --source=/repo --config=/repo/.gitleaks.toml
+
+secrets-decrypt:
+	sops --decrypt config/secrets/app.secrets.enc.yaml > config/secrets/app.secrets.tmp.yaml
+	@echo "decrypted secrets written to config/secrets/app.secrets.tmp.yaml"
+
+secrets-edit:
+	sops config/secrets/app.secrets.enc.yaml
 
 run:
 	go run ./

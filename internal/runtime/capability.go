@@ -34,6 +34,14 @@ func EnsureCapabilityRegistry(ctx context.Context, st *store.Store, cfg *config.
 	if err != nil {
 		return nil, err
 	}
+	for _, tc := range toolCards {
+		if err := capability.VerifyChecksum(tc); err != nil {
+			return nil, err
+		}
+		if err := capability.VerifySignature(tc, wrapper.SigningSecret); err != nil {
+			return nil, err
+		}
+	}
 	registry, err := capability.NewRegistry(toolCards, wrapper.SigningSecret, wrapper.RequiredTools)
 	if err != nil {
 		return nil, err
@@ -43,6 +51,9 @@ func EnsureCapabilityRegistry(ctx context.Context, st *store.Store, cfg *config.
 
 func seedDefaultToolCards(ctx context.Context, st *store.Store, signingSecret string) error {
 	for _, tc := range capability.DefaultToolCards() {
+		if err := capability.ValidateToolCard(tc); err != nil {
+			return err
+		}
 		checksum, err := capability.ComputeChecksum(tc)
 		if err != nil {
 			return err
@@ -71,6 +82,14 @@ func ToolCardsFromRecords(records []store.ToolCardRecord) ([]capability.ToolCard
 		tc, err := toolCardFromRecord(rec)
 		if err != nil {
 			return nil, err
+		}
+		if err := capability.ValidateToolCard(tc); err != nil {
+			return nil, err
+		}
+		if tc.Checksum != "" {
+			if err := capability.VerifyChecksum(tc); err != nil {
+				return nil, err
+			}
 		}
 		out = append(out, tc)
 	}
@@ -158,4 +177,22 @@ func capabilityWrapperFromConfig(cfg *config.Config) capabilityConfigWrapper {
 		SigningSecret: cfg.Capability.SigningSecret,
 		RequiredTools: cfg.Capability.RequiredTools,
 	}
+}
+
+// VerifyToolCardIntegrity validates structure, checksum, and signature for a ToolCard.
+func VerifyToolCardIntegrity(tc capability.ToolCard, secret string) error {
+	if err := capability.ValidateToolCard(tc); err != nil {
+		return err
+	}
+	if tc.Checksum != "" {
+		if err := capability.VerifyChecksum(tc); err != nil {
+			return err
+		}
+	}
+	if secret != "" {
+		if err := capability.VerifySignature(tc, secret); err != nil {
+			return err
+		}
+	}
+	return nil
 }

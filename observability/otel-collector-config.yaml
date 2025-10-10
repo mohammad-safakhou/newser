@@ -11,6 +11,9 @@ exporters:
     endpoint: tempo:4317
     tls:
       insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:9464
+    namespace: newser
 
 processors:
   batch: {}
@@ -21,3 +24,7 @@ service:
       receivers: [otlp]
       processors: [batch]
       exporters: [logging, otlp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [logging, prometheus]

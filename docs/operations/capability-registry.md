@@ -18,6 +18,8 @@ Each ToolCard carries the metadata the planner/orchestrator need:
 ## Publishing Options
 1. **CLI**: `go run ./cmd/tools publish --file path/to/tool.json --config config/config.json`.
    - The command recomputes the checksum, signs the card with `capability.signing_secret`, and upserts it via Postgres.
+   - `go run ./cmd/tools sign --file path/to/tool.json --config config/config.json --out signed.json` produces a signed payload without storing it.
+   - `go run ./cmd/tools validate --file signed.json --config config/config.json` verifies structure, checksum, and signature locally.
    - `go run ./cmd/tools list` prints the stored ToolCards (after decoding JSON columns).
 2. **HTTP API**: `POST /api/tools` (JWT required) accepts `{ "tool_card": { ... } }` without checksum/signature fields. The server recomputes the checksum, signs with the configured secret, and stores the record. `GET /api/tools` returns the active signed cards.
 

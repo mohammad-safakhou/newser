@@ -1,22 +1,35 @@
 # Secrets & Configuration Inventory
 
-This note documents existing configuration touchpoints and outlines the approach for Initiative 1 · Epic 2.
+This note documents the current configuration touchpoints and how to manage secrets for Initiative 1 · Epic 2.
 
-## Current findings
-- `config/config.json` ships with placeholder values for `server.jwt_secret`, `llm.providers.openai.api_key`, and database credentials (`storage.postgres.password`). They are not real secrets, but they should be sourced from the environment in all non-test contexts.
-- Redis and third-party API keys rely on empty strings, which silently fall back to unauthenticated access. This can mask missing configuration during deployment.
-- No .env template exists today; contributors must set environment variables manually or edit the JSON config, increasing the risk of committing accidental secrets.
-- CI does not run secret-scanning (e.g. Gitleaks), so new credentials could slip into the repository unnoticed.
+## Repository layout
 
-## Remediation plan
-1. **Environment-first configuration**
-   - Provide an `.env.example` enumerating every sensitive variable (JWT secret, database creds, Redis password, API keys).
-   - Update documentation to instruct `cp .env.example .env` followed by editing local credentials; the `.env` file will stay Git-ignored.
-   - Configure Viper (existing loader) to honour these env vars; the JSON config keeps safe defaults only.
-2. **Secret scanning**
-   - Add a repository-level Gitleaks configuration plus a Makefile target (`make gitleaks`).
-   - Document how to wire the target into CI (GitHub Actions snippet) so pushes block on leaks.
-3. **Runtime vault integration (future)**
-   - Document the expectation that production deployments pull secrets from SOPS/Vault, with `.env` used only for local/dev. Implementation will follow once the team selects a backend.
+- `.env.example` — exhaustive template for all `NEWSER_*` and legacy env vars consumed by Go binaries and docker-compose.
+- `config/secrets/` — SOPS/Vault integration assets (`README.md`, example template, encrypted bundles).
+- `.sops.yaml` — default SOPS creation rules targeting `config/secrets/*.enc.yaml` files.
 
-The subsequent commits in this epic implement the first two steps.
+## Local workflow
+
+1. Copy `.env.example` to `.env`, customise values, and export them before running any services:
+   ```bash
+   cp .env.example .env
+   export $(grep -v '^#' .env | xargs)
+   ```
+2. Generate encrypted secrets using SOPS. The helper targets wrap common commands:
+   ```bash
+   make secrets-edit   # opens config/secrets/app.secrets.enc.yaml with sops
+   make secrets-decrypt
+   ```
+   Decrypted output is written to `config/secrets/app.secrets.tmp.yaml` and is ignored by Git.
+
+## Production guidance
+
+- Use the encrypted templates as source-of-truth when syncing into Vault, AWS Secrets Manager, or Kubernetes secrets.
+- If Vault is preferred, mirror the keys from `config/secrets/app.secrets.example.yaml` and inject them via environment variables before services start.
+- Rotate AGE keys on personnel changes and run `sops updatekeys` to re-encrypt existing bundles.
+
+## Automation checklist
+
+- `make gitleaks` is available to run secret scanning locally or in CI.
+- Docker Compose services expect secrets via `NEWSER_*` env vars; keep `.env` (or decrypted SOPS output) in sync with infrastructure as code.
+- Monitor telemetry by exporting `NEWSER_TELEMETRY_OTLP_ENDPOINT` and metrics ports per service (base port defined in `.env.example`).

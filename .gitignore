@@ -3,6 +3,10 @@ runs
 .idea/
 .cursor
 config/local.config.json
+config/secrets/*.yaml
+!config/secrets/*.enc.yaml
+!config/secrets/*.example.yaml
+!config/secrets/README.md
 *.env
 .env
 todos/

@@ -1,0 +1,52 @@
+{
+  "title": "Orchestrator Overview",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "30s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Run Duration p95",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(agent_run_duration_seconds_bucket{outcome=\"success\"}[5m])))",
+          "legendFormat": "p95"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tokens Per Minute",
+      "targets": [
+        {
+          "expr": "sum(rate(agent_run_tokens_total[5m]))",
+          "legendFormat": "tokens/min"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Agent Execution Cost",
+      "targets": [
+        {
+          "expr": "sum(rate(agent_execution_cost_usd_sum[5m]))",
+          "legendFormat": "USD/min"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Run Failures",
+      "targets": [
+        {
+          "expr": "increase(agent_run_failures_total[30m])",
+          "legendFormat": "failures"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
+    }
+  ]
+}

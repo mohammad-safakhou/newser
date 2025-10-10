@@ -94,3 +94,12 @@ go test ./examples/integration -v
 ## License
 
 MIT
+
+## Contributing & Governance
+
+- See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for development workflow and testing requirements.
+- Review the [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) before participating in the community.
+- Report security issues privately following [`SECURITY.md`](./SECURITY.md).
+- Track noteworthy changes in [`CHANGELOG.md`](./CHANGELOG.md).
+- Follow the documented [release process](./docs/operations/release-process.md) when cutting new versions.
+- Manage shared secrets with SOPS (`make secrets-edit`); see [`docs/operations/secrets.md`](./docs/operations/secrets.md).

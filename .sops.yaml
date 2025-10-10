@@ -1,0 +1,8 @@
+# Default SOPS configuration for Newser secrets.
+# Replace the placeholder recipient with your own AGE public key(s).
+creation_rules:
+  - path_regex: config/secrets/.*\.enc\.yaml$
+    encrypted_regex: '^(data|stringData|secrets|values)$'
+    age:
+      - age1exampleexampleexampleexampleexampleexampleexampleexample000
+    mac_only_encrypted: true

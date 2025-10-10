@@ -1107,6 +1107,18 @@ func (s *Store) GetToolCard(ctx context.Context, name, version string) (ToolCard
 
 // SavePlanGraph upserts a planner graph document by plan_id.
 func (s *Store) SavePlanGraph(ctx context.Context, rec PlanGraphRecord) error {
+	if rec.PlanID == "" {
+		return fmt.Errorf("plan_id is required")
+	}
+	if rec.ThoughtID == "" {
+		return fmt.Errorf("thought_id is required")
+	}
+	if len(rec.PlanJSON) == 0 {
+		return fmt.Errorf("plan_json is required")
+	}
+	if err := planner.ValidatePlanDocument(rec.PlanJSON); err != nil {
+		return fmt.Errorf("plan_json invalid: %w", err)
+	}
 	_, err := s.DB.ExecContext(ctx, `
 INSERT INTO plan_graphs (plan_id, thought_id, version, confidence, execution_order, budget, estimates, plan_json, created_at, updated_at)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())

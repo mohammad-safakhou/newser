@@ -2,8 +2,21 @@ package capability
 
 import "testing"
 
+func minimalSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"type":    "object",
+	}
+}
+
 func mustSign(t *testing.T, tc ToolCard, secret string) ToolCard {
 	t.Helper()
+	if tc.InputSchema == nil {
+		tc.InputSchema = minimalSchema()
+	}
+	if tc.OutputSchema == nil {
+		tc.OutputSchema = minimalSchema()
+	}
 	checksum, err := ComputeChecksum(tc)
 	if err != nil {
 		t.Fatalf("ComputeChecksum: %v", err)
@@ -20,10 +33,12 @@ func mustSign(t *testing.T, tc ToolCard, secret string) ToolCard {
 func TestNewRegistryRejectsInvalidSignature(t *testing.T) {
 	secret := "top-secret"
 	tc := ToolCard{
-		Name:        "analysis",
-		Version:     "v1",
-		Description: "analysis tool",
-		AgentType:   "analysis",
+		Name:         "analysis",
+		Version:      "v1",
+		Description:  "analysis tool",
+		AgentType:    "analysis",
+		InputSchema:  minimalSchema(),
+		OutputSchema: minimalSchema(),
 	}
 	checksum, err := ComputeChecksum(tc)
 	if err != nil {
@@ -75,5 +90,62 @@ func TestNewRegistryPrefersLatestVersionPerAgent(t *testing.T) {
 	}
 	if tool.Version != "v1.1" {
 		t.Fatalf("expected latest version, got %s", tool.Version)
+	}
+}
+
+func TestValidateToolCard(t *testing.T) {
+	valid := ToolCard{
+		Name:         "analysis",
+		Version:      "v1",
+		AgentType:    "analysis",
+		Description:  "analysis tool",
+		InputSchema:  minimalSchema(),
+		OutputSchema: minimalSchema(),
+		CostEstimate: 0.5,
+	}
+	if err := ValidateToolCard(valid); err != nil {
+		t.Fatalf("expected valid tool card, got %v", err)
+	}
+	invalid := ToolCard{
+		Name:         "",
+		Version:      "v1",
+		AgentType:    "analysis",
+		InputSchema:  minimalSchema(),
+		OutputSchema: minimalSchema(),
+	}
+	if err := ValidateToolCard(invalid); err == nil {
+		t.Fatalf("expected validation failure for missing name")
+	}
+	badSchema := ToolCard{
+		Name:         "analysis",
+		Version:      "v1",
+		AgentType:    "analysis",
+		InputSchema:  map[string]interface{}{"type": 123},
+		OutputSchema: minimalSchema(),
+	}
+	if err := ValidateToolCard(badSchema); err == nil {
+		t.Fatalf("expected validation failure for invalid schema")
+	}
+}
+
+func TestVerifyChecksum(t *testing.T) {
+	card := ToolCard{
+		Name:         "analysis",
+		Version:      "v1",
+		AgentType:    "analysis",
+		InputSchema:  minimalSchema(),
+		OutputSchema: minimalSchema(),
+	}
+	checksum, err := ComputeChecksum(card)
+	if err != nil {
+		t.Fatalf("ComputeChecksum: %v", err)
+	}
+	card.Checksum = checksum
+	if err := VerifyChecksum(card); err != nil {
+		t.Fatalf("expected checksum to validate, got %v", err)
+	}
+	card.Checksum = "deadbeef"
+	if err := VerifyChecksum(card); err == nil {
+		t.Fatalf("expected checksum mismatch error")
 	}
 }

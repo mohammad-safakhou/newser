@@ -2,7 +2,7 @@
 
 Roadmap references: `Ix.Ey` = Initiative/Epic from `tasks.md`.
 
-- [ ] [I2.E2] Persist validated plan graphs, budgets, and execution orders with version history.
+- [x] [I2.E2] Persist validated plan graphs, budgets, and execution orders with version history.
 - [ ] [I2.E4] Store budget approvals, breach reports, and override audit trails.
 - [ ] [I3.E1] Capture episodic memory artifacts (plans, prompts, tool outputs) for full run replay.
 - [ ] [I3.E2] Manage run and plan-step embeddings (pgvector) with efficient search indices.

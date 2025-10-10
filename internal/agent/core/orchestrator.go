@@ -17,6 +17,11 @@ import (
 	"github.com/mohammad-safakhou/newser/internal/agent/telemetry"
 	"github.com/mohammad-safakhou/newser/internal/budget"
 	"github.com/mohammad-safakhou/newser/internal/capability"
+	"github.com/mohammad-safakhou/newser/internal/planner"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Orchestrator coordinates all agents and manages the processing pipeline
@@ -42,6 +47,8 @@ type Orchestrator struct {
 	// Concurrency control
 	semaphore chan struct{}
 }
+
+var orchestratorTracer trace.Tracer = otel.Tracer("newser/internal/agent/orchestrator")
 
 // NewOrchestrator creates a new orchestrator instance
 func NewOrchestrator(cfg *config.Config, logger *log.Logger, telemetry *telemetry.Telemetry, registry *capability.Registry, plans PlanRepository, episodes EpisodeRepository) (*Orchestrator, error) {
@@ -91,10 +98,18 @@ func NewOrchestrator(cfg *config.Config, logger *log.Logger, telemetry *telemetr
 // ProcessThought processes a user thought and returns comprehensive results
 func (o *Orchestrator) ProcessThought(ctx context.Context, thought UserThought) (ProcessingResult, error) {
 	startTime := time.Now()
+	ctx, span := orchestratorTracer.Start(ctx, "agent.process_thought",
+		trace.WithAttributes(
+			attribute.String("thought.id", thought.ID),
+			attribute.String("topic.id", thought.TopicID),
+			attribute.String("user.id", thought.UserID),
+		))
+	defer span.End()
 
 	// Generate unique ID if not provided
 	if thought.ID == "" {
 		thought.ID = uuid.New().String()
+		span.SetAttributes(attribute.String("thought.id", thought.ID))
 	}
 
 	// Initialize processing status
@@ -141,19 +156,48 @@ func (o *Orchestrator) ProcessThought(ctx context.Context, thought UserThought) 
 	o.updateStatus(status, "planning", 0.1, "Creating execution plan")
 
 	// Phase 1: Planning
-	plan, err := o.planner.Plan(ctx, thought)
+	planCtx, planSpan := orchestratorTracer.Start(ctx, "agent.plan")
+	plan, err := o.planner.Plan(planCtx, thought)
 	if err != nil {
 		var approvalErr budget.ErrApprovalRequired
 		if errors.As(err, &approvalErr) {
 			o.updateStatus(status, "pending_approval", 0.0, err.Error())
 			processingEvent.Success = false
 			processingEvent.Error = err.Error()
+			planSpan.RecordError(err)
+			planSpan.SetStatus(codes.Error, err.Error())
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			planSpan.End()
 			return ProcessingResult{}, err
 		}
 		o.updateStatus(status, "failed", 0.0, fmt.Sprintf("Planning failed: %v", err))
 		processingEvent.Success = false
 		processingEvent.Error = err.Error()
+		planSpan.RecordError(err)
+		planSpan.SetStatus(codes.Error, err.Error())
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		planSpan.End()
 		return ProcessingResult{}, fmt.Errorf("planning failed: %w", err)
+	}
+	span.AddEvent("plan.complete", trace.WithAttributes(
+		attribute.Int("plan.task_count", len(plan.Tasks)),
+		attribute.Float64("plan.estimated_cost", plan.EstimatedCost),
+		attribute.Float64("plan.confidence", plan.Confidence),
+	))
+	planSpan.SetStatus(codes.Ok, "completed")
+	planSpan.End()
+
+	if len(plan.RawJSON) > 0 {
+		if err := planner.ValidatePlanDocument(plan.RawJSON); err != nil {
+			o.updateStatus(status, "failed", 0.0, "Plan document invalid")
+			processingEvent.Success = false
+			processingEvent.Error = err.Error()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return ProcessingResult{}, fmt.Errorf("plan schema validation failed: %w", err)
+		}
 	}
 
 	if o.planRepo != nil && plan.Graph != nil {
@@ -179,6 +223,8 @@ func (o *Orchestrator) ProcessThought(ctx context.Context, thought UserThought) 
 		o.updateStatus(status, "failed", 0.0, fmt.Sprintf("Execution failed: %v", err))
 		processingEvent.Success = false
 		processingEvent.Error = err.Error()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return ProcessingResult{}, fmt.Errorf("execution failed: %w", err)
 	}
 	if monitor != nil {
@@ -186,6 +232,8 @@ func (o *Orchestrator) ProcessThought(ctx context.Context, thought UserThought) 
 			o.updateStatus(status, "failed", 0.0, err.Error())
 			processingEvent.Success = false
 			processingEvent.Error = err.Error()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return ProcessingResult{}, err
 		}
 	}
@@ -193,13 +241,21 @@ func (o *Orchestrator) ProcessThought(ctx context.Context, thought UserThought) 
 	o.updateStatus(status, "synthesizing", 0.8, "Synthesizing results")
 
 	// Phase 3: Synthesis
-	result, err := o.synthesizeResults(ctx, thought, results, plan, monitor)
+	synthCtx, synthSpan := orchestratorTracer.Start(ctx, "agent.synthesize")
+	result, err := o.synthesizeResults(synthCtx, thought, results, plan, monitor)
 	if err != nil {
 		o.updateStatus(status, "failed", 0.0, fmt.Sprintf("Synthesis failed: %v", err))
 		processingEvent.Success = false
 		processingEvent.Error = err.Error()
+		synthSpan.RecordError(err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		synthSpan.SetStatus(codes.Error, err.Error())
+		synthSpan.End()
 		return ProcessingResult{}, fmt.Errorf("synthesis failed: %w", err)
 	}
+	synthSpan.SetStatus(codes.Ok, "completed")
+	synthSpan.End()
 
 	if o.episodes != nil {
 		if err := o.persistEpisode(ctx, thought, plan, traces, result); err != nil {
@@ -222,6 +278,12 @@ func (o *Orchestrator) ProcessThought(ctx context.Context, thought UserThought) 
 
 	o.updateStatus(status, "completed", 1.0, "Processing completed successfully")
 	o.logger.Printf("Completed processing for thought: %s in %v", thought.ID, time.Since(startTime))
+	span.SetAttributes(
+		attribute.Float64("run.cost_usd", result.CostEstimate),
+		attribute.Int64("run.tokens", result.TokensUsed),
+		attribute.Int("run.agent_count", len(result.AgentsUsed)),
+	)
+	span.SetStatus(codes.Ok, "completed")
 
 	return result, nil
 }
@@ -272,9 +334,30 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 			go func(t AgentTask) {
 				defer wg.Done()
 
+				taskCtx, taskSpan := orchestratorTracer.Start(ctx, "agent.execute",
+					trace.WithAttributes(
+						attribute.String("task.id", t.ID),
+						attribute.String("task.type", t.Type),
+						attribute.Int("task.priority", t.Priority),
+					))
+				defer taskSpan.End()
+
+				if o.capRegistry != nil {
+					if _, ok := o.capRegistry.Tool(t.Type); !ok {
+						err := fmt.Errorf("no registered ToolCard for agent type: %s", t.Type)
+						taskSpan.RecordError(err)
+						taskSpan.SetStatus(codes.Error, err.Error())
+						errCh <- err
+						return
+					}
+				}
+
 				agent := o.findBestAgent(t)
 				if agent == nil {
-					errCh <- fmt.Errorf("no suitable agent found for task: %s", t.ID)
+					err := fmt.Errorf("no suitable agent found for task: %s", t.ID)
+					taskSpan.RecordError(err)
+					taskSpan.SetStatus(codes.Error, err.Error())
+					errCh <- err
 					return
 				}
 
@@ -311,21 +394,42 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 				}
 				enriched.Parameters = params
 
-				result, err := agent.Execute(ctx, enriched)
+				result, err := agent.Execute(taskCtx, enriched)
 				if err != nil {
+					taskSpan.RecordError(err)
+					taskSpan.SetStatus(codes.Error, err.Error())
 					errCh <- fmt.Errorf("task %s failed: %w", t.ID, err)
 					return
 				}
 
 				if monitor != nil {
 					if err := monitor.Add(result.Cost, result.TokensUsed); err != nil {
+						taskSpan.RecordError(err)
+						taskSpan.SetStatus(codes.Error, err.Error())
 						errCh <- err
 						return
 					}
 					if err := monitor.CheckTime(); err != nil {
+						taskSpan.RecordError(err)
+						taskSpan.SetStatus(codes.Error, err.Error())
 						errCh <- err
 						return
 					}
+				}
+				taskSpan.SetAttributes(
+					attribute.String("agent.type", result.AgentType),
+					attribute.Bool("agent.success", result.Success),
+					attribute.Float64("agent.cost_usd", result.Cost),
+					attribute.Int64("agent.tokens", result.TokensUsed),
+					attribute.Float64("agent.confidence", result.Confidence),
+				)
+				if result.Success {
+					taskSpan.SetStatus(codes.Ok, "completed")
+				} else {
+					if result.Error != "" {
+						taskSpan.RecordError(errors.New(result.Error))
+					}
+					taskSpan.SetStatus(codes.Error, "agent reported failure")
 				}
 
 				agentEvent := telemetry.AgentEvent{
@@ -341,7 +445,7 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 					ModelUsed:  result.ModelUsed,
 					Confidence: result.Confidence,
 				}
-				o.telemetry.RecordAgentEvent(ctx, agentEvent)
+				o.telemetry.RecordAgentEvent(taskCtx, agentEvent)
 
 				mu.Lock()
 				results = append(results, result)

@@ -1,12 +1,15 @@
 package capability
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	jsonschema "github.com/santhosh-tekuri/jsonschema/v5"
 )
 
 // ToolCard represents registry metadata for a tool/agent.
@@ -53,6 +56,12 @@ var ErrToolMissing = fmt.Errorf("required tool missing")
 func NewRegistry(cards []ToolCard, signingSecret string, required []string) (*Registry, error) {
 	reg := &Registry{tools: make(map[string]ToolCard)}
 	for _, tc := range cards {
+		if err := ValidateToolCard(tc); err != nil {
+			return nil, fmt.Errorf("tool %s@%s invalid: %w", tc.Name, tc.Version, err)
+		}
+		if err := VerifyChecksum(tc); err != nil {
+			return nil, fmt.Errorf("tool %s@%s checksum invalid: %w", tc.Name, tc.Version, err)
+		}
 		if err := validateSignature(tc, signingSecret); err != nil {
 			return nil, fmt.Errorf("tool %s@%s signature invalid: %w", tc.Name, tc.Version, err)
 		}
@@ -101,6 +110,55 @@ func ComputeChecksum(tc ToolCard) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// ValidateToolCard performs structural validation of a ToolCard definition.
+func ValidateToolCard(tc ToolCard) error {
+	if strings.TrimSpace(tc.Name) == "" {
+		return fmt.Errorf("name is required")
+	}
+	if strings.TrimSpace(tc.Version) == "" {
+		return fmt.Errorf("version is required")
+	}
+	if strings.TrimSpace(tc.AgentType) == "" {
+		return fmt.Errorf("agent_type is required")
+	}
+	if tc.InputSchema == nil {
+		return fmt.Errorf("input_schema is required")
+	}
+	if err := validateSchemaMap(tc.InputSchema, "input_schema"); err != nil {
+		return err
+	}
+	if tc.OutputSchema == nil {
+		return fmt.Errorf("output_schema is required")
+	}
+	if err := validateSchemaMap(tc.OutputSchema, "output_schema"); err != nil {
+		return err
+	}
+	if tc.CostEstimate < 0 {
+		return fmt.Errorf("cost_estimate must be >= 0")
+	}
+	return nil
+}
+
+// VerifyChecksum ensures the checksum matches the ToolCard payload.
+func VerifyChecksum(tc ToolCard) error {
+	if tc.Checksum == "" {
+		return fmt.Errorf("checksum is missing")
+	}
+	expected, err := ComputeChecksum(tc)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(expected, tc.Checksum) {
+		return fmt.Errorf("checksum mismatch")
+	}
+	return nil
+}
+
+// VerifySignature ensures the ToolCard signature matches the signing secret.
+func VerifySignature(tc ToolCard, secret string) error {
+	return validateSignature(tc, secret)
+}
+
 // SignToolCard computes an HMAC signature using the signing secret.
 func SignToolCard(tc ToolCard, secret string) (string, error) {
 	if secret == "" {
@@ -118,6 +176,9 @@ func SignToolCard(tc ToolCard, secret string) (string, error) {
 func validateSignature(tc ToolCard, secret string) error {
 	if secret == "" {
 		return nil
+	}
+	if tc.Signature == "" {
+		return fmt.Errorf("signature missing")
 	}
 	expected, err := SignToolCard(tc, secret)
 	if err != nil {
@@ -144,6 +205,21 @@ func splitVersion(v string) []int {
 		fmt.Sscanf(p, "%d", &out[i])
 	}
 	return out
+}
+
+func validateSchemaMap(s map[string]interface{}, field string) error {
+	data, err := json.Marshal(s)
+	if err != nil {
+		return fmt.Errorf("marshal %s: %w", field, err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource("schema.json", bytes.NewReader(data)); err != nil {
+		return fmt.Errorf("add %s resource: %w", field, err)
+	}
+	if _, err := compiler.Compile("schema.json"); err != nil {
+		return fmt.Errorf("%s is not a valid JSON schema: %w", field, err)
+	}
+	return nil
 }
 
 func stringsCompare(a, b []int) int {

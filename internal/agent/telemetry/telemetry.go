@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"github.com/mohammad-safakhou/newser/config"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	otelmetric "go.opentelemetry.io/otel/metric"
 )
 
 // Telemetry provides comprehensive monitoring and cost tracking
@@ -17,6 +20,15 @@ type Telemetry struct {
 	metrics     *Metrics
 	costTracker *CostTracker
 	mu          sync.RWMutex
+	// otel instruments
+	runDuration   otelmetric.Float64Histogram
+	runCost       otelmetric.Float64Histogram
+	runTokens     otelmetric.Int64Counter
+	runFailures   otelmetric.Int64Counter
+	agentDuration otelmetric.Float64Histogram
+	agentCost     otelmetric.Float64Histogram
+	agentTokens   otelmetric.Int64Counter
+	agentFailures otelmetric.Int64Counter
 }
 
 // Metrics holds various performance metrics
@@ -38,31 +50,31 @@ type Metrics struct {
 	LLMTokensUsed     map[string]int64
 	LLMAverageLatency map[string]time.Duration
 
-    // Source metrics
-    SourceRequests     map[string]int64
-    SourceSuccessRates map[string]float64
-    SourceAverageTimes map[string]time.Duration
+	// Source metrics
+	SourceRequests     map[string]int64
+	SourceSuccessRates map[string]float64
+	SourceAverageTimes map[string]time.Duration
 
-    // Research metrics
-    ResearchRuns               int64
-    ResearchPagesFetchedTotal  int64
-    ResearchSourcesTotal       int64
-    ResearchUniqueDomainsTotal int64
+	// Research metrics
+	ResearchRuns               int64
+	ResearchPagesFetchedTotal  int64
+	ResearchSourcesTotal       int64
+	ResearchUniqueDomainsTotal int64
 
-    // Analysis metrics
-    AnalysisRuns                  int64
-    AnalysisSourcesConsideredTotal int64
-    AnalysisMinCredibilityTotal    float64
+	// Analysis metrics
+	AnalysisRuns                   int64
+	AnalysisSourcesConsideredTotal int64
+	AnalysisMinCredibilityTotal    float64
 
-    // Knowledge graph metrics
-    KGRuns      int64
-    KGNodesTotal int64
-    KGEdgesTotal int64
+	// Knowledge graph metrics
+	KGRuns       int64
+	KGNodesTotal int64
+	KGEdgesTotal int64
 
-    // Conflict detection metrics
-    ConflictRuns                   int64
-    ConflictCountTotal             int64
-    ContradictoryThresholdsTotal   float64
+	// Conflict detection metrics
+	ConflictRuns                 int64
+	ConflictCountTotal           int64
+	ContradictoryThresholdsTotal float64
 }
 
 // CostTracker tracks costs across different LLM providers and operations
@@ -130,7 +142,7 @@ func NewTelemetry(config config.TelemetryConfig) *Telemetry {
 	t := &Telemetry{
 		config: config,
 		logger: log.New(log.Writer(), "[TELEMETRY] ", log.LstdFlags),
-        metrics: &Metrics{
+		metrics: &Metrics{
 			AgentExecutions:    make(map[string]int64),
 			AgentSuccessRates:  make(map[string]float64),
 			AgentAverageTimes:  make(map[string]time.Duration),
@@ -139,13 +151,83 @@ func NewTelemetry(config config.TelemetryConfig) *Telemetry {
 			LLMAverageLatency:  make(map[string]time.Duration),
 			SourceRequests:     make(map[string]int64),
 			SourceSuccessRates: make(map[string]float64),
-            SourceAverageTimes: make(map[string]time.Duration),
-        },
+			SourceAverageTimes: make(map[string]time.Duration),
+		},
 		costTracker: &CostTracker{
 			DailyCosts:     make(map[string]float64),
 			OperationCosts: make(map[string]float64),
 			ModelCosts:     make(map[string]float64),
 		},
+	}
+
+	meter := otel.Meter("newser/internal/agent")
+	if hist, err := meter.Float64Histogram(
+		"agent_run_duration_seconds",
+		otelmetric.WithDescription("Duration of end-to-end runs"),
+		otelmetric.WithUnit("s"),
+	); err != nil {
+		t.logger.Printf("otel histogram agent_run_duration_seconds: %v", err)
+	} else {
+		t.runDuration = hist
+	}
+	if hist, err := meter.Float64Histogram(
+		"agent_run_cost_usd",
+		otelmetric.WithDescription("Cost of end-to-end runs in USD"),
+		otelmetric.WithUnit("USD"),
+	); err != nil {
+		t.logger.Printf("otel histogram agent_run_cost_usd: %v", err)
+	} else {
+		t.runCost = hist
+	}
+	if ctr, err := meter.Int64Counter(
+		"agent_run_tokens",
+		otelmetric.WithDescription("Tokens consumed per run"),
+	); err != nil {
+		t.logger.Printf("otel counter agent_run_tokens: %v", err)
+	} else {
+		t.runTokens = ctr
+	}
+	if ctr, err := meter.Int64Counter(
+		"agent_run_failures",
+		otelmetric.WithDescription("Count of failed runs"),
+	); err != nil {
+		t.logger.Printf("otel counter agent_run_failures: %v", err)
+	} else {
+		t.runFailures = ctr
+	}
+	if hist, err := meter.Float64Histogram(
+		"agent_execution_duration_seconds",
+		otelmetric.WithDescription("Duration of individual agent executions"),
+		otelmetric.WithUnit("s"),
+	); err != nil {
+		t.logger.Printf("otel histogram agent_execution_duration_seconds: %v", err)
+	} else {
+		t.agentDuration = hist
+	}
+	if hist, err := meter.Float64Histogram(
+		"agent_execution_cost_usd",
+		otelmetric.WithDescription("Cost per agent execution in USD"),
+		otelmetric.WithUnit("USD"),
+	); err != nil {
+		t.logger.Printf("otel histogram agent_execution_cost_usd: %v", err)
+	} else {
+		t.agentCost = hist
+	}
+	if ctr, err := meter.Int64Counter(
+		"agent_execution_tokens",
+		otelmetric.WithDescription("Tokens consumed per agent execution"),
+	); err != nil {
+		t.logger.Printf("otel counter agent_execution_tokens: %v", err)
+	} else {
+		t.agentTokens = ctr
+	}
+	if ctr, err := meter.Int64Counter(
+		"agent_execution_failures",
+		otelmetric.WithDescription("Count of failed agent executions"),
+	); err != nil {
+		t.logger.Printf("otel counter agent_execution_failures: %v", err)
+	} else {
+		t.agentFailures = ctr
 	}
 
 	// Start background tasks (periodic logs can be disabled via config)
@@ -165,6 +247,22 @@ func (t *Telemetry) RecordProcessingEvent(ctx context.Context, event ProcessingE
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	attrs := []attribute.KeyValue{
+		attribute.String("outcome", outcomeLabel(event.Success)),
+	}
+	if t.runDuration != nil && event.ProcessingTime > 0 {
+		t.runDuration.Record(ctx, event.ProcessingTime.Seconds(), otelmetric.WithAttributes(attrs...))
+	}
+	if t.runCost != nil && event.Cost > 0 {
+		t.runCost.Record(ctx, event.Cost, otelmetric.WithAttributes(attrs...))
+	}
+	if t.runTokens != nil && event.TokensUsed > 0 {
+		t.runTokens.Add(ctx, event.TokensUsed, otelmetric.WithAttributes(attrs...))
+	}
+	if !event.Success && t.runFailures != nil {
+		t.runFailures.Add(ctx, 1, otelmetric.WithAttributes(attrs...))
+	}
 
 	// Update metrics
 	t.metrics.TotalRequests++
@@ -215,6 +313,24 @@ func (t *Telemetry) RecordAgentEvent(ctx context.Context, event AgentEvent) {
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	attrs := []attribute.KeyValue{
+		attribute.String("agent_type", event.AgentType),
+		attribute.String("model", event.ModelUsed),
+		attribute.String("outcome", outcomeLabel(event.Success)),
+	}
+	if t.agentDuration != nil && event.Duration > 0 {
+		t.agentDuration.Record(ctx, event.Duration.Seconds(), otelmetric.WithAttributes(attrs...))
+	}
+	if t.agentCost != nil && event.Cost > 0 {
+		t.agentCost.Record(ctx, event.Cost, otelmetric.WithAttributes(attrs...))
+	}
+	if t.agentTokens != nil && event.TokensUsed > 0 {
+		t.agentTokens.Add(ctx, event.TokensUsed, otelmetric.WithAttributes(attrs...))
+	}
+	if !event.Success && t.agentFailures != nil {
+		t.agentFailures.Add(ctx, 1, otelmetric.WithAttributes(attrs...))
+	}
 
 	// Update agent metrics
 	t.metrics.AgentExecutions[event.AgentType]++
@@ -284,39 +400,58 @@ func (t *Telemetry) RecordSourceEvent(ctx context.Context, event SourceEvent) {
 
 // RecordResearchStats records research pagination/diversity stats
 func (t *Telemetry) RecordResearchStats(ctx context.Context, pagesFetched, totalSources, uniqueDomains int) {
-    if !t.config.Enabled { return }
-    t.mu.Lock(); defer t.mu.Unlock()
-    t.metrics.ResearchRuns++
-    t.metrics.ResearchPagesFetchedTotal += int64(pagesFetched)
-    t.metrics.ResearchSourcesTotal += int64(totalSources)
-    t.metrics.ResearchUniqueDomainsTotal += int64(uniqueDomains)
+	if !t.config.Enabled {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.metrics.ResearchRuns++
+	t.metrics.ResearchPagesFetchedTotal += int64(pagesFetched)
+	t.metrics.ResearchSourcesTotal += int64(totalSources)
+	t.metrics.ResearchUniqueDomainsTotal += int64(uniqueDomains)
 }
 
 // RecordAnalysisStats records analysis parameter usage
 func (t *Telemetry) RecordAnalysisStats(ctx context.Context, sourcesConsidered int, minCredibility float64) {
-    if !t.config.Enabled { return }
-    t.mu.Lock(); defer t.mu.Unlock()
-    t.metrics.AnalysisRuns++
-    t.metrics.AnalysisSourcesConsideredTotal += int64(sourcesConsidered)
-    t.metrics.AnalysisMinCredibilityTotal += minCredibility
+	if !t.config.Enabled {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.metrics.AnalysisRuns++
+	t.metrics.AnalysisSourcesConsideredTotal += int64(sourcesConsidered)
+	t.metrics.AnalysisMinCredibilityTotal += minCredibility
 }
 
 // RecordKGStats records knowledge graph sizes
 func (t *Telemetry) RecordKGStats(ctx context.Context, nodes, edges int) {
-    if !t.config.Enabled { return }
-    t.mu.Lock(); defer t.mu.Unlock()
-    t.metrics.KGRuns++
-    t.metrics.KGNodesTotal += int64(nodes)
-    t.metrics.KGEdgesTotal += int64(edges)
+	if !t.config.Enabled {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.metrics.KGRuns++
+	t.metrics.KGNodesTotal += int64(nodes)
+	t.metrics.KGEdgesTotal += int64(edges)
 }
 
 // RecordConflictStats records conflict detection outputs
 func (t *Telemetry) RecordConflictStats(ctx context.Context, conflicts int, contradictoryThreshold float64) {
-    if !t.config.Enabled { return }
-    t.mu.Lock(); defer t.mu.Unlock()
-    t.metrics.ConflictRuns++
-    t.metrics.ConflictCountTotal += int64(conflicts)
-    t.metrics.ContradictoryThresholdsTotal += contradictoryThreshold
+	if !t.config.Enabled {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.metrics.ConflictRuns++
+	t.metrics.ConflictCountTotal += int64(conflicts)
+	t.metrics.ContradictoryThresholdsTotal += contradictoryThreshold
+}
+
+func outcomeLabel(success bool) string {
+	if success {
+		return "success"
+	}
+	return "failure"
 }
 
 // GetMetrics returns current metrics snapshot

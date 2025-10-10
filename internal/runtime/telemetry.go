@@ -11,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	promexporter "go.opentelemetry.io/otel/exporters/prometheus"
 	otelmetric "go.opentelemetry.io/otel/metric"
@@ -77,8 +78,18 @@ func SetupTelemetry(ctx context.Context, cfg config.TelemetryConfig, opts Teleme
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("prom exporter: %w", err)
 	}
+	metricExporter, err := otlpmetricgrpc.New(ctx,
+		otlpmetricgrpc.WithEndpoint(endpoint),
+		otlpmetricgrpc.WithInsecure(),
+		otlpmetricgrpc.WithDialOption(grpc.WithBlock()),
+	)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("otlp metric init: %w", err)
+	}
+	periodicReader := sdkmetric.NewPeriodicReader(metricExporter, sdkmetric.WithInterval(15*time.Second))
 	mp := sdkmetric.NewMeterProvider(
 		sdkmetric.WithReader(promExporter),
+		sdkmetric.WithReader(periodicReader),
 		sdkmetric.WithResource(res),
 	)
 	otel.SetMeterProvider(mp)

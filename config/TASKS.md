@@ -2,7 +2,7 @@
 
 Roadmap references: `Ix.Ey` = Initiative/Epic from `tasks.md`, `FG` = Feasibility Gate.
 
-- [ ] [I1.E2] Maintain `.env` templates and secret management integration (SOPS/Vault) for all services.
+- [x] [I1.E2] Maintain `.env` templates and secret management integration (SOPS/Vault) for all services.
 - [ ] [I4.E2] Capture sandbox provider defaults, resource caps, and allowlists in `security_policy.yaml`.
 - [ ] [I5.E4] Add crawl policy definitions (disallow/paywall/attribution) with validation tooling.
 - [ ] [I6.E2] Configure bias/credibility scoring parameters and fairness metrics thresholds.

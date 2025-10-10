@@ -9,3 +9,29 @@ groups:
         annotations:
           summary: "Worker checkpoint retries high"
           description: "Worker retried checkpoints more than 5 times in the last 5 minutes."
+  - name: orchestrator-alerts
+    rules:
+      - alert: AgentRunFailureBurst
+        expr: increase(agent_run_failures_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Agent runs are failing consecutively"
+          description: "At least one orchestrated run failed within the past 5 minutes. Investigate planner/output errors."
+      - alert: AgentExecutionLatencyHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(agent_execution_duration_seconds_bucket[5m]))) > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent execution p95 latency exceeded 60s"
+          description: "Investigate slow tools or external dependencies causing elevated agent execution duration."
+      - alert: AgentRunCostSpike
+        expr: increase(agent_run_cost_usd_sum[5m]) > 25
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Run cost increased beyond budget"
+          description: "Total cost of orchestrated runs exceeded $25 in the past 5 minutes. Check budget enforcement."
