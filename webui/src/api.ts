@@ -35,6 +35,38 @@ export type Run = { ID: string; Status: string; StartedAt: string; FinishedAt?: 
 export type ChatMessage = { role: 'user' | 'assistant'; content: string }
 export type ChatLogMessage = { id: string; role: 'user'|'assistant'; content: string; created_at: string }
 
+export type RunSource = {
+  id: string
+  title?: string
+  url?: string
+  type?: string
+  credibility?: number
+  published_at?: string
+  summary?: string
+}
+
+export type Evidence = {
+  id: string
+  statement: string
+  source_ids: string[]
+  category?: string
+  score?: number
+  metadata?: Record<string, any>
+}
+
+export type RunResult = {
+  id: string
+  summary?: string
+  detailed_report?: string
+  confidence?: number
+  sources?: RunSource[]
+  highlights?: any[]
+  conflicts?: any[]
+  evidence?: Evidence[]
+  metadata?: Record<string, any>
+  created_at?: string
+}
+
 // Enhanced request with abort support
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '')
 
@@ -80,8 +112,8 @@ export const api2 = {
   createTopicFull: (name: string, preferences: Record<string, any>, scheduleCron: string) => apiRequest('/api/topics', { method: 'POST', body: JSON.stringify({ name, preferences, schedule_cron: scheduleCron }) }),
   triggerRun: (id: string) => apiRequest(`/api/topics/${id}/trigger`, { method: 'POST' }),
   runs: (id: string) => apiRequest<Run[]>(`/api/topics/${id}/runs`),
-  latestResult: (id: string) => apiRequest<any>(`/api/topics/${id}/latest_result`),
-  runResult: (topicId: string, runId: string) => apiRequest<any>(`/api/topics/${topicId}/runs/${runId}/result`),
+  latestResult: (id: string) => apiRequest<RunResult>(`/api/topics/${id}/latest_result`),
+  runResult: (topicId: string, runId: string) => apiRequest<RunResult>(`/api/topics/${topicId}/runs/${runId}/result`),
   runMarkdown: (topicId: string, runId: string) => apiRequest<string>(`/api/topics/${topicId}/runs/${runId}/markdown`),
   expand: (topicId: string, runId: string, payload: { highlight_index?: number; source_url?: string; focus?: string }) =>
     apiRequest<{ markdown: string }>(`/api/topics/${topicId}/runs/${runId}/expand`, { method: 'POST', body: JSON.stringify(payload) }),

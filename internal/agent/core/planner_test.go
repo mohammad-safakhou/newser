@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -99,7 +100,7 @@ func TestParsePlanningResponseSuccess(t *testing.T) {
 
 func TestCreatePlanningPromptIncludesSchemaGuidance(t *testing.T) {
 	pl := NewPlanner(&config.Config{}, stubLLM{}, telemetry.NewTelemetry(config.TelemetryConfig{}), nil)
-	prompt := pl.createPlanningPrompt(UserThought{Content: "Assess semiconductor supply news"})
+	prompt := pl.createPlanningPrompt(UserThought{Content: "Assess semiconductor supply news"}, "")
 	for _, snippet := range []string{"SCHEMA RULES", "VALID OUTPUT EXAMPLE", "\"tasks\""} {
 		if !strings.Contains(prompt, snippet) {
 			t.Fatalf("prompt missing snippet %q", snippet)
@@ -118,7 +119,7 @@ func TestCreatePlanningPromptIncludesPolicyGuidance(t *testing.T) {
 			"channels": []string{"rss"},
 		},
 	}
-	prompt := pl.createPlanningPrompt(UserThought{Content: "Assess semiconductor supply news", Policy: &pol})
+	prompt := pl.createPlanningPrompt(UserThought{Content: "Assess semiconductor supply news", Policy: &pol}, "")
 	checks := []string{
 		"Repeat mode: manual",
 		"Refresh interval between runs: 2h0m0s",
@@ -190,5 +191,85 @@ func TestAttachTemporalPolicyEmbedsMetadata(t *testing.T) {
 	}
 	if !strings.Contains(string(plan.RawJSON), "temporal_policy") {
 		t.Fatalf("raw JSON should include temporal_policy metadata: %s", string(plan.RawJSON))
+	}
+}
+
+type semanticMemoryStub struct {
+	lastRequest SemanticSearchRequest
+	results     SemanticSearchResults
+}
+
+func (s *semanticMemoryStub) SearchSimilar(ctx context.Context, req SemanticSearchRequest) (SemanticSearchResults, error) {
+	s.lastRequest = req
+	return s.results, nil
+}
+
+type recordingLLM struct {
+	lastPrompt string
+}
+
+func (r *recordingLLM) Generate(ctx context.Context, prompt string, model string, options map[string]interface{}) (string, error) {
+	r.lastPrompt = prompt
+	return `{"version":"v1","tasks":[{"id":"t1","type":"research"},{"id":"t2","type":"knowledge_graph","depends_on":["t1"]},{"id":"t3","type":"synthesis","depends_on":["t1","t2"]}],"execution_order":["t1","t2","t3"]}`, nil
+}
+
+func (r *recordingLLM) GenerateWithTokens(ctx context.Context, prompt string, model string, options map[string]interface{}) (string, int64, int64, error) {
+	resp, err := r.Generate(ctx, prompt, model, options)
+	return resp, 0, 0, err
+}
+
+func (*recordingLLM) Embed(ctx context.Context, model string, input []string) ([][]float32, error) {
+	return nil, nil
+}
+
+func (*recordingLLM) GetAvailableModels() []string { return []string{"stub"} }
+
+func (*recordingLLM) GetModelInfo(model string) (ModelInfo, error) {
+	return ModelInfo{Name: model}, nil
+}
+
+func (*recordingLLM) CalculateCost(inputTokens, outputTokens int64, model string) float64 { return 0 }
+
+func TestPlanIntegratesSemanticMemory(t *testing.T) {
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{AgentTimeout: time.Minute},
+		Memory: config.MemoryConfig{Semantic: config.SemanticMemoryConfig{Enabled: true, SearchTopK: 4, SearchThreshold: 0.7}},
+	}
+	llm := &recordingLLM{}
+	planner := NewPlanner(cfg, llm, telemetry.NewTelemetry(config.TelemetryConfig{}), nil)
+	semStub := &semanticMemoryStub{
+		results: SemanticSearchResults{
+			Runs: []SemanticRunMatch{
+				{RunID: "run-42", TopicID: "topic-123", Kind: "run_summary", Distance: 0.25, Similarity: 0.75, Metadata: map[string]interface{}{"summary_snippet": "Latest inflation snapshot"}, CreatedAt: time.Now()},
+			},
+			PlanSteps: []SemanticPlanMatch{
+				{RunID: "run-44", TopicID: "topic-123", TaskID: "t-plan", Kind: "analysis", Distance: 0.3, Similarity: 0.7, Metadata: map[string]interface{}{"description": "Compare CPI vs PPI"}, CreatedAt: time.Now()},
+			},
+		},
+	}
+	planner.SetSemanticMemory(semStub)
+	thought := UserThought{Content: "Investigate inflation trends", TopicID: "topic-123"}
+	plan, err := planner.Plan(context.Background(), thought)
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	if semStub.lastRequest.TopicID != thought.TopicID {
+		t.Fatalf("expected topic ID %s, got %s", thought.TopicID, semStub.lastRequest.TopicID)
+	}
+	if semStub.lastRequest.Query == "" {
+		t.Fatalf("expected semantic query to be populated")
+	}
+	if plan.Semantic == nil || len(plan.Semantic.Runs) == 0 {
+		t.Fatalf("expected semantic run matches in plan result")
+	}
+	if plan.Graph == nil || plan.Graph.Metadata == nil {
+		t.Fatalf("expected plan graph metadata to be present")
+	}
+	meta, ok := plan.Graph.Metadata["semantic_context"].(map[string]interface{})
+	if !ok || len(meta) == 0 {
+		t.Fatalf("expected semantic_context metadata, got %#v", plan.Graph.Metadata["semantic_context"])
+	}
+	if !strings.Contains(llm.lastPrompt, "SEMANTIC MEMORY HINTS") {
+		t.Fatalf("expected prompt to include semantic memory hints, got: %s", llm.lastPrompt)
 	}
 }

@@ -1,0 +1,89 @@
+{
+  "title": "Runtime & Sandbox Overview",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "30s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Sandbox Requests",
+      "targets": [
+        {
+          "expr": "increase(sandbox_requests_total[5m])",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Requested CPU (cores)",
+      "targets": [
+        {
+          "expr": "increase(sandbox_request_cpu_sum[5m]) / clamp_min(increase(sandbox_request_cpu_count[5m]), 1)",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Requested Timeout (s)",
+      "targets": [
+        {
+          "expr": "increase(sandbox_request_timeout_seconds_sum[5m]) / clamp_min(increase(sandbox_request_timeout_seconds_count[5m]), 1)",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Requested Memory (GB)",
+      "targets": [
+        {
+          "expr": "(increase(sandbox_request_memory_bytes_sum[5m]) / clamp_min(increase(sandbox_request_memory_bytes_count[5m]), 1)) / 1073741824",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Network Decisions",
+      "targets": [
+        {
+          "expr": "increase(sandbox_network_enabled_total[5m])",
+          "legendFormat": "{{service}} enabled"
+        },
+        {
+          "expr": "increase(sandbox_network_blocked_total[5m])",
+          "legendFormat": "{{service}} blocked"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Agent Execution Cost (USD)",
+      "targets": [
+        {
+          "expr": "increase(agent_execution_cost_usd_sum[5m])",
+          "legendFormat": "{{agent_type}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Agent Execution Duration (s)",
+      "targets": [
+        {
+          "expr": "increase(agent_execution_duration_seconds_sum[5m]) / clamp_min(increase(agent_execution_duration_seconds_count[5m]), 1)",
+          "legendFormat": "{{agent_type}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 }
+    }
+  ]
+}

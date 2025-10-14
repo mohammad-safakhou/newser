@@ -10,7 +10,10 @@ import (
 	"time"
 
 	"github.com/mohammad-safakhou/newser/config"
+	agentcore "github.com/mohammad-safakhou/newser/internal/agent/core"
+	"github.com/mohammad-safakhou/newser/internal/memory/semantic"
 	"github.com/mohammad-safakhou/newser/internal/runtime"
+	"github.com/mohammad-safakhou/newser/internal/store"
 )
 
 func main() {
@@ -39,6 +42,37 @@ func main() {
 
 	if _, _, err := runtime.InitSchemaRegistry(ctx, cfg); err != nil {
 		log.Fatalf("memory schema registry init: %v", err)
+	}
+
+	if cfg.Memory.Semantic.Enabled && cfg.Memory.Semantic.RebuildOnStartup {
+		dsn, err := runtime.BuildPostgresDSN(cfg)
+		if err != nil {
+			log.Fatalf("postgres configuration invalid: %v", err)
+		}
+
+		st, err := store.NewWithDSN(ctx, dsn)
+		if err != nil {
+			log.Fatalf("connect store: %v", err)
+		}
+		defer st.DB.Close()
+
+		llmProvider, err := agentcore.NewLLMProvider(cfg.LLM)
+		if err != nil {
+			log.Fatalf("llm provider init: %v", err)
+		}
+
+		rebuildLogger := log.New(os.Stdout, "[MEMORY REBUILD] ", log.LstdFlags)
+		ingestor, err := semantic.NewIngestor(st, llmProvider, cfg.Memory.Semantic, rebuildLogger)
+		if err != nil {
+			log.Fatalf("semantic ingestor init: %v", err)
+		}
+		if ingestor == nil {
+			log.Fatalf("semantic ingestor unexpectedly disabled")
+		}
+
+		if _, err := rebuildSemanticEmbeddings(ctx, st, ingestor, cfg.Memory.Semantic.WriterBatchSize, rebuildLogger); err != nil {
+			log.Fatalf("semantic rebuild failed: %v", err)
+		}
 	}
 
 	if err := runtime.RunPlaceholder(ctx, "memory"); err != nil {

@@ -1,6 +1,11 @@
 package budget
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/mohammad-safakhou/newser/internal/planner"
+)
 
 func TestConfigValidate(t *testing.T) {
 	neg := float64(-1)
@@ -61,5 +66,47 @@ func TestRequiresApproval(t *testing.T) {
 	cfg.ApprovalThreshold = &threshold
 	if !RequiresApproval(cfg, 5) {
 		t.Fatalf("expected approval requirement when exceeding threshold")
+	}
+}
+
+func TestEstimateFromPlan(t *testing.T) {
+	plan := &planner.PlanDocument{
+		Tasks: []planner.PlanTask{{EstimatedCost: 1.5, EstimatedTokens: 120, EstimatedTime: "2m"}},
+	}
+	est := EstimateFromPlan(plan)
+	if est.Cost == 0 || est.Tokens == 0 || est.Duration == 0 {
+		t.Fatalf("expected task-level estimates to populate fields: %+v", est)
+	}
+
+	plan.Estimates = &planner.PlanEstimates{TotalCost: 3.2, TotalTokens: 250, TotalTime: "5m"}
+	est = EstimateFromPlan(plan)
+	if est.Cost != 3.2 || est.Tokens != 250 || est.Duration != 5*time.Minute {
+		t.Fatalf("expected aggregate estimates, got %+v", est)
+	}
+}
+
+func TestSerializeHelpers(t *testing.T) {
+	cost := 9.5
+	tokens := int64(500)
+	seconds := int64(600)
+	cfg := Config{MaxCost: &cost, MaxTokens: &tokens, MaxTimeSeconds: &seconds, RequireApproval: true, Metadata: map[string]interface{}{"team": "news"}}
+	est := Estimate{Cost: 5.5, Tokens: 200, Duration: 3 * time.Minute}
+	usage := Usage{Cost: 6.1, Tokens: 210, Elapsed: 4 * time.Minute}
+
+	report := BuildReport(cfg, est, usage)
+	if report["config"].(map[string]interface{})["require_approval"].(bool) != true {
+		t.Fatalf("expected require approval in report")
+	}
+	if report["estimate"].(map[string]interface{})["tokens"].(int64) != int64(200) {
+		t.Fatalf("expected estimate tokens to match")
+	}
+	if report["usage"].(map[string]interface{})["cost"].(float64) != usage.Cost {
+		t.Fatalf("expected usage cost to match")
+	}
+
+	exceeded := ErrExceeded{Kind: "cost", Usage: "usage", Limit: "limit"}
+	reason := FormatBreachReason(cfg, usage, exceeded)
+	if reason == "" {
+		t.Fatalf("expected formatted breach reason")
 	}
 }

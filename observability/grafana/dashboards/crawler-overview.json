@@ -1,0 +1,52 @@
+{
+  "title": "Crawler Overview",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "30s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Requests",
+      "targets": [
+        {
+          "expr": "increase(crawler_requests_total[5m])",
+          "legendFormat": "{{policy_profile}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "URLs Requested",
+      "targets": [
+        {
+          "expr": "increase(crawler_requested_urls_total[5m])",
+          "legendFormat": "{{policy_profile}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Politeness Budget (s)",
+      "targets": [
+        {
+          "expr": "increase(crawler_policy_budget_seconds_sum[5m]) / clamp_min(increase(crawler_policy_budget_seconds_count[5m]), 1)",
+          "legendFormat": "{{policy_profile}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Deduplication Ratio",
+      "targets": [
+        {
+          "expr": "increase(crawler_dedup_ratio_sum[5m]) / clamp_min(increase(crawler_dedup_ratio_count[5m]), 1)",
+          "legendFormat": "{{policy_profile}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
+    }
+  ]
+}

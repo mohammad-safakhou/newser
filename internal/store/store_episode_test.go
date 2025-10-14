@@ -33,7 +33,7 @@ func TestSaveEpisode(t *testing.T) {
 		},
 		PlanRaw:    json.RawMessage(`{"version":"v1"}`),
 		PlanPrompt: "plan prompt",
-		Result:     core.ProcessingResult{ID: "run-1", Summary: "summary"},
+		Result:     core.ProcessingResult{ID: "run-1", Summary: "summary", Evidence: []core.Evidence{{ID: "claim-1", Statement: "Claim text", SourceIDs: []string{"source-1"}, Metadata: map[string]interface{}{"category": "news", "score": 0.9}}}},
 		Steps: []EpisodeStep{
 			{
 				StepIndex:     1,
@@ -76,6 +76,15 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		WithArgs("episode-1", 1, sqlmock.AnyArg(), sqlmock.AnyArg(), ep.Steps[0].Prompt, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
+	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM run_evidence WHERE run_id=$1`)).
+		WithArgs(ep.RunID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO run_evidence (run_id, claim_id, statement, source_ids, metadata)
+VALUES ($1,$2,$3,$4,$5)`)).
+		WithArgs(ep.RunID, ep.Result.Evidence[0].ID, ep.Result.Evidence[0].Statement, sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
 	mock.ExpectCommit()
 
 	if err := st.SaveEpisode(context.Background(), ep); err != nil {
@@ -99,7 +108,7 @@ func TestGetEpisodeByRunID(t *testing.T) {
 	now := time.Now()
 	thoughtBytes, _ := json.Marshal(core.UserThought{ID: "run-1", Content: "hello"})
 	planDocBytes, _ := json.Marshal(planner.PlanDocument{Version: "v1"})
-	resultBytes, _ := json.Marshal(core.ProcessingResult{ID: "run-1", Summary: "summary"})
+	resultBytes, _ := json.Marshal(core.ProcessingResult{ID: "run-1", Summary: "summary", Evidence: []core.Evidence{{ID: "claim-1", Statement: "Claim text", SourceIDs: []string{"source-1"}}}})
 	stepTaskBytes, _ := json.Marshal(core.AgentTask{ID: "task-1"})
 	stepResultBytes, _ := json.Marshal(core.AgentResult{ID: "task-1_result", TaskID: "task-1"})
 
@@ -122,6 +131,18 @@ ORDER BY step_index
 		WillReturnRows(sqlmock.NewRows([]string{"step_index", "task", "input_snapshot", "prompt", "result", "artifacts", "started_at", "completed_at", "created_at"}).
 			AddRow(1, stepTaskBytes, nil, "prompt", stepResultBytes, nil, now, now, now))
 
+	sourceIDsBytes, _ := json.Marshal([]string{"source-1"})
+	metadataBytes, _ := json.Marshal(map[string]interface{}{"category": "news", "score": 0.9})
+	mock.ExpectQuery(regexp.QuoteMeta(`
+SELECT claim_id, statement, source_ids, metadata, created_at
+FROM run_evidence
+WHERE run_id=$1
+ORDER BY created_at ASC
+`)).
+		WithArgs("run-1").
+		WillReturnRows(sqlmock.NewRows([]string{"claim_id", "statement", "source_ids", "metadata", "created_at"}).
+			AddRow("claim-1", "Claim text", sourceIDsBytes, metadataBytes, now))
+
 	ep, ok, err := st.GetEpisodeByRunID(context.Background(), "run-1")
 	if err != nil {
 		t.Fatalf("GetEpisodeByRunID: %v", err)
@@ -131,6 +152,46 @@ ORDER BY step_index
 	}
 	if ep.RunID != "run-1" || len(ep.Steps) != 1 || ep.Steps[0].Prompt != "prompt" {
 		t.Fatalf("unexpected episode data: %+v", ep)
+	}
+	if len(ep.Result.Evidence) == 0 || ep.Result.Evidence[0].Statement != "Claim text" {
+		t.Fatalf("expected evidence to be loaded: %+v", ep.Result.Evidence)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+func TestListEpisodes(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	st := &Store{DB: db}
+
+	now := time.Now()
+	started := now.Add(-time.Hour)
+	query := regexp.QuoteMeta("SELECT e.run_id, e.topic_id, e.user_id, COALESCE(r.status,''), r.started_at, e.created_at, COALESCE(MAX(s.step_index) + 1, 0) FROM run_episodes e LEFT JOIN runs r ON r.id = e.run_id LEFT JOIN run_episode_steps s ON s.episode_id = e.id WHERE 1=1 AND e.topic_id = $1 AND COALESCE(r.status,'') = $2 GROUP BY e.id, e.run_id, e.topic_id, e.user_id, r.status, r.started_at, e.created_at ORDER BY e.created_at DESC LIMIT 10")
+	rows := sqlmock.NewRows([]string{"run_id", "topic_id", "user_id", "status", "started_at", "created_at", "steps"}).
+		AddRow("run-1", "topic-1", "user-1", "completed", started, now, 3)
+	mock.ExpectQuery(query).
+		WithArgs("topic-1", "completed").
+		WillReturnRows(rows)
+
+	summaries, err := st.ListEpisodes(context.Background(), EpisodeFilter{TopicID: "topic-1", Status: "completed", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListEpisodes: %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("expected 1 summary, got %d", len(summaries))
+	}
+	if summaries[0].RunID != "run-1" || summaries[0].Steps != 3 || summaries[0].Status != "completed" {
+		t.Fatalf("unexpected summary: %+v", summaries[0])
+	}
+	if summaries[0].StartedAt == nil || !summaries[0].StartedAt.Equal(started) {
+		t.Fatalf("expected started_at to be populated")
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {

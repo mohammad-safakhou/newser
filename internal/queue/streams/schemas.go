@@ -41,9 +41,27 @@ var baseDefinitions = []Definition{
     "priority": {"type": "integer"},
     "plan_snapshot": {"type": "object"},
     "parameters": {"type": "object"},
-    "checkpoint_token": {"type": "string"}
+    "checkpoint_token": {"type": "string"},
+    "attachments": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/artifact_ref"}
+    }
   },
-  "additionalProperties": true
+  "additionalProperties": true,
+  "definitions": {
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "uri"],
+      "properties": {
+        "artifact_id": {"type": "string", "minLength": 1},
+        "uri": {"type": "string", "minLength": 1},
+        "checksum": {"type": "string"},
+        "media_type": {"type": "string"},
+        "metadata": {"type": "object", "additionalProperties": true}
+      }
+    }
+  }
 }`),
 	},
 	{
@@ -60,10 +78,62 @@ var baseDefinitions = []Definition{
     "output": {"type": "object"},
     "cost_estimate": {"type": "number"},
     "tokens_used": {"type": "integer"},
-    "artifacts": {"type": "array"},
+    "artifacts": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/artifact"}
+    },
     "checkpoint_token": {"type": "string"}
   },
-  "additionalProperties": true
+  "additionalProperties": true,
+  "definitions": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "uri"],
+      "properties": {
+        "artifact_id": {"type": "string", "minLength": 1},
+        "name": {"type": "string"},
+        "media_type": {"type": "string"},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "checksum": {"type": "string"},
+        "uri": {"type": "string", "minLength": 1},
+        "metadata": {"type": "object", "additionalProperties": true}
+      }
+    }
+  }
+}`),
+	},
+	{
+		EventType: "artifact.created",
+		Version:   "v1",
+		Schema: []byte(`{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["run_id", "task_id", "artifact"],
+  "properties": {
+    "run_id": {"type": "string"},
+    "task_id": {"type": "string"},
+    "attempt": {"type": "integer", "minimum": 0},
+    "artifact": {"$ref": "#/definitions/artifact"}
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "uri"],
+      "properties": {
+        "artifact_id": {"type": "string", "minLength": 1},
+        "name": {"type": "string"},
+        "media_type": {"type": "string"},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "checksum": {"type": "string"},
+        "uri": {"type": "string", "minLength": 1},
+        "metadata": {"type": "object", "additionalProperties": true},
+        "created_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
 }`),
 	},
 	{
@@ -101,6 +171,26 @@ var baseDefinitions = []Definition{
     "summary": {"type": "string"},
     "detailed_report_ref": {"type": "string"},
     "metrics": {"type": "object"}
+  },
+  "additionalProperties": true
+}`),
+	},
+	{
+		EventType: "budget.approval.requested",
+		Version:   "v1",
+		Schema: []byte(`{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["run_id", "topic_id", "requested_by", "created_at"],
+  "properties": {
+    "run_id": {"type": "string"},
+    "topic_id": {"type": "string"},
+    "requested_by": {"type": "string"},
+    "estimated_cost": {"type": "number"},
+    "threshold": {"type": "number"},
+    "require_approval": {"type": "boolean"},
+    "metadata": {"type": "object", "additionalProperties": true},
+    "created_at": {"type": "string", "format": "date-time"}
   },
   "additionalProperties": true
 }`),

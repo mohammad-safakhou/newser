@@ -35,3 +35,21 @@ groups:
         annotations:
           summary: "Run cost increased beyond budget"
           description: "Total cost of orchestrated runs exceeded $25 in the past 5 minutes. Check budget enforcement."
+  - name: worker-lag-alerts
+    rules:
+      - alert: WorkerStreamLagHigh
+        expr: increase(worker_stream_lag_sum[5m]) / clamp_min(increase(worker_stream_lag_count[5m]), 1) > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker stream lag exceeds 50 entries"
+          description: "Redis stream lag for the worker consumer group stayed above 50 entries for 5 minutes."
+      - alert: WorkerCheckpointStale
+        expr: increase(worker_checkpoint_age_seconds_sum[5m]) / clamp_min(increase(worker_checkpoint_age_seconds_count[5m]), 1) > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker checkpoint age exceeds 5 minutes"
+          description: "Average checkpoint age during resume exceeded five minutes, indicating potential stuck runs."

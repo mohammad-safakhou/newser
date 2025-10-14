@@ -12,3 +12,9 @@ sandbox:
     - LANG
   mount_readonly:
     - /etc/ssl/certs
+crawl_policy:
+  respect_robots: true
+  allow: []
+  disallow: []
+  paywall: []
+  attribution: {}

@@ -2,7 +2,8 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 // Preference diff removed in favor of always-visible Preferences panel
-import { api2, Run, formatDate, ChatMessage, TemporalPolicy, TopicDetail, BudgetConfig, PendingApproval } from '../api'
+import { api2, Run, formatDate, ChatMessage, TemporalPolicy, TopicDetail, BudgetConfig, PendingApproval, RunResult, Evidence, RunSource } from '../api'
+import EvidenceList from '../components/EvidenceList'
 import { useToast } from '../components/Toasts'
 import ConfidenceGauge from '../components/ConfidenceGauge'
 import MarkdownView from '../components/MarkdownView'
@@ -94,7 +95,7 @@ export default function TopicDetailPage() {
         return data.some((r: Run) => r.Status === 'running') ? 4000 : 0
       }
     })
-  const latestQ = useQuery({ queryKey: ['latest', id], queryFn: () => api2.latestResult(id!), enabled: !!id, staleTime: 10_000 })
+  const latestQ = useQuery<RunResult>({ queryKey: ['latest', id], queryFn: () => api2.latestResult(id!), enabled: !!id, staleTime: 10_000 })
   const topicQ = useQuery<TopicDetail>({ queryKey: ['topic', id], queryFn: () => api2.getTopic(id!), enabled: !!id })
   const topicName = qc.getQueryData<any>(['topics'])?.find?.((t: any)=>t.ID===id)?.Name
   const policy: TemporalPolicy | null = topicQ.data?.temporal_policy ?? null
@@ -318,20 +319,32 @@ export default function TopicDetailPage() {
               <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Latest Result</h4>
               {latestQ.isLoading && <Spinner label="Loading latest result" />}
               {latestQ.isError && <div className="text-xs text-red-400">No recent result.</div>}
-              {latestQ.data && (
-                <div className="flex items-center gap-4 text-xs">
-                  <div className="text-slate-400">Confidence:</div>
-                  <ConfidenceGauge value={typeof latestQ.data.confidence === 'number' ? latestQ.data.confidence : null} />
-                  <button className="btn-secondary text-xs ml-auto" onClick={()=>{
-                    // open details for latest run
-                    const runs = (runsQ.data || []) as Run[]
-                    if (runs.length > 0) {
-                      const latest = runs.reduce((a, b) => (new Date(a.StartedAt) > new Date(b.StartedAt) ? a : b))
-                      setOpenRunId(latest.ID)
-                    }
-                  }}>View Details</button>
-                </div>
-              )}
+              {latestQ.data && (() => {
+                const latest = latestQ.data
+                const summary = typeof latest.summary === 'string' ? latest.summary.trim() : ''
+                const evidence = Array.isArray(latest.evidence) ? (latest.evidence as Evidence[]) : []
+                const sources = Array.isArray(latest.sources) ? (latest.sources as RunSource[]) : []
+                const hasEvidence = evidence.length > 0
+                const openLatest = () => {
+                  const runs = (runsQ.data || []) as Run[]
+                  if (runs.length === 0) return
+                  const latestRun = runs.reduce((a, b) => (new Date(a.StartedAt) > new Date(b.StartedAt) ? a : b))
+                  setOpenRunId(latestRun.ID)
+                }
+                return (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-4 text-xs">
+                      <div className="text-slate-400">Confidence:</div>
+                      <ConfidenceGauge value={typeof latest.confidence === 'number' ? latest.confidence : null} />
+                      <button className="btn-secondary text-xs ml-auto" onClick={openLatest}>View Details</button>
+                    </div>
+                    {summary && (
+                      <div className="text-xs text-slate-200 whitespace-pre-wrap leading-relaxed">{summary}</div>
+                    )}
+                    {hasEvidence && <EvidenceList evidence={evidence} sources={sources} />}
+                  </div>
+                )
+              })()}
             </div>
             <div className="card space-y-3">
               <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Runs</h4>

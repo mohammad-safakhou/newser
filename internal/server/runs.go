@@ -14,11 +14,11 @@ import (
 	"strings"
 	"time"
 
-        "github.com/labstack/echo/v4"
-        "github.com/mohammad-safakhou/newser/config"
-        core "github.com/mohammad-safakhou/newser/internal/agent/core"
-        "github.com/mohammad-safakhou/newser/internal/budget"
-        "github.com/mohammad-safakhou/newser/internal/helpers"
+	"github.com/labstack/echo/v4"
+	"github.com/mohammad-safakhou/newser/config"
+	core "github.com/mohammad-safakhou/newser/internal/agent/core"
+	"github.com/mohammad-safakhou/newser/internal/budget"
+	"github.com/mohammad-safakhou/newser/internal/helpers"
 	"github.com/mohammad-safakhou/newser/internal/manifest"
 	"github.com/mohammad-safakhou/newser/internal/memory/semantic"
 	"github.com/mohammad-safakhou/newser/internal/planner"
@@ -111,7 +111,7 @@ type runStreamPayload struct {
 }
 
 var (
-        runsTracer = otel.Tracer("newser/internal/server/runs")
+	runsTracer = otel.Tracer("newser/internal/server/runs")
 )
 
 func NewRunsHandler(cfg *config.Config, store *store.Store, orch *core.Orchestrator, provider core.LLMProvider, ingest *semantic.Ingestor) *RunsHandler {
@@ -344,6 +344,52 @@ func (h *RunsHandler) memoryHits(c echo.Context) error {
 			includeSteps = v
 		}
 	}
+	resp := memoryHitsResponse{Query: query, TopK: topK, Threshold: threshold}
+	if h.sem != nil {
+		results, err := h.sem.SearchSimilar(ctx, core.SemanticSearchRequest{
+			TopicID:      topicID,
+			Query:        query,
+			TopK:         topK,
+			Threshold:    threshold,
+			IncludeSteps: includeSteps,
+		})
+		if err != nil {
+			h.logger.Printf("memoryHits: semantic search failed: %v", err)
+		} else {
+			for _, hit := range results.Runs {
+				if hit.RunID == runID {
+					continue
+				}
+				resp.RunMatches = append(resp.RunMatches, memoryHit{
+					RunID:      hit.RunID,
+					TopicID:    hit.TopicID,
+					Kind:       hit.Kind,
+					Distance:   hit.Distance,
+					Similarity: clampSimilarity(hit.Similarity),
+					Metadata:   hit.Metadata,
+					CreatedAt:  hit.CreatedAt,
+				})
+			}
+			if includeSteps {
+				for _, hit := range results.PlanSteps {
+					resp.PlanStepMatches = append(resp.PlanStepMatches, memoryHit{
+						RunID:      hit.RunID,
+						TopicID:    hit.TopicID,
+						TaskID:     hit.TaskID,
+						Kind:       hit.Kind,
+						Distance:   hit.Distance,
+						Similarity: clampSimilarity(hit.Similarity),
+						Metadata:   hit.Metadata,
+						CreatedAt:  hit.CreatedAt,
+					})
+				}
+			}
+			return c.JSON(http.StatusOK, resp)
+		}
+	}
+	if h.embed == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "embedding provider unavailable")
+	}
 	model := h.cfg.Memory.Semantic.EmbeddingModel
 	if model == "" {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "semantic embedding model not configured")
@@ -354,9 +400,8 @@ func (h *RunsHandler) memoryHits(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadGateway, "failed to embed query")
 	}
 	if len(vectors) == 0 {
-		return c.JSON(http.StatusOK, memoryHitsResponse{Query: query, TopK: topK, Threshold: threshold})
+		return c.JSON(http.StatusOK, resp)
 	}
-	resp := memoryHitsResponse{Query: query, TopK: topK, Threshold: threshold}
 	vector := vectors[0]
 	runMatches, err := h.store.SearchRunEmbeddings(ctx, topicID, vector, topK, threshold)
 	if err != nil {
@@ -709,15 +754,50 @@ func loadPlanDocument(ctx context.Context, st *store.Store, thoughtID string) (*
 	return &doc, nil
 }
 
-func attachSemanticContext(ctx context.Context, cfg *config.Config, st *store.Store, provider core.LLMProvider, topicID string, content string, ctxMap map[string]interface{}) {
+func attachSemanticContext(ctx context.Context, cfg *config.Config, sem *semantic.Ingestor, st *store.Store, provider core.LLMProvider, topicID string, content string, ctxMap map[string]interface{}) {
 	if cfg == nil || !cfg.Memory.Semantic.Enabled {
-		return
-	}
-	if provider == nil {
 		return
 	}
 	query := strings.TrimSpace(content)
 	if query == "" {
+		return
+	}
+	topK := cfg.Memory.Semantic.SearchTopK
+	if topK <= 0 {
+		topK = 5
+	}
+	threshold := cfg.Memory.Semantic.SearchThreshold
+	if sem != nil {
+		results, err := sem.SearchSimilar(ctx, core.SemanticSearchRequest{
+			TopicID:      topicID,
+			Query:        query,
+			TopK:         topK,
+			Threshold:    threshold,
+			IncludeSteps: false,
+		})
+		if err != nil {
+			log.Printf("warn: semantic context search failed: %v", err)
+		} else if len(results.Runs) > 0 {
+			entries := make([]map[string]interface{}, 0, len(results.Runs))
+			for _, hit := range results.Runs {
+				entry := map[string]interface{}{
+					"run_id":     hit.RunID,
+					"topic_id":   hit.TopicID,
+					"kind":       hit.Kind,
+					"distance":   hit.Distance,
+					"similarity": hit.Similarity,
+					"created_at": hit.CreatedAt,
+				}
+				if hit.Metadata != nil {
+					entry["metadata"] = hit.Metadata
+				}
+				entries = append(entries, entry)
+			}
+			ctxMap["semantic_similar_runs"] = entries
+			return
+		}
+	}
+	if provider == nil {
 		return
 	}
 	vectors, err := provider.Embed(ctx, cfg.Memory.Semantic.EmbeddingModel, []string{query})
@@ -728,11 +808,6 @@ func attachSemanticContext(ctx context.Context, cfg *config.Config, st *store.St
 	if len(vectors) == 0 {
 		return
 	}
-	topK := cfg.Memory.Semantic.SearchTopK
-	if topK <= 0 {
-		topK = 5
-	}
-	threshold := cfg.Memory.Semantic.SearchThreshold
 	results, err := st.SearchRunEmbeddings(ctx, topicID, vectors[0], topK, threshold)
 	if err != nil {
 		log.Printf("warn: semantic context search failed: %v", err)
@@ -1211,6 +1286,13 @@ func (h *RunsHandler) budgetDecision(c echo.Context) error {
 	if err := h.store.ResolveBudgetApproval(ctx, runID, req.Approved, userID, reasonPtr); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
+	if err := h.store.RecordBudgetOverride(ctx, runID, topicID, userID, req.Approved, reasonPtr); err != nil {
+		if h.logger != nil {
+			h.logger.Printf("warn: record budget override failed: %v", err)
+		} else {
+			log.Printf("warn: record budget override failed: %v", err)
+		}
+	}
 	if req.Approved {
 		if err := h.store.SetRunStatus(ctx, runID, "running"); err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
@@ -1336,7 +1418,7 @@ func processRun(ctx context.Context, cfg *config.Config, st *store.Store, orch *
 
 	// Construct thought from preferences (not user-defined name)
 	content := deriveThoughtContentFromPrefs(prefs)
-	attachSemanticContext(ctx, cfg, st, embed, topicID, content, ctxMap)
+	attachSemanticContext(ctx, cfg, sem, st, embed, topicID, content, ctxMap)
 	budgetCfg, hasBudget, err := st.GetTopicBudgetConfig(ctx, topicID)
 	if err != nil {
 		return fmt.Errorf("load budget config: %w", err)
@@ -1376,14 +1458,32 @@ func processRun(ctx context.Context, cfg *config.Config, st *store.Store, orch *
 	if err != nil {
 		var exceeded budget.ErrExceeded
 		var approval budget.ErrApprovalRequired
+		var breach budget.ErrBreach
 		switch {
 		case errors.As(err, &approval):
 			if hasBudget {
 				_ = st.MarkRunPendingApproval(ctx, runID)
 				_ = st.CreateBudgetApproval(ctx, runID, topicID, userID, approval.EstimatedCost, approval.Threshold)
 			}
+		case errors.As(err, &breach):
+			reason := budget.FormatBreachReason(budgetCfg, breach.Usage, breach.ErrExceeded)
+			_ = st.MarkRunBudgetOverrun(ctx, runID, reason)
+			if err := st.RecordBudgetBreach(ctx, runID, topicID, budgetCfg, breach.Usage, breach.ErrExceeded); err != nil {
+				log.Printf("warn: record budget breach failed: %v", err)
+			}
 		case errors.As(err, &exceeded):
-			_ = st.MarkRunBudgetOverrun(ctx, runID, exceeded.Error())
+			reason := budget.FormatBreachReason(budgetCfg, budget.Usage{}, exceeded)
+			_ = st.MarkRunBudgetOverrun(ctx, runID, reason)
+			details := map[string]interface{}{
+				"message":     exceeded.Error(),
+				"kind":        exceeded.Kind,
+				"usage_label": exceeded.Usage,
+				"limit_label": exceeded.Limit,
+				"config":      budget.SerializeConfig(budgetCfg),
+			}
+			if err := st.RecordBudgetEvent(ctx, store.BudgetEventRecord{RunID: runID, TopicID: topicID, EventType: "breach", Details: details}); err != nil {
+				log.Printf("warn: record budget exceeded event failed: %v", err)
+			}
 		}
 		return err
 	}
@@ -1881,11 +1981,11 @@ func safeString(v interface{}) string {
 	if v == nil {
 		return ""
 	}
-        if s, ok := v.(string); ok {
-                return helpers.SanitizeHTMLStrict(s)
-        }
-        b, _ := json.Marshal(v)
-        return helpers.SanitizeHTMLStrict(string(b))
+	if s, ok := v.(string); ok {
+		return helpers.SanitizeHTMLStrict(s)
+	}
+	b, _ := json.Marshal(v)
+	return helpers.SanitizeHTMLStrict(string(b))
 }
 func safeFloat(v interface{}) float64 {
 	switch t := v.(type) {

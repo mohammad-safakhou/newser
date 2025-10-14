@@ -76,23 +76,19 @@ func (h *PlansHandler) dryRun(c echo.Context) error {
 	if len(req.Plan) == 0 {
 		return echo.NewHTTPError(http.StatusBadRequest, "plan payload is required")
 	}
-	if err := planner.ValidatePlanDocument(req.Plan); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	}
-
-	var doc planner.PlanDocument
-	if err := json.Unmarshal(req.Plan, &doc); err != nil {
+	doc, normalized, err := planner.NormalizePlanDocument(req.Plan)
+	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 
 	// Derive metrics
 	taskCount := len(doc.Tasks)
-	estimatedCost, estimatedTime := h.estimatePlan(&doc)
+	estimatedCost, estimatedTime := h.estimatePlan(doc)
 	confidence := doc.Confidence
 
 	planID := doc.PlanID
 	if h.Repo != nil {
-		id, err := h.Repo.SavePlanGraph(c.Request().Context(), req.ThoughtID, &doc, req.Plan)
+		id, err := h.Repo.SavePlanGraph(c.Request().Context(), req.ThoughtID, doc, normalized)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 		}

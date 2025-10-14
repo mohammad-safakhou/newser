@@ -5,12 +5,11 @@ import (
 	"fmt"
 
 	"github.com/mohammad-safakhou/newser/internal/executor"
-	"github.com/mohammad-safakhou/newser/internal/queue/streams"
 	otelmetric "go.opentelemetry.io/otel/metric"
 )
 
 type taskDispatchRunner struct {
-	publisher  *streams.Publisher
+	publisher  eventPublisher
 	taskStream string
 	counter    otelmetric.Int64Counter
 }

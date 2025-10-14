@@ -36,6 +36,50 @@
         }
       ],
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Stream Lag",
+      "targets": [
+        {
+          "expr": "increase(worker_stream_lag_sum[5m]) / clamp_min(increase(worker_stream_lag_count[5m]), 1)",
+          "legendFormat": "lag"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Pending Entries",
+      "targets": [
+        {
+          "expr": "increase(worker_stream_pending_sum[5m]) / clamp_min(increase(worker_stream_pending_count[5m]), 1)",
+          "legendFormat": "pending"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Oldest Idle Pending",
+      "targets": [
+        {
+          "expr": "increase(worker_stream_oldest_idle_seconds_sum[5m]) / clamp_min(increase(worker_stream_oldest_idle_seconds_count[5m]), 1)",
+          "legendFormat": "seconds"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Checkpoint Age",
+      "targets": [
+        {
+          "expr": "increase(worker_checkpoint_age_seconds_sum[5m]) / clamp_min(increase(worker_checkpoint_age_seconds_count[5m]), 1)",
+          "legendFormat": "age"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 }
     }
   ]
 }

@@ -73,7 +73,14 @@
     "policy_file": "config/security_policy.yaml",
     "default_timeout": "120s",
     "default_cpu": 1,
-    "default_memory": "1Gi"
+    "default_memory": "1Gi",
+    "crawl_policy": {
+      "respect_robots": true,
+      "allow": [],
+      "disallow": [],
+      "paywall": [],
+      "attribution": {}
+    }
   },
   "agents": {
     "max_concurrent_agents": 5,
@@ -112,7 +119,10 @@
       "search_top_k": 5,
       "search_threshold": 0.8,
       "writer_batch_size": 32,
-      "rebuild_on_startup": false
+      "rebuild_on_startup": false,
+      "delta_threshold": 0.85,
+      "delta_window": "168h",
+      "delta_include_steps": true
     }
   },
   "storage": {

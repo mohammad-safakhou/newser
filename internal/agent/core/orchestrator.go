@@ -95,6 +95,19 @@ func NewOrchestrator(cfg *config.Config, logger *log.Logger, telemetry *telemetr
 	return o, nil
 }
 
+// LLM exposes the orchestrator's underlying LLM provider.
+func (o *Orchestrator) LLM() LLMProvider {
+	return o.llmProvider
+}
+
+// AttachSemanticMemory wires semantic memory lookup into the planner.
+func (o *Orchestrator) AttachSemanticMemory(memory SemanticMemory) {
+	if o == nil || o.planner == nil {
+		return
+	}
+	o.planner.SetSemanticMemory(memory)
+}
+
 // ProcessThought processes a user thought and returns comprehensive results
 func (o *Orchestrator) ProcessThought(ctx context.Context, thought UserThought) (ProcessingResult, error) {
 	startTime := time.Now()
@@ -406,13 +419,31 @@ func (o *Orchestrator) executeTasks(ctx context.Context, thought UserThought, pl
 					if err := monitor.Add(result.Cost, result.TokensUsed); err != nil {
 						taskSpan.RecordError(err)
 						taskSpan.SetStatus(codes.Error, err.Error())
-						errCh <- err
+						returnErr := err
+						if plan.BudgetConfig != nil {
+							usage := budget.UsageFromMonitor(monitor)
+							o.telemetry.RecordBudgetUsage(ctx, usage, *plan.BudgetConfig, true)
+							var exceeded budget.ErrExceeded
+							if errors.As(err, &exceeded) {
+								returnErr = budget.NewBreach(exceeded, usage)
+							}
+						}
+						errCh <- returnErr
 						return
 					}
 					if err := monitor.CheckTime(); err != nil {
 						taskSpan.RecordError(err)
 						taskSpan.SetStatus(codes.Error, err.Error())
-						errCh <- err
+						returnErr := err
+						if plan.BudgetConfig != nil {
+							usage := budget.UsageFromMonitor(monitor)
+							o.telemetry.RecordBudgetUsage(ctx, usage, *plan.BudgetConfig, true)
+							var exceeded budget.ErrExceeded
+							if errors.As(err, &exceeded) {
+								returnErr = budget.NewBreach(exceeded, usage)
+							}
+						}
+						errCh <- returnErr
 						return
 					}
 				}
@@ -594,31 +625,22 @@ func (o *Orchestrator) synthesizeResults(ctx context.Context, thought UserThough
 		"edges": kgEdges,
 		"topic": thought.Content,
 	}
+	var budgetUsage budget.Usage
 	if monitor != nil {
-		costUsed, tokensUsed, elapsed := monitor.Usage()
-		budgetMeta := map[string]interface{}{
-			"cost_used":   costUsed,
-			"tokens_used": tokensUsed,
-			"elapsed":     elapsed.String(),
+		budgetUsage = budget.UsageFromMonitor(monitor)
+		result.Metadata["budget_usage"] = budget.SerializeUsage(budgetUsage)
+		if plan.BudgetEstimate != nil && plan.BudgetConfig != nil {
+			result.Metadata["budget_report"] = budget.BuildReport(*plan.BudgetConfig, *plan.BudgetEstimate, budgetUsage)
 		}
-		cfg := monitor.Config()
-		if cfg.MaxCost != nil {
-			budgetMeta["max_cost"] = *cfg.MaxCost
+	}
+	if monitor == nil {
+		// still include estimate for consumers even when no monitor was instantiated.
+		if plan.BudgetEstimate != nil && plan.BudgetConfig != nil {
+			result.Metadata["budget_report"] = budget.BuildReport(*plan.BudgetConfig, *plan.BudgetEstimate, budgetUsage)
 		}
-		if cfg.MaxTokens != nil {
-			budgetMeta["max_tokens"] = *cfg.MaxTokens
-		}
-		if cfg.MaxTimeSeconds != nil {
-			budgetMeta["max_time_seconds"] = *cfg.MaxTimeSeconds
-		}
-		if cfg.ApprovalThreshold != nil {
-			budgetMeta["approval_threshold"] = *cfg.ApprovalThreshold
-		}
-		budgetMeta["require_approval"] = cfg.RequireApproval
-		if len(cfg.Metadata) > 0 {
-			budgetMeta["metadata"] = cfg.Metadata
-		}
-		result.Metadata["budget_usage"] = budgetMeta
+	}
+	if plan.BudgetConfig != nil {
+		o.telemetry.RecordBudgetUsage(ctx, budgetUsage, *plan.BudgetConfig, false)
 	}
 	if len(allSources) > 0 {
 		ensureSourceIDs(&allSources)
@@ -662,6 +684,9 @@ func (o *Orchestrator) synthesizeResults(ctx context.Context, thought UserThough
 			delete(result.Metadata, "digest_stats")
 		} else {
 			items = filtered
+			if ev := buildEvidence(items); len(ev) > 0 {
+				result.Evidence = ev
+			}
 			arr := make([]interface{}, len(items))
 			for i := range items {
 				arr[i] = items[i]

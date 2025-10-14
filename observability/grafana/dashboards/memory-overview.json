@@ -1,0 +1,74 @@
+{
+  "title": "Memory Overview",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "30s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Delta Items Processed",
+      "targets": [
+        {
+          "expr": "increase(memory_delta_items[5m])",
+          "legendFormat": "items"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Delta Duplicate Ratio",
+      "targets": [
+        {
+          "expr": "increase(memory_delta_duplicates[5m]) / clamp_min(increase(memory_delta_items[5m]), 1)",
+          "legendFormat": "ratio"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Summaries Executed",
+      "targets": [
+        {
+          "expr": "increase(memory_summary_runs[5m])",
+          "legendFormat": "runs"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Summary Failures",
+      "targets": [
+        {
+          "expr": "increase(memory_summary_failures[5m])",
+          "legendFormat": "failures"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Summary Latency (ms)",
+      "targets": [
+        {
+          "expr": "increase(memory_summary_latency_ms_sum[5m]) / clamp_min(increase(memory_summary_latency_ms_count[5m]), 1)",
+          "legendFormat": "avg latency"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Summary Job Status",
+      "targets": [
+        {
+          "expr": "increase(memory_job_status_total{job_type=\"summarise\"}[5m])",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 }
+    }
+  ]
+}

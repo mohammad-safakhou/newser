@@ -31,6 +31,7 @@ type ProcessingResult struct {
 	Sources        []Source               `json:"sources"`
 	Highlights     []Highlight            `json:"highlights"`
 	Conflicts      []Conflict             `json:"conflicts,omitempty"`
+	Evidence       []Evidence             `json:"evidence,omitempty"`
 	Confidence     float64                `json:"confidence"`
 	ProcessingTime time.Duration          `json:"processing_time"`
 	CostEstimate   float64                `json:"cost_estimate"`
@@ -78,6 +79,16 @@ type Conflict struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// Evidence links statements to supporting sources.
+type Evidence struct {
+	ID        string                 `json:"id"`
+	Statement string                 `json:"statement"`
+	SourceIDs []string               `json:"source_ids"`
+	Category  string                 `json:"category,omitempty"`
+	Score     float64                `json:"score,omitempty"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+}
+
 // AgentTask represents a task for an agent to execute
 type AgentTask struct {
 	ID          string                 `json:"id"`
@@ -120,6 +131,8 @@ type PlanningResult struct {
 	Estimates              *planner.PlanEstimates  `json:"estimates,omitempty"`
 	Graph                  *planner.PlanDocument   `json:"graph,omitempty"`
 	RawJSON                []byte                  `json:"-"`
+	BudgetEstimate         *budget.Estimate        `json:"-"`
+	Semantic               *SemanticSearchResults  `json:"semantic_context,omitempty"`
 	TemporalPolicy         *policypkg.UpdatePolicy `json:"temporal_policy,omitempty"`
 	BudgetConfig           *budget.Config          `json:"-"`
 	BudgetApprovalRequired bool                    `json:"budget_approval_required"`
@@ -294,6 +307,49 @@ type Storage interface {
 
 	// DeleteHighlight deletes a highlight
 	DeleteHighlight(ctx context.Context, highlightID string) error
+}
+
+// SemanticMemory exposes semantic search capabilities used by the planner.
+type SemanticMemory interface {
+	SearchSimilar(ctx context.Context, req SemanticSearchRequest) (SemanticSearchResults, error)
+}
+
+// SemanticSearchRequest encapsulates planner search criteria.
+type SemanticSearchRequest struct {
+	TopicID      string
+	Query        string
+	TopK         int
+	Threshold    float64
+	IncludeSteps bool
+}
+
+// SemanticSearchResults captures run-level and plan-step matches from memory.
+type SemanticSearchResults struct {
+	Runs      []SemanticRunMatch
+	PlanSteps []SemanticPlanMatch
+}
+
+// SemanticRunMatch represents a semantic memory run hit.
+type SemanticRunMatch struct {
+	RunID      string
+	TopicID    string
+	Kind       string
+	Distance   float64
+	Similarity float64
+	Metadata   map[string]interface{}
+	CreatedAt  time.Time
+}
+
+// SemanticPlanMatch represents a semantic memory plan-step hit.
+type SemanticPlanMatch struct {
+	RunID      string
+	TopicID    string
+	TaskID     string
+	Kind       string
+	Distance   float64
+	Similarity float64
+	Metadata   map[string]interface{}
+	CreatedAt  time.Time
 }
 
 // PlanRepository persists validated planner graphs for later inspection or replay.

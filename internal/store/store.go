@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lib/pq"
 	core "github.com/mohammad-safakhou/newser/internal/agent/core"
 	"github.com/mohammad-safakhou/newser/internal/budget"
@@ -37,6 +39,24 @@ const (
 
 // DefaultEmbeddingDimensions indicates the expected length of semantic vectors stored in pgvector columns.
 const DefaultEmbeddingDimensions = 1536
+
+const (
+	// Procedural template version statuses.
+	ProceduralTemplateStatusDraft           = "draft"
+	ProceduralTemplateStatusPendingApproval = "pending_approval"
+	ProceduralTemplateStatusApproved        = "approved"
+	ProceduralTemplateStatusDeprecated      = "deprecated"
+
+	// Memory job types.
+	MemoryJobTypeSummarise = "summarise"
+	MemoryJobTypePrune     = "prune"
+
+	// Memory job statuses.
+	MemoryJobStatusPending = "pending"
+	MemoryJobStatusRunning = "running"
+	MemoryJobStatusSuccess = "success"
+	MemoryJobStatusFailed  = "failed"
+)
 
 // Checkpoint captures durable progress for a run/task stage.
 type Checkpoint struct {
@@ -131,6 +151,574 @@ type PlanStepEmbeddingSearchResult struct {
 	CreatedAt time.Time
 }
 
+// MemoryDeltaRecord captures a summary of a delta operation for auditing.
+type MemoryDeltaRecord struct {
+	TopicID        string
+	TotalItems     int
+	NovelItems     int
+	DuplicateItems int
+	Semantic       bool
+	Metadata       map[string]interface{}
+	CreatedAt      time.Time
+}
+
+// EvidenceRecord captures statement-to-source linkage for a run.
+type EvidenceRecord struct {
+	RunID     string
+	ClaimID   string
+	Statement string
+	SourceIDs []string
+	Metadata  map[string]interface{}
+	CreatedAt time.Time
+}
+
+// ProceduralTemplateRecord captures high-level metadata for a procedural template.
+type ProceduralTemplateRecord struct {
+	ID             string
+	TopicID        string
+	Name           string
+	Description    string
+	CurrentVersion int
+	CreatedBy      string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// ProceduralTemplateVersionRecord stores a concrete, versioned template definition.
+type ProceduralTemplateVersionRecord struct {
+	ID         int64
+	TemplateID string
+	Version    int
+	Status     string
+	Graph      json.RawMessage
+	Parameters json.RawMessage
+	Metadata   json.RawMessage
+	Changelog  string
+	ApprovedBy string
+	ApprovedAt *time.Time
+	CreatedAt  time.Time
+}
+
+// MemoryJobRecord represents a scheduled summarisation/pruning job entry.
+type MemoryJobRecord struct {
+	ID           int64
+	TopicID      string
+	JobType      string
+	Status       string
+	ScheduledFor time.Time
+	StartedAt    *time.Time
+	CompletedAt  *time.Time
+	Attempts     int
+	LastError    string
+	Params       json.RawMessage
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// MemoryJobResultRecord stores metrics/outcome for a completed memory job.
+type MemoryJobResultRecord struct {
+	JobID     int64
+	Metrics   json.RawMessage
+	Summary   string
+	ErrorMsg  string
+	CreatedAt time.Time
+}
+
+// AttachmentRecord captures metadata about artifacts persisted to attachment storage.
+type AttachmentRecord struct {
+	ID                 string
+	RunID              string
+	TaskID             string
+	Attempt            int
+	ArtifactID         string
+	Name               string
+	MediaType          string
+	SizeBytes          int64
+	Checksum           string
+	StorageURI         string
+	RetentionExpiresAt *time.Time
+	Metadata           json.RawMessage
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
+// CreateProceduralTemplate inserts a new procedural template shell.
+func (s *Store) CreateProceduralTemplate(ctx context.Context, rec ProceduralTemplateRecord) (ProceduralTemplateRecord, error) {
+	if strings.TrimSpace(rec.Name) == "" {
+		return ProceduralTemplateRecord{}, fmt.Errorf("template name required")
+	}
+	desc := strings.TrimSpace(rec.Description)
+	topic := strings.TrimSpace(rec.TopicID)
+	createdBy := strings.TrimSpace(rec.CreatedBy)
+
+	row := s.DB.QueryRowContext(ctx, `
+INSERT INTO procedural_templates (topic_id, name, description, created_by)
+VALUES ($1,$2,$3,$4)
+RETURNING id, topic_id, description, current_version, created_by, created_at, updated_at
+`, nullableString(topic), rec.Name, nullableString(desc), nullableString(createdBy))
+
+	var topicID sql.NullString
+	var description sql.NullString
+	var creator sql.NullString
+	if err := row.Scan(&rec.ID, &topicID, &description, &rec.CurrentVersion, &creator, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+		return ProceduralTemplateRecord{}, err
+	}
+	if topicID.Valid {
+		rec.TopicID = topicID.String
+	}
+	rec.Name = rec.Name
+	if description.Valid {
+		rec.Description = description.String
+	}
+	if creator.Valid {
+		rec.CreatedBy = creator.String
+	}
+	return rec, nil
+}
+
+// GetProceduralTemplate fetches a template by identifier.
+func (s *Store) GetProceduralTemplate(ctx context.Context, id string) (ProceduralTemplateRecord, bool, error) {
+	if strings.TrimSpace(id) == "" {
+		return ProceduralTemplateRecord{}, false, fmt.Errorf("template id required")
+	}
+	row := s.DB.QueryRowContext(ctx, `
+SELECT id, topic_id, name, description, current_version, created_by, created_at, updated_at
+FROM procedural_templates
+WHERE id=$1
+`, id)
+	var rec ProceduralTemplateRecord
+	var topicID sql.NullString
+	var description sql.NullString
+	var creator sql.NullString
+	if err := row.Scan(&rec.ID, &topicID, &rec.Name, &description, &rec.CurrentVersion, &creator, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ProceduralTemplateRecord{}, false, nil
+		}
+		return ProceduralTemplateRecord{}, false, err
+	}
+	if topicID.Valid {
+		rec.TopicID = topicID.String
+	}
+	if description.Valid {
+		rec.Description = description.String
+	}
+	if creator.Valid {
+		rec.CreatedBy = creator.String
+	}
+	return rec, true, nil
+}
+
+// ListProceduralTemplates returns templates optionally filtered by topic.
+func (s *Store) ListProceduralTemplates(ctx context.Context, topicID string) ([]ProceduralTemplateRecord, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if strings.TrimSpace(topicID) == "" {
+		rows, err = s.DB.QueryContext(ctx, `
+SELECT id, topic_id, name, description, current_version, created_by, created_at, updated_at
+FROM procedural_templates
+ORDER BY created_at DESC
+`)
+	} else {
+		rows, err = s.DB.QueryContext(ctx, `
+SELECT id, topic_id, name, description, current_version, created_by, created_at, updated_at
+FROM procedural_templates
+WHERE topic_id=$1
+ORDER BY created_at DESC
+`, topicID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ProceduralTemplateRecord
+	for rows.Next() {
+		var rec ProceduralTemplateRecord
+		var topic sql.NullString
+		var description sql.NullString
+		var creator sql.NullString
+		if err := rows.Scan(&rec.ID, &topic, &rec.Name, &description, &rec.CurrentVersion, &creator, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if topic.Valid {
+			rec.TopicID = topic.String
+		}
+		if description.Valid {
+			rec.Description = description.String
+		}
+		if creator.Valid {
+			rec.CreatedBy = creator.String
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// CreateProceduralTemplateVersion inserts a new template version and optionally updates the active version.
+func (s *Store) CreateProceduralTemplateVersion(ctx context.Context, rec ProceduralTemplateVersionRecord) (ProceduralTemplateVersionRecord, error) {
+	if strings.TrimSpace(rec.TemplateID) == "" {
+		return ProceduralTemplateVersionRecord{}, fmt.Errorf("template_id required")
+	}
+	if len(rec.Graph) == 0 {
+		return ProceduralTemplateVersionRecord{}, fmt.Errorf("graph payload required")
+	}
+	params := defaultJSON(rec.Parameters)
+	meta := defaultJSON(rec.Metadata)
+	status := rec.Status
+	if status == "" {
+		status = ProceduralTemplateStatusDraft
+	}
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return ProceduralTemplateVersionRecord{}, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	version := rec.Version
+	if version <= 0 {
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) + 1 FROM procedural_template_versions WHERE template_id=$1`, rec.TemplateID).Scan(&version); err != nil {
+			return ProceduralTemplateVersionRecord{}, err
+		}
+	}
+
+	var approvedBy sql.NullString
+	if strings.TrimSpace(rec.ApprovedBy) != "" {
+		approvedBy = sql.NullString{String: strings.TrimSpace(rec.ApprovedBy), Valid: true}
+	}
+	var approvedAt sql.NullTime
+	if rec.ApprovedAt != nil && !rec.ApprovedAt.IsZero() {
+		approvedAt = sql.NullTime{Time: rec.ApprovedAt.UTC(), Valid: true}
+	}
+
+	insert := tx.QueryRowContext(ctx, `
+INSERT INTO procedural_template_versions (template_id, version, status, graph, parameters, metadata, changelog, approved_by, approved_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+RETURNING id, status, graph, parameters, metadata, changelog, approved_by, approved_at, created_at
+`, rec.TemplateID, version, status, rec.Graph, params, meta, nullableString(strings.TrimSpace(rec.Changelog)), approvedBy, approvedAt)
+
+	var dbApprovedBy sql.NullString
+	var dbApprovedAt sql.NullTime
+	if err := insert.Scan(&rec.ID, &rec.Status, &rec.Graph, &rec.Parameters, &rec.Metadata, &rec.Changelog, &dbApprovedBy, &dbApprovedAt, &rec.CreatedAt); err != nil {
+		return ProceduralTemplateVersionRecord{}, err
+	}
+	rec.Version = version
+	if dbApprovedBy.Valid {
+		rec.ApprovedBy = dbApprovedBy.String
+	}
+	if dbApprovedAt.Valid {
+		ts := dbApprovedAt.Time
+		rec.ApprovedAt = &ts
+	}
+
+	updateQuery := `UPDATE procedural_templates SET updated_at = NOW() WHERE id=$1`
+	if _, err := tx.ExecContext(ctx, updateQuery, rec.TemplateID); err != nil {
+		return ProceduralTemplateVersionRecord{}, err
+	}
+
+	if rec.Status == ProceduralTemplateStatusApproved {
+		if _, err := tx.ExecContext(ctx, `UPDATE procedural_templates SET current_version=$1, updated_at=NOW() WHERE id=$2`, rec.Version, rec.TemplateID); err != nil {
+			return ProceduralTemplateVersionRecord{}, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return ProceduralTemplateVersionRecord{}, err
+	}
+	return rec, nil
+}
+
+// ListProceduralTemplateVersions returns all versions for the specified template ordered by newest first.
+func (s *Store) ListProceduralTemplateVersions(ctx context.Context, templateID string) ([]ProceduralTemplateVersionRecord, error) {
+	if strings.TrimSpace(templateID) == "" {
+		return nil, fmt.Errorf("template_id required")
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT id, template_id, version, status, graph, parameters, metadata, changelog, approved_by, approved_at, created_at
+FROM procedural_template_versions
+WHERE template_id=$1
+ORDER BY version DESC
+`, templateID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ProceduralTemplateVersionRecord
+	for rows.Next() {
+		var rec ProceduralTemplateVersionRecord
+		var approvedBy sql.NullString
+		var approvedAt sql.NullTime
+		if err := rows.Scan(&rec.ID, &rec.TemplateID, &rec.Version, &rec.Status, &rec.Graph, &rec.Parameters, &rec.Metadata, &rec.Changelog, &approvedBy, &approvedAt, &rec.CreatedAt); err != nil {
+			return nil, err
+		}
+		if approvedBy.Valid {
+			rec.ApprovedBy = approvedBy.String
+		}
+		if approvedAt.Valid {
+			ts := approvedAt.Time
+			rec.ApprovedAt = &ts
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// CreateMemoryJob enqueues a summarisation or pruning job.
+func (s *Store) CreateMemoryJob(ctx context.Context, rec MemoryJobRecord) (MemoryJobRecord, error) {
+	if strings.TrimSpace(rec.TopicID) == "" {
+		return MemoryJobRecord{}, fmt.Errorf("topic_id required")
+	}
+	if rec.JobType != MemoryJobTypeSummarise && rec.JobType != MemoryJobTypePrune {
+		return MemoryJobRecord{}, fmt.Errorf("invalid job_type: %s", rec.JobType)
+	}
+	status := rec.Status
+	if status == "" {
+		status = MemoryJobStatusPending
+	}
+	scheduled := rec.ScheduledFor
+	if scheduled.IsZero() {
+		scheduled = time.Now().UTC()
+	}
+	var started interface{}
+	if rec.StartedAt != nil && !rec.StartedAt.IsZero() {
+		t := rec.StartedAt.UTC()
+		started = t
+	}
+	params := defaultJSON(rec.Params)
+
+	row := s.DB.QueryRowContext(ctx, `
+INSERT INTO memory_jobs (topic_id, job_type, status, scheduled_for, started_at, params)
+VALUES ($1,$2,$3,$4,$5,$6)
+RETURNING id, status, scheduled_for, started_at, completed_at, attempts, COALESCE(last_error,''), params, created_at, updated_at
+`, rec.TopicID, rec.JobType, status, scheduled, started, params)
+
+	var startedAt sql.NullTime
+	var completedAt sql.NullTime
+	if err := row.Scan(&rec.ID, &rec.Status, &rec.ScheduledFor, &startedAt, &completedAt, &rec.Attempts, &rec.LastError, &rec.Params, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+		return MemoryJobRecord{}, err
+	}
+	if startedAt.Valid {
+		ts := startedAt.Time
+		rec.StartedAt = &ts
+	}
+	if completedAt.Valid {
+		ts := completedAt.Time
+		rec.CompletedAt = &ts
+	}
+	return rec, nil
+}
+
+// CompleteMemoryJob updates status/metrics for a finished memory job.
+func (s *Store) CompleteMemoryJob(ctx context.Context, jobID int64, status string, result MemoryJobResultRecord) error {
+	if jobID == 0 {
+		return fmt.Errorf("job_id required")
+	}
+	if status != MemoryJobStatusSuccess && status != MemoryJobStatusFailed {
+		return fmt.Errorf("invalid status: %s", status)
+	}
+	metrics := defaultJSON(result.Metrics)
+	summary := strings.TrimSpace(result.Summary)
+	lastError := strings.TrimSpace(result.ErrorMsg)
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	completedAt := time.Now().UTC()
+	res, err := tx.ExecContext(ctx, `
+UPDATE memory_jobs
+SET status=$1,
+    completed_at=$2,
+    updated_at=NOW(),
+    last_error=$3
+WHERE id=$4
+`, status, completedAt, nullableString(lastError), jobID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("memory job %d not found", jobID)
+	}
+
+	if len(metrics) > 0 || summary != "" {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO memory_job_results (job_id, metrics, summary)
+VALUES ($1,$2,$3)
+`, jobID, metrics, nullableString(summary)); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ListMemoryJobs retrieves jobs filtered by topic and/or type.
+func (s *Store) ListMemoryJobs(ctx context.Context, topicID, jobType string, limit int) ([]MemoryJobRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	var rows *sql.Rows
+	var err error
+	if strings.TrimSpace(topicID) == "" && strings.TrimSpace(jobType) == "" {
+		rows, err = s.DB.QueryContext(ctx, `
+SELECT id, topic_id, job_type, status, scheduled_for, started_at, completed_at, attempts, COALESCE(last_error,''), params, created_at, updated_at
+FROM memory_jobs
+ORDER BY created_at DESC
+LIMIT $1
+`, limit)
+	} else if strings.TrimSpace(jobType) == "" {
+		rows, err = s.DB.QueryContext(ctx, `
+SELECT id, topic_id, job_type, status, scheduled_for, started_at, completed_at, attempts, COALESCE(last_error,''), params, created_at, updated_at
+FROM memory_jobs
+WHERE topic_id=$1
+ORDER BY created_at DESC
+LIMIT $2
+`, topicID, limit)
+	} else {
+		rows, err = s.DB.QueryContext(ctx, `
+SELECT id, topic_id, job_type, status, scheduled_for, started_at, completed_at, attempts, COALESCE(last_error,''), params, created_at, updated_at
+FROM memory_jobs
+WHERE topic_id=$1 AND job_type=$2
+ORDER BY created_at DESC
+LIMIT $3
+`, topicID, jobType, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []MemoryJobRecord
+	for rows.Next() {
+		var rec MemoryJobRecord
+		var started sql.NullTime
+		var completed sql.NullTime
+		if err := rows.Scan(&rec.ID, &rec.TopicID, &rec.JobType, &rec.Status, &rec.ScheduledFor, &started, &completed, &rec.Attempts, &rec.LastError, &rec.Params, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if started.Valid {
+			ts := started.Time
+			rec.StartedAt = &ts
+		}
+		if completed.Valid {
+			ts := completed.Time
+			rec.CompletedAt = &ts
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// InsertAttachment stores metadata about an execution artifact.
+func (s *Store) InsertAttachment(ctx context.Context, rec AttachmentRecord) (AttachmentRecord, error) {
+	if strings.TrimSpace(rec.RunID) == "" {
+		return AttachmentRecord{}, fmt.Errorf("run_id required")
+	}
+	if strings.TrimSpace(rec.TaskID) == "" {
+		return AttachmentRecord{}, fmt.Errorf("task_id required")
+	}
+	if strings.TrimSpace(rec.ArtifactID) == "" {
+		return AttachmentRecord{}, fmt.Errorf("artifact_id required")
+	}
+	if strings.TrimSpace(rec.StorageURI) == "" {
+		return AttachmentRecord{}, fmt.Errorf("storage_uri required")
+	}
+	metadata := defaultJSON(rec.Metadata)
+	var retention interface{}
+	if rec.RetentionExpiresAt != nil && !rec.RetentionExpiresAt.IsZero() {
+		retention = rec.RetentionExpiresAt.UTC()
+	}
+
+	row := s.DB.QueryRowContext(ctx, `
+INSERT INTO attachments (run_id, task_id, attempt, artifact_id, name, media_type, size_bytes, checksum, storage_uri, retention_expires_at, metadata)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+RETURNING id, run_id, task_id, attempt, artifact_id,
+        COALESCE(name,''), COALESCE(media_type,''), COALESCE(size_bytes,0),
+        COALESCE(checksum,''), storage_uri, retention_expires_at, metadata, created_at, updated_at
+`, rec.RunID, rec.TaskID, rec.Attempt, rec.ArtifactID, nullableString(strings.TrimSpace(rec.Name)), nullableString(strings.TrimSpace(rec.MediaType)), nullableInt64(rec.SizeBytes), nullableString(strings.TrimSpace(rec.Checksum)), rec.StorageURI, retention, metadata)
+
+	var retentionTime sql.NullTime
+	if err := row.Scan(&rec.ID, &rec.RunID, &rec.TaskID, &rec.Attempt, &rec.ArtifactID, &rec.Name, &rec.MediaType, &rec.SizeBytes, &rec.Checksum, &rec.StorageURI, &retentionTime, &rec.Metadata, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+		return AttachmentRecord{}, err
+	}
+	if retentionTime.Valid {
+		ts := retentionTime.Time
+		rec.RetentionExpiresAt = &ts
+	}
+	return rec, nil
+}
+
+// ListAttachmentsByRun returns all attachments associated with a run.
+func (s *Store) ListAttachmentsByRun(ctx context.Context, runID string) ([]AttachmentRecord, error) {
+	if strings.TrimSpace(runID) == "" {
+		return nil, fmt.Errorf("run_id required")
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT id, run_id, task_id, attempt, artifact_id,
+       COALESCE(name,''), COALESCE(media_type,''), COALESCE(size_bytes,0),
+       COALESCE(checksum,''), storage_uri, retention_expires_at, metadata, created_at, updated_at
+FROM attachments
+WHERE run_id=$1
+ORDER BY created_at ASC
+`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []AttachmentRecord
+	for rows.Next() {
+		var rec AttachmentRecord
+		var retention sql.NullTime
+		if err := rows.Scan(&rec.ID, &rec.RunID, &rec.TaskID, &rec.Attempt, &rec.ArtifactID, &rec.Name, &rec.MediaType, &rec.SizeBytes, &rec.Checksum, &rec.StorageURI, &retention, &rec.Metadata, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if retention.Valid {
+			ts := retention.Time
+			rec.RetentionExpiresAt = &ts
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// DeleteAttachment removes a stored attachment metadata entry.
+func (s *Store) DeleteAttachment(ctx context.Context, id string) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("attachment id required")
+	}
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM attachments WHERE id=$1`, id)
+	if err != nil {
+		return err
+	}
+	if rows, err := res.RowsAffected(); err == nil && rows == 0 {
+		return sql.ErrNoRows
+	} else if err != nil {
+		return err
+	}
+	return nil
+}
+
 // Episode captures the full episodic memory snapshot for a run.
 type Episode struct {
 	ID           string
@@ -159,6 +747,27 @@ type EpisodeStep struct {
 	CreatedAt     time.Time
 }
 
+// EpisodeSummary provides a lightweight view of recorded episodes.
+type EpisodeSummary struct {
+	RunID     string
+	TopicID   string
+	UserID    string
+	Status    string
+	StartedAt *time.Time
+	CreatedAt time.Time
+	Steps     int
+}
+
+// EpisodeFilter constrains ListEpisodes queries.
+type EpisodeFilter struct {
+	RunID   string
+	TopicID string
+	Status  string
+	From    time.Time
+	To      time.Time
+	Limit   int
+}
+
 type BudgetApprovalRecord struct {
 	RunID         string
 	TopicID       string
@@ -170,6 +779,17 @@ type BudgetApprovalRecord struct {
 	DecidedAt     *time.Time
 	DecidedBy     *string
 	Reason        *string
+}
+
+// BudgetEventRecord captures breach and override audit events for budgets.
+type BudgetEventRecord struct {
+	ID        int64
+	RunID     string
+	TopicID   string
+	EventType string
+	Details   map[string]interface{}
+	CreatedBy *string
+	CreatedAt time.Time
 }
 
 // BuilderSchemaRecord captures a conversational builder schema version.
@@ -662,18 +1282,18 @@ WHERE run_id=$1
 // Provide a simple accessor by id
 func (s *Store) GetProcessingResultByID(ctx context.Context, id string) (map[string]interface{}, error) {
 	var (
-		userThoughtB, sourcesB, highlightsB, conflictsB, agentsB, modelsB, metadataB []byte
-		summary, detailed                                                            string
-		confidence                                                                   float64
-		processingTime                                                               int64
-		cost                                                                         float64
-		tokensUsed                                                                   int64
-		created                                                                      time.Time
+		userThoughtB, sourcesB, highlightsB, conflictsB, agentsB, modelsB, metadataB, evidenceB []byte
+		summary, detailed                                                                       string
+		confidence                                                                              float64
+		processingTime                                                                          int64
+		cost                                                                                    float64
+		tokensUsed                                                                              int64
+		created                                                                                 time.Time
 	)
 	err := s.DB.QueryRowContext(ctx, `SELECT user_thought, summary, detailed_report, sources, highlights, conflicts,
-        confidence, processing_time, cost_estimate, tokens_used, agents_used, llm_models_used, metadata, created_at
+        confidence, processing_time, cost_estimate, tokens_used, agents_used, llm_models_used, metadata, evidence, created_at
         FROM processing_results WHERE id=$1`, id).Scan(&userThoughtB, &summary, &detailed, &sourcesB, &highlightsB, &conflictsB,
-		&confidence, &processingTime, &cost, &tokensUsed, &agentsB, &modelsB, &metadataB, &created)
+		&confidence, &processingTime, &cost, &tokensUsed, &agentsB, &modelsB, &metadataB, &evidenceB, &created)
 	if err != nil {
 		return nil, err
 	}
@@ -700,6 +1320,12 @@ func (s *Store) GetProcessingResultByID(ctx context.Context, id string) (map[str
 	out["agents_used"] = v
 	_ = json.Unmarshal(modelsB, &v)
 	out["llm_models_used"] = v
+	if len(evidenceB) > 0 {
+		_ = json.Unmarshal(evidenceB, &v)
+		out["evidence"] = v
+	} else {
+		out["evidence"] = []interface{}{}
+	}
 	if len(metadataB) > 0 {
 		_ = json.Unmarshal(metadataB, &v)
 		out["metadata"] = v
@@ -786,6 +1412,97 @@ WHERE run_id=$1
 	return err
 }
 
+// RecordBudgetEvent persists an arbitrary budget audit event for a run.
+func (s *Store) RecordBudgetEvent(ctx context.Context, evt BudgetEventRecord) error {
+	if s == nil || s.DB == nil {
+		return fmt.Errorf("store not initialised")
+	}
+	runID := strings.TrimSpace(evt.RunID)
+	if runID == "" {
+		return fmt.Errorf("run_id must be provided")
+	}
+	eventType := strings.TrimSpace(evt.EventType)
+	if eventType == "" {
+		return fmt.Errorf("event_type must be provided")
+	}
+	details := evt.Details
+	if details == nil {
+		details = map[string]interface{}{}
+	}
+	payload, err := json.Marshal(details)
+	if err != nil {
+		return fmt.Errorf("marshal budget event details: %w", err)
+	}
+	var topicID interface{}
+	if topic := strings.TrimSpace(evt.TopicID); topic != "" {
+		topicID = topic
+	}
+	var createdBy interface{}
+	if evt.CreatedBy != nil {
+		if id := strings.TrimSpace(*evt.CreatedBy); id != "" {
+			createdBy = id
+		}
+	}
+	if _, err := s.DB.ExecContext(ctx, `
+INSERT INTO run_budget_events (run_id, topic_id, event_type, details, created_by)
+VALUES ($1,$2,$3,$4,$5)
+`, runID, topicID, eventType, payload, createdBy); err != nil {
+		return fmt.Errorf("insert budget event: %w", err)
+	}
+	return nil
+}
+
+// RecordBudgetBreach stores a budget breach report with associated usage metrics.
+func (s *Store) RecordBudgetBreach(ctx context.Context, runID, topicID string, cfg budget.Config, usage budget.Usage, exceeded budget.ErrExceeded, estimates ...budget.Estimate) error {
+	est := budget.Estimate{}
+	if len(estimates) > 0 {
+		est = estimates[0]
+	}
+	details := map[string]interface{}{
+		"message":        exceeded.Error(),
+		"kind":           exceeded.Kind,
+		"usage_label":    exceeded.Usage,
+		"limit_label":    exceeded.Limit,
+		"usage":          budget.SerializeUsage(usage),
+		"breach_summary": budget.SerializeBreach(cfg, usage, exceeded),
+		"config":         budget.SerializeConfig(cfg),
+		"report":         budget.BuildReport(cfg, est, usage, exceeded),
+		"reason":         budget.FormatBreachReason(cfg, usage, exceeded),
+	}
+	return s.RecordBudgetEvent(ctx, BudgetEventRecord{
+		RunID:     runID,
+		TopicID:   topicID,
+		EventType: "breach",
+		Details:   details,
+	})
+}
+
+// RecordBudgetOverride stores manual override/approval audit entries.
+func (s *Store) RecordBudgetOverride(ctx context.Context, runID, topicID, decidedBy string, approved bool, reason *string) error {
+	if strings.TrimSpace(decidedBy) == "" {
+		return fmt.Errorf("decided_by must be provided")
+	}
+	details := map[string]interface{}{
+		"approved": approved,
+	}
+	if reason != nil {
+		if trimmed := strings.TrimSpace(*reason); trimmed != "" {
+			details["reason"] = trimmed
+		}
+	}
+	eventType := "override.rejected"
+	if approved {
+		eventType = "override.approved"
+	}
+	return s.RecordBudgetEvent(ctx, BudgetEventRecord{
+		RunID:     runID,
+		TopicID:   topicID,
+		EventType: eventType,
+		Details:   details,
+		CreatedBy: &decidedBy,
+	})
+}
+
 // GetPendingBudgetApproval returns the pending approval for a topic if one exists.
 func (s *Store) GetPendingBudgetApproval(ctx context.Context, topicID string) (BudgetApprovalRecord, bool, error) {
 	if topicID == "" {
@@ -821,6 +1538,7 @@ func (s *Store) UpsertProcessingResult(ctx context.Context, pr core.ProcessingRe
 	sources, _ := toJSON(pr.Sources)
 	highlights, _ := toJSON(pr.Highlights)
 	conflicts, _ := toJSON(pr.Conflicts)
+	evidenceJSON, _ := toJSON(pr.Evidence)
 	agents, _ := toJSON(pr.AgentsUsed)
 	models, _ := toJSON(pr.LLMModelsUsed)
 	metadata, _ := toJSON(pr.Metadata)
@@ -830,10 +1548,10 @@ func (s *Store) UpsertProcessingResult(ctx context.Context, pr core.ProcessingRe
 	_, err := s.DB.ExecContext(ctx, `
 INSERT INTO processing_results (
   id, user_thought, summary, detailed_report, sources, highlights, conflicts,
-  confidence, processing_time, cost_estimate, tokens_used, agents_used, llm_models_used, metadata, created_at, fingerprint, updated_at
+  confidence, processing_time, cost_estimate, tokens_used, agents_used, llm_models_used, metadata, evidence, created_at, fingerprint, updated_at
 ) VALUES (
   $1, $2, $3, $4, $5, $6, $7,
-  $8, $9, $10, $11, $12, $13, $14, NOW(), $15, NOW()
+  $8, $9, $10, $11, $12, $13, $14, $15, NOW(), $16, NOW()
 )
 ON CONFLICT (id) DO UPDATE SET
   user_thought = EXCLUDED.user_thought,
@@ -849,13 +1567,17 @@ ON CONFLICT (id) DO UPDATE SET
   agents_used = EXCLUDED.agents_used,
   llm_models_used = EXCLUDED.llm_models_used,
   metadata = EXCLUDED.metadata,
+  evidence = EXCLUDED.evidence,
   fingerprint = CASE WHEN processing_results.fingerprint = EXCLUDED.fingerprint THEN processing_results.fingerprint ELSE EXCLUDED.fingerprint END,
   updated_at = CASE WHEN processing_results.fingerprint = EXCLUDED.fingerprint THEN processing_results.updated_at ELSE NOW() END;
 `,
 		pr.ID, userThought, pr.Summary, pr.DetailedReport, sources, highlights, conflicts,
-		pr.Confidence, int64(pr.ProcessingTime), pr.CostEstimate, pr.TokensUsed, agents, models, metadata, fp,
+		pr.Confidence, int64(pr.ProcessingTime), pr.CostEstimate, pr.TokensUsed, agents, models, metadata, evidenceJSON, fp,
 	)
 	if err != nil {
+		return err
+	}
+	if err := s.ReplaceRunEvidence(ctx, pr.ID, pr.Evidence); err != nil {
 		return err
 	}
 	metricsOnce.Do(initStoreMetrics)
@@ -1461,6 +2183,99 @@ LIMIT $3
 	return results, rows.Err()
 }
 
+// HasSimilarRunEmbedding reports whether a run-level embedding already exists for the topic within
+// the supplied similarity threshold and dedup window.
+func (s *Store) HasSimilarRunEmbedding(ctx context.Context, topicID string, vector []float32, threshold float64, window time.Duration) (bool, error) {
+	if len(vector) == 0 {
+		return false, fmt.Errorf("vector must not be empty")
+	}
+	vecLiteral, err := encodeVectorLiteral(vector)
+	if err != nil {
+		return false, err
+	}
+	if threshold <= 0 {
+		threshold = 0.8
+	}
+	maxDistance := math.Max(0, 1-threshold)
+	windowSeconds := int64(window / time.Second)
+	row := s.DB.QueryRowContext(ctx, `
+SELECT 1
+FROM run_embeddings
+WHERE ($2 = '' OR topic_id = $2)
+  AND ($4 <= 0 OR created_at >= NOW() - make_interval(secs => $4))
+  AND embedding <=> $1::vector <= $3
+LIMIT 1
+`, vecLiteral, topicID, maxDistance, windowSeconds)
+	var exists int
+	switch err := row.Scan(&exists); err {
+	case nil:
+		return true, nil
+	case sql.ErrNoRows:
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// HasSimilarPlanStepEmbedding returns true when a plan-step embedding matches the supplied vector.
+func (s *Store) HasSimilarPlanStepEmbedding(ctx context.Context, topicID string, vector []float32, threshold float64, window time.Duration) (bool, error) {
+	if len(vector) == 0 {
+		return false, fmt.Errorf("vector must not be empty")
+	}
+	vecLiteral, err := encodeVectorLiteral(vector)
+	if err != nil {
+		return false, err
+	}
+	if threshold <= 0 {
+		threshold = 0.8
+	}
+	maxDistance := math.Max(0, 1-threshold)
+	windowSeconds := int64(window / time.Second)
+	row := s.DB.QueryRowContext(ctx, `
+SELECT 1
+FROM plan_step_embeddings
+WHERE ($2 = '' OR topic_id = $2)
+  AND ($4 <= 0 OR created_at >= NOW() - make_interval(secs => $4))
+  AND embedding <=> $1::vector <= $3
+LIMIT 1
+`, vecLiteral, topicID, maxDistance, windowSeconds)
+	var exists int
+	switch err := row.Scan(&exists); err {
+	case nil:
+		return true, nil
+	case sql.ErrNoRows:
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// LogMemoryDelta records an aggregated delta result for auditing and observability.
+func (s *Store) LogMemoryDelta(ctx context.Context, rec MemoryDeltaRecord) error {
+	if strings.TrimSpace(rec.TopicID) == "" {
+		return fmt.Errorf("topic_id required")
+	}
+	if rec.TotalItems < 0 || rec.NovelItems < 0 || rec.DuplicateItems < 0 {
+		return fmt.Errorf("delta counts must be non-negative")
+	}
+	if rec.Metadata == nil {
+		rec.Metadata = map[string]interface{}{}
+	}
+	metaBytes, err := json.Marshal(rec.Metadata)
+	if err != nil {
+		return fmt.Errorf("marshal metadata: %w", err)
+	}
+	createdAt := rec.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	_, err = s.DB.ExecContext(ctx, `
+INSERT INTO memory_delta_events (topic_id, total_items, novel_items, duplicate_items, semantic_enabled, metadata, created_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7)
+`, rec.TopicID, rec.TotalItems, rec.NovelItems, rec.DuplicateItems, rec.Semantic, metaBytes, createdAt)
+	return err
+}
+
 // SaveEpisode persists or updates an episodic memory snapshot for a run.
 func (s *Store) SaveEpisode(ctx context.Context, ep Episode) (err error) {
 	if ep.RunID == "" {
@@ -1586,7 +2401,130 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		}
 	}
 
+	if err := s.replaceRunEvidenceTx(ctx, tx, ep.RunID, ep.Result.Evidence); err != nil {
+		return fmt.Errorf("replace run evidence: %w", err)
+	}
+
 	return nil
+}
+
+func (s *Store) replaceRunEvidenceTx(ctx context.Context, tx *sql.Tx, runID string, evidence []core.Evidence) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return fmt.Errorf("run_id required")
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM run_evidence WHERE run_id=$1`, runID); err != nil {
+		return fmt.Errorf("delete run evidence: %w", err)
+	}
+	if len(evidence) == 0 {
+		return nil
+	}
+	for _, ev := range evidence {
+		if len(ev.SourceIDs) == 0 {
+			continue
+		}
+		claimID := strings.TrimSpace(ev.ID)
+		if claimID == "" {
+			claimID = uuid.NewString()
+		}
+		statement := strings.TrimSpace(ev.Statement)
+		sourceIDsBytes, err := json.Marshal(ev.SourceIDs)
+		if err != nil {
+			return fmt.Errorf("marshal source ids: %w", err)
+		}
+		meta := make(map[string]interface{}, len(ev.Metadata)+2)
+		for k, v := range ev.Metadata {
+			meta[k] = v
+		}
+		if ev.Category != "" {
+			meta["category"] = ev.Category
+		}
+		if ev.Score != 0 {
+			meta["score"] = ev.Score
+		}
+		metaBytes, err := json.Marshal(meta)
+		if err != nil {
+			return fmt.Errorf("marshal evidence metadata: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO run_evidence (run_id, claim_id, statement, source_ids, metadata)
+VALUES ($1,$2,$3,$4,$5)
+`, runID, nullableString(claimID), nullableString(statement), sourceIDsBytes, metaBytes); err != nil {
+			return fmt.Errorf("insert run evidence: %w", err)
+		}
+	}
+	return nil
+}
+
+// ReplaceRunEvidence replaces evidence entries for a run outside of a supplied transaction.
+func (s *Store) ReplaceRunEvidence(ctx context.Context, runID string, evidence []core.Evidence) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := s.replaceRunEvidenceTx(ctx, tx, runID, evidence); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) getRunEvidence(ctx context.Context, runID string) ([]EvidenceRecord, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil, fmt.Errorf("run_id required")
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT claim_id, statement, source_ids, metadata, created_at
+FROM run_evidence
+WHERE run_id=$1
+ORDER BY created_at ASC
+`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []EvidenceRecord
+	for rows.Next() {
+		var (
+			rec       EvidenceRecord
+			claimID   sql.NullString
+			statement sql.NullString
+			sourceIDs []byte
+			metaBytes []byte
+		)
+		if err := rows.Scan(&claimID, &statement, &sourceIDs, &metaBytes, &rec.CreatedAt); err != nil {
+			return nil, err
+		}
+		rec.RunID = runID
+		if claimID.Valid {
+			rec.ClaimID = strings.TrimSpace(claimID.String)
+		}
+		if statement.Valid {
+			rec.Statement = strings.TrimSpace(statement.String)
+		}
+		if len(sourceIDs) > 0 {
+			var ids []string
+			if err := json.Unmarshal(sourceIDs, &ids); err == nil {
+				rec.SourceIDs = ids
+			}
+		}
+		if len(metaBytes) > 0 {
+			var metadata map[string]interface{}
+			if err := json.Unmarshal(metaBytes, &metadata); err == nil {
+				rec.Metadata = metadata
+			}
+		}
+		if rec.Metadata == nil {
+			rec.Metadata = map[string]interface{}{}
+		}
+		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return records, nil
 }
 
 // GetEpisodeByRunID fetches the stored episode trace for a run.
@@ -1684,8 +2622,117 @@ ORDER BY step_index
 	if err := rows.Err(); err != nil {
 		return Episode{}, false, fmt.Errorf("iterate episode steps: %w", err)
 	}
+	records, err := s.getRunEvidence(ctx, runID)
+	if err != nil {
+		return Episode{}, false, fmt.Errorf("load run evidence: %w", err)
+	}
+	if len(records) > 0 {
+		evidence := make([]core.Evidence, 0, len(records))
+		for _, rec := range records {
+			if len(rec.SourceIDs) == 0 {
+				continue
+			}
+			metadataCopy := make(map[string]interface{}, len(rec.Metadata))
+			for k, v := range rec.Metadata {
+				metadataCopy[k] = v
+			}
+			claimID := strings.TrimSpace(rec.ClaimID)
+			if claimID == "" {
+				claimID = uuid.NewString()
+			}
+			ev := core.Evidence{
+				ID:        claimID,
+				Statement: rec.Statement,
+				SourceIDs: rec.SourceIDs,
+				Metadata:  metadataCopy,
+			}
+			if cat, ok := metadataCopy["category"].(string); ok && strings.TrimSpace(cat) != "" {
+				ev.Category = strings.TrimSpace(cat)
+				delete(metadataCopy, "category")
+			}
+			if score, ok := extractFloat(metadataCopy["score"]); ok {
+				ev.Score = score
+				delete(metadataCopy, "score")
+			}
+			evidence = append(evidence, ev)
+		}
+		if len(evidence) > 0 {
+			ep.Result.Evidence = evidence
+		}
+	}
 
 	return ep, true, nil
+}
+
+// ListEpisodes returns episode summaries filtered by the provided criteria.
+func (s *Store) ListEpisodes(ctx context.Context, filter EpisodeFilter) ([]EpisodeSummary, error) {
+	conditions := []string{"1=1"}
+	var args []interface{}
+	arg := func(value interface{}) string {
+		args = append(args, value)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	if filter.RunID != "" {
+		conditions = append(conditions, fmt.Sprintf("e.run_id = %s", arg(filter.RunID)))
+	}
+	if filter.TopicID != "" {
+		conditions = append(conditions, fmt.Sprintf("e.topic_id = %s", arg(filter.TopicID)))
+	}
+	if filter.Status != "" {
+		conditions = append(conditions, fmt.Sprintf("COALESCE(r.status,'') = %s", arg(filter.Status)))
+	}
+	if !filter.From.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("e.created_at >= %s", arg(filter.From)))
+	}
+	if !filter.To.IsZero() {
+		conditions = append(conditions, fmt.Sprintf("e.created_at <= %s", arg(filter.To)))
+	}
+	limit := filter.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	query := fmt.Sprintf(`
+SELECT e.run_id, e.topic_id, e.user_id, COALESCE(r.status,''), r.started_at, e.created_at, COALESCE(MAX(s.step_index) + 1, 0)
+FROM run_episodes e
+LEFT JOIN runs r ON r.id = e.run_id
+LEFT JOIN run_episode_steps s ON s.episode_id = e.id
+WHERE %s
+GROUP BY e.id, e.run_id, e.topic_id, e.user_id, r.status, r.started_at, e.created_at
+ORDER BY e.created_at DESC
+LIMIT %d
+`, strings.Join(conditions, " AND "), limit)
+	rows, err := s.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var summaries []EpisodeSummary
+	for rows.Next() {
+		var (
+			runID, topicID, userID, status string
+			startedAt                      sql.NullTime
+			createdAt                      time.Time
+			steps                          int
+		)
+		if err := rows.Scan(&runID, &topicID, &userID, &status, &startedAt, &createdAt, &steps); err != nil {
+			return nil, err
+		}
+		var started *time.Time
+		if startedAt.Valid {
+			started = &startedAt.Time
+		}
+		summaries = append(summaries, EpisodeSummary{
+			RunID:     runID,
+			TopicID:   topicID,
+			UserID:    userID,
+			Status:    status,
+			StartedAt: started,
+			CreatedAt: createdAt,
+			Steps:     steps,
+		})
+	}
+	return summaries, rows.Err()
 }
 
 // PruneEpisodesBefore deletes episodes older than the supplied cutoff timestamp.
@@ -1781,6 +2828,47 @@ func nullableString(s string) interface{} {
 		return nil
 	}
 	return s
+}
+
+func nullableInt64(v int64) interface{} {
+	if v <= 0 {
+		return nil
+	}
+	return v
+}
+
+func defaultJSON(raw json.RawMessage) []byte {
+	if len(raw) == 0 {
+		return []byte("{}")
+	}
+	return raw
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func extractFloat(raw interface{}) (float64, bool) {
+	switch v := raw.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case json.Number:
+		if f, err := v.Float64(); err == nil {
+			return f, true
+		}
+	}
+	return 0, false
 }
 
 func encodeVectorLiteral(vec []float32) (string, error) {

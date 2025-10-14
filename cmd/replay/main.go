@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/mohammad-safakhou/newser/config"
@@ -17,59 +20,298 @@ import (
 	"github.com/mohammad-safakhou/newser/internal/store"
 )
 
-func main() {
-	cfgPath := flag.String("config", "", "path to config file")
-	runID := flag.String("run", "", "run identifier to inspect")
-	asJSON := flag.Bool("json", false, "emit full episodic snapshot as JSON")
-	showSteps := flag.Bool("steps", false, "print per-step details")
-	flag.Parse()
+const defaultConfigPath = "config/config.json"
 
-	if *runID == "" {
-		log.Fatal("replay requires --run <run_id>")
+func main() {
+	if len(os.Args) < 2 {
+		printRootUsage()
+		os.Exit(1)
 	}
 
-	cfg := config.LoadConfig(*cfgPath)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	cmd := os.Args[1]
+	args := os.Args[2:]
+
+	var err error
+	switch cmd {
+	case "show":
+		err = runShowCommand(args)
+	case "list":
+		err = runListCommand(args)
+	case "export-plan":
+		err = runExportPlanCommand(args)
+	case "diff":
+		err = runDiffCommand(args)
+	default:
+		printRootUsage()
+		os.Exit(1)
+	}
+
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func printRootUsage() {
+	fmt.Println(`Usage: replay <command> [options]
+
+Commands:
+  show         Display a stored episode (with optional JSON output).
+  list         List recorded episodes with optional filters.
+  export-plan  Export the stored plan/context for deterministic re-execution.
+  diff         Compare a stored episode against a replay JSON export.
+`)
+}
+
+func runShowCommand(args []string) error {
+	fs := flag.NewFlagSet("show", flag.ExitOnError)
+	cfgPath := fs.String("config", defaultConfigPath, "path to config file")
+	runID := fs.String("run", "", "run identifier to inspect")
+	jsonOut := fs.Bool("json", false, "emit full episodic snapshot as JSON")
+	showSteps := fs.Bool("steps", false, "print per-step details")
+	showArtifacts := fs.Bool("artifacts", false, "include artifact payloads when printing steps")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *runID == "" {
+		return errors.New("show requires --run <run_id>")
+	}
+
+	return withStore(*cfgPath, func(ctx context.Context, st *store.Store, cfg *config.Config) error {
+		episode, ok, err := st.GetEpisodeByRunID(ctx, *runID)
+		if err != nil {
+			return fmt.Errorf("load episode: %w", err)
+		}
+		if !ok {
+			return fmt.Errorf("no episode found for run %s", *runID)
+		}
+
+		summaries, err := st.ListEpisodes(ctx, store.EpisodeFilter{RunID: *runID, Limit: 1})
+		if err != nil {
+			return fmt.Errorf("episode summary: %w", err)
+		}
+		var status string
+		var startedAt *time.Time
+		if len(summaries) > 0 {
+			status = summaries[0].Status
+			startedAt = summaries[0].StartedAt
+		}
+
+		if *jsonOut {
+			resp := newEpisodeResponse(episode)
+			data, err := json.MarshalIndent(resp, "", "  ")
+			if err != nil {
+				return fmt.Errorf("marshal episode: %w", err)
+			}
+			os.Stdout.Write(data)
+			os.Stdout.Write([]byte("\n"))
+			return nil
+		}
+
+		printEpisodeSummary(episode, status, startedAt)
+		if *showSteps {
+			fmt.Println()
+			printEpisodeSteps(episode, *showArtifacts)
+		}
+		return nil
+	})
+}
+
+func runListCommand(args []string) error {
+	fs := flag.NewFlagSet("list", flag.ExitOnError)
+	cfgPath := fs.String("config", defaultConfigPath, "path to config file")
+	topicID := fs.String("topic", "", "filter by topic identifier")
+	status := fs.String("status", "", "filter by run status (pending, running, completed, failed)")
+	fromStr := fs.String("from", "", "filter episodes created on/after RFC3339 timestamp")
+	toStr := fs.String("to", "", "filter episodes created on/before RFC3339 timestamp")
+	limit := fs.Int("limit", 20, "maximum number of episodes to return")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	return withStore(*cfgPath, func(ctx context.Context, st *store.Store, cfg *config.Config) error {
+		filter := store.EpisodeFilter{TopicID: *topicID, Status: strings.ToLower(*status), Limit: *limit}
+		if *fromStr != "" {
+			ts, err := time.Parse(time.RFC3339, *fromStr)
+			if err != nil {
+				return fmt.Errorf("parse --from: %w", err)
+			}
+			filter.From = ts
+		}
+		if *toStr != "" {
+			ts, err := time.Parse(time.RFC3339, *toStr)
+			if err != nil {
+				return fmt.Errorf("parse --to: %w", err)
+			}
+			filter.To = ts
+		}
+
+		episodes, err := st.ListEpisodes(ctx, filter)
+		if err != nil {
+			return fmt.Errorf("list episodes: %w", err)
+		}
+
+		if len(episodes) == 0 {
+			fmt.Println("(no episodes found)")
+			return nil
+		}
+
+		tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+		fmt.Fprintln(tw, "RUN ID\tTOPIC\tSTATUS\tCREATED\tSTEPS")
+		for _, ep := range episodes {
+			created := ep.CreatedAt.Format(time.RFC3339)
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\n", ep.RunID, ep.TopicID, displayStatus(ep.Status), created, ep.Steps)
+		}
+		tw.Flush()
+		return nil
+	})
+}
+
+func runExportPlanCommand(args []string) error {
+	fs := flag.NewFlagSet("export-plan", flag.ExitOnError)
+	cfgPath := fs.String("config", defaultConfigPath, "path to config file")
+	runID := fs.String("run", "", "run identifier")
+	outPath := fs.String("out", "", "destination file (stdout if omitted)")
+	includeContext := fs.Bool("include-context", true, "include thought preferences/context in export")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *runID == "" {
+		return errors.New("export-plan requires --run <run_id>")
+	}
+
+	return withStore(*cfgPath, func(ctx context.Context, st *store.Store, cfg *config.Config) error {
+		episode, ok, err := st.GetEpisodeByRunID(ctx, *runID)
+		if err != nil {
+			return fmt.Errorf("load episode: %w", err)
+		}
+		if !ok {
+			return fmt.Errorf("no episode found for run %s", *runID)
+		}
+		if episode.PlanDocument == nil && len(episode.PlanRaw) == 0 {
+			return fmt.Errorf("no stored plan for run %s", *runID)
+		}
+
+		export := planExport{
+			RunID:   episode.RunID,
+			TopicID: episode.TopicID,
+			UserID:  episode.UserID,
+		}
+		if episode.PlanDocument != nil {
+			export.Plan = *episode.PlanDocument
+		} else if len(episode.PlanRaw) > 0 {
+			var doc planner.PlanDocument
+			if err := json.Unmarshal(episode.PlanRaw, &doc); err != nil {
+				return fmt.Errorf("unmarshal stored plan: %w", err)
+			}
+			export.Plan = doc
+		}
+		if len(episode.PlanRaw) > 0 {
+			export.PlanRaw = append(export.PlanRaw, episode.PlanRaw...)
+		}
+		if *includeContext {
+			export.Thought = episode.Thought
+		}
+
+		data, err := json.MarshalIndent(export, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal export: %w", err)
+		}
+
+		if *outPath == "" {
+			os.Stdout.Write(data)
+			os.Stdout.Write([]byte("\n"))
+			return nil
+		}
+		if err := os.MkdirAll(filepath.Dir(*outPath), 0o755); err != nil {
+			return fmt.Errorf("create export dir: %w", err)
+		}
+		if err := os.WriteFile(*outPath, data, 0o600); err != nil {
+			return fmt.Errorf("write export: %w", err)
+		}
+		fmt.Printf("Plan written to %s\n", *outPath)
+		return nil
+	})
+}
+
+func runDiffCommand(args []string) error {
+	fs := flag.NewFlagSet("diff", flag.ExitOnError)
+	cfgPath := fs.String("config", defaultConfigPath, "path to config file")
+	runID := fs.String("run", "", "run identifier")
+	replayPath := fs.String("file", "", "JSON export produced by 'replay show --json'")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *runID == "" {
+		return errors.New("diff requires --run <run_id>")
+	}
+	if *replayPath == "" {
+		return errors.New("diff requires --file <replay.json>")
+	}
+
+	candidateBytes, err := os.ReadFile(*replayPath)
+	if err != nil {
+		return fmt.Errorf("read replay file: %w", err)
+	}
+	var candidate episodeResponse
+	if err := json.Unmarshal(candidateBytes, &candidate); err != nil {
+		return fmt.Errorf("parse replay file: %w", err)
+	}
+
+	return withStore(*cfgPath, func(ctx context.Context, st *store.Store, cfg *config.Config) error {
+		episode, ok, err := st.GetEpisodeByRunID(ctx, *runID)
+		if err != nil {
+			return fmt.Errorf("load episode: %w", err)
+		}
+		if !ok {
+			return fmt.Errorf("no episode found for run %s", *runID)
+		}
+
+		orig := newEpisodeResponse(episode)
+		diffs := diffEpisodeResponses(orig, candidate)
+		if len(diffs) == 0 {
+			fmt.Println("No differences detected.")
+			return nil
+		}
+		fmt.Println("Differences detected:")
+		for _, d := range diffs {
+			fmt.Printf("- %s\n", d)
+		}
+		return nil
+	})
+}
+
+func withStore(cfgPath string, fn func(context.Context, *store.Store, *config.Config) error) error {
+	if cfgPath == "" {
+		cfgPath = defaultConfigPath
+	}
+	cfg := config.LoadConfig(cfgPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	dsn, err := runtime.BuildPostgresDSN(cfg)
 	if err != nil {
-		log.Fatalf("build dsn: %v", err)
+		return err
 	}
 	st, err := store.NewWithDSN(ctx, dsn)
 	if err != nil {
-		log.Fatalf("connect store: %v", err)
+		return err
 	}
+	defer st.DB.Close()
 
-	episode, ok, err := st.GetEpisodeByRunID(ctx, *runID)
-	if err != nil {
-		log.Fatalf("load episode: %v", err)
-	}
-	if !ok {
-		log.Fatalf("no episode found for run %s", *runID)
-	}
-
-	if *asJSON {
-		resp := newEpisodeResponse(episode)
-		data, err := json.MarshalIndent(resp, "", "  ")
-		if err != nil {
-			log.Fatalf("marshal episode: %v", err)
-		}
-		os.Stdout.Write(data)
-		os.Stdout.Write([]byte("\n"))
-		return
-	}
-
-	printEpisodeSummary(episode)
-	if *showSteps {
-		fmt.Println()
-		printEpisodeSteps(episode)
-	}
+	return fn(ctx, st, cfg)
 }
 
-func printEpisodeSummary(ep store.Episode) {
-	fmt.Printf("Run: %s\nTopic: %s\nRecorded: %s\n", ep.RunID, ep.TopicID, ep.CreatedAt.Format(time.RFC3339))
-	fmt.Println()
+func printEpisodeSummary(ep store.Episode, status string, startedAt *time.Time) {
+	fmt.Printf("Run: %s\nTopic: %s\n", ep.RunID, ep.TopicID)
+	if status != "" {
+		fmt.Printf("Status: %s\n", displayStatus(status))
+	}
+	if startedAt != nil {
+		fmt.Printf("Started: %s\n", startedAt.Format(time.RFC3339))
+	}
+	fmt.Printf("Recorded: %s\n\n", ep.CreatedAt.Format(time.RFC3339))
+
 	if ep.PlanPrompt != "" {
 		fmt.Println("Plan Prompt:")
 		fmt.Println(strings.TrimSpace(ep.PlanPrompt))
@@ -82,7 +324,7 @@ func printEpisodeSummary(ep store.Episode) {
 	fmt.Printf("Steps executed: %d\n", len(ep.Steps))
 }
 
-func printEpisodeSteps(ep store.Episode) {
+func printEpisodeSteps(ep store.Episode, includeArtifacts bool) {
 	for _, step := range ep.Steps {
 		fmt.Printf("Step %d — %s (%s)\n", step.StepIndex, step.Task.ID, step.Result.AgentType)
 		if step.Prompt != "" {
@@ -99,20 +341,39 @@ func printEpisodeSteps(ep store.Episode) {
 		}
 		if len(step.Artifacts) > 0 {
 			fmt.Printf("  Artifacts: %d\n", len(step.Artifacts))
+			if includeArtifacts {
+				for idx, artifact := range step.Artifacts {
+					payload, err := json.MarshalIndent(artifact, "    ", "  ")
+					if err != nil {
+						fmt.Printf("    [%d] <error marshaling artifact>\n", idx)
+						continue
+					}
+					fmt.Printf("    [%d] %s\n", idx, string(payload))
+				}
+			}
 		}
 		fmt.Println()
 	}
 }
 
+func displayStatus(status string) string {
+	if status == "" {
+		return "unknown"
+	}
+	return status
+}
+
 func newEpisodeResponse(ep store.Episode) episodeResponse {
 	resp := episodeResponse{
-		RunID:        ep.RunID,
-		TopicID:      ep.TopicID,
-		Thought:      ep.Thought,
-		PlanDocument: ep.PlanDocument,
-		PlanPrompt:   ep.PlanPrompt,
-		Result:       ep.Result,
-		CreatedAt:    ep.CreatedAt,
+		RunID:      ep.RunID,
+		TopicID:    ep.TopicID,
+		Thought:    ep.Thought,
+		PlanPrompt: ep.PlanPrompt,
+		Result:     ep.Result,
+		CreatedAt:  ep.CreatedAt,
+	}
+	if ep.PlanDocument != nil {
+		resp.PlanDocument = ep.PlanDocument
 	}
 	if len(ep.PlanRaw) > 0 {
 		resp.PlanRaw = append(resp.PlanRaw, ep.PlanRaw...)
@@ -134,6 +395,56 @@ func newEpisodeResponse(ep store.Episode) episodeResponse {
 		}
 	}
 	return resp
+}
+
+func diffEpisodeResponses(orig, candidate episodeResponse) []string {
+	var diffs []string
+	if strings.TrimSpace(orig.Result.Summary) != strings.TrimSpace(candidate.Result.Summary) {
+		diffs = append(diffs, fmt.Sprintf("result summary changed: %q → %q", orig.Result.Summary, candidate.Result.Summary))
+	}
+	if orig.Result.CostEstimate != candidate.Result.CostEstimate {
+		diffs = append(diffs, fmt.Sprintf("result cost estimate changed: %.2f → %.2f", orig.Result.CostEstimate, candidate.Result.CostEstimate))
+	}
+	if orig.Result.TokensUsed != candidate.Result.TokensUsed {
+		diffs = append(diffs, fmt.Sprintf("result tokens used changed: %d → %d", orig.Result.TokensUsed, candidate.Result.TokensUsed))
+	}
+
+	origSteps := make(map[int]episodeStepResponse, len(orig.Steps))
+	for _, step := range orig.Steps {
+		origSteps[step.StepIndex] = step
+	}
+	candidateSteps := make(map[int]episodeStepResponse, len(candidate.Steps))
+	for _, step := range candidate.Steps {
+		candidateSteps[step.StepIndex] = step
+	}
+
+	for index, origStep := range origSteps {
+		candStep, ok := candidateSteps[index]
+		if !ok {
+			diffs = append(diffs, fmt.Sprintf("step %d missing in candidate replay", index))
+			continue
+		}
+		if origStep.Result.Success != candStep.Result.Success {
+			diffs = append(diffs, fmt.Sprintf("step %d success changed: %t → %t", index, origStep.Result.Success, candStep.Result.Success))
+		}
+		if origStep.Result.Cost != candStep.Result.Cost {
+			diffs = append(diffs, fmt.Sprintf("step %d cost changed: %.2f → %.2f", index, origStep.Result.Cost, candStep.Result.Cost))
+		}
+		if origStep.Result.TokensUsed != candStep.Result.TokensUsed {
+			diffs = append(diffs, fmt.Sprintf("step %d tokens used changed: %d → %d", index, origStep.Result.TokensUsed, candStep.Result.TokensUsed))
+		}
+		if strings.TrimSpace(origStep.Result.Error) != strings.TrimSpace(candStep.Result.Error) {
+			diffs = append(diffs, fmt.Sprintf("step %d error changed: %q → %q", index, origStep.Result.Error, candStep.Result.Error))
+		}
+	}
+
+	for index := range candidateSteps {
+		if _, ok := origSteps[index]; !ok {
+			diffs = append(diffs, fmt.Sprintf("step %d present only in candidate replay", index))
+		}
+	}
+
+	return diffs
 }
 
 type episodeResponse struct {
@@ -158,4 +469,13 @@ type episodeStepResponse struct {
 	StartedAt     *time.Time               `json:"started_at,omitempty"`
 	CompletedAt   *time.Time               `json:"completed_at,omitempty"`
 	CreatedAt     time.Time                `json:"created_at"`
+}
+
+type planExport struct {
+	RunID   string                `json:"run_id"`
+	TopicID string                `json:"topic_id"`
+	UserID  string                `json:"user_id"`
+	Thought agentcore.UserThought `json:"thought,omitempty"`
+	Plan    planner.PlanDocument  `json:"plan"`
+	PlanRaw json.RawMessage       `json:"plan_raw,omitempty"`
 }

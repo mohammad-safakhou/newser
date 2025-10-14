@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -11,33 +12,123 @@ import (
 	agentcore "github.com/mohammad-safakhou/newser/internal/agent/core"
 	memorysvc "github.com/mohammad-safakhou/newser/internal/memory/service"
 	"github.com/mohammad-safakhou/newser/internal/store"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	otelmetric "go.opentelemetry.io/otel/metric"
 )
+
+type storeAPI interface {
+	SaveEpisode(ctx context.Context, ep store.Episode) error
+	ListRuns(ctx context.Context, topicID string) ([]store.Run, error)
+	GetEpisodeByRunID(ctx context.Context, runID string) (store.Episode, bool, error)
+	HasSimilarRunEmbedding(ctx context.Context, topicID string, vector []float32, threshold float64, window time.Duration) (bool, error)
+	HasSimilarPlanStepEmbedding(ctx context.Context, topicID string, vector []float32, threshold float64, window time.Duration) (bool, error)
+	LogMemoryDelta(ctx context.Context, rec store.MemoryDeltaRecord) error
+	CreateMemoryJob(ctx context.Context, rec store.MemoryJobRecord) (store.MemoryJobRecord, error)
+	CompleteMemoryJob(ctx context.Context, jobID int64, status string, result store.MemoryJobResultRecord) error
+}
 
 // Manager provides a lightweight episodic memory implementation backed by the primary store.
 type Manager struct {
-	store  *store.Store
-	cfg    config.MemoryConfig
-	logger *log.Logger
+	store           storeAPI
+	cfg             config.MemoryConfig
+	logger          *log.Logger
+	episodicEnabled bool
+	semanticEnabled bool
+	provider        agentcore.LLMProvider
+	deltaThreshold  float64
+	deltaWindow     time.Duration
+	deltaWithSteps  bool
+	deltaTotal      otelmetric.Int64Counter
+	deltaNovel      otelmetric.Int64Counter
+	deltaDuplicates otelmetric.Int64Counter
+	deltaLatency    otelmetric.Float64Histogram
+	summaryLatency  otelmetric.Float64Histogram
+	summaryTotal    otelmetric.Int64Counter
+	summaryFailures otelmetric.Int64Counter
+	jobStatus       otelmetric.Int64Counter
 }
 
-// New constructs a memory manager when episodic memory is enabled.
-func New(st *store.Store, cfg config.MemoryConfig, logger *log.Logger) *Manager {
+// New constructs a memory manager for episodic and semantic memory operations.
+func New(st storeAPI, cfg config.MemoryConfig, provider agentcore.LLMProvider, logger *log.Logger) *Manager {
 	if st == nil {
 		return nil
 	}
-	if !cfg.Episodic.Enabled {
+	episodicEnabled := cfg.Episodic.Enabled
+	semanticCfg := cfg.Semantic
+	semanticEnabled := semanticCfg.Enabled && provider != nil
+	if !episodicEnabled && !semanticEnabled {
 		return nil
 	}
 	if logger == nil {
 		logger = log.New(log.Writer(), "[MEMORY] ", log.LstdFlags)
 	}
-	return &Manager{store: st, cfg: cfg, logger: logger}
+	threshold := semanticCfg.DeltaThreshold
+	if threshold <= 0 {
+		threshold = semanticCfg.SearchThreshold
+	}
+	if threshold <= 0 {
+		threshold = 0.8
+	}
+	window := semanticCfg.DeltaWindow
+	if window < 0 {
+		window = 0
+	}
+	mgr := &Manager{
+		store:           st,
+		cfg:             cfg,
+		logger:          logger,
+		episodicEnabled: episodicEnabled,
+		semanticEnabled: semanticEnabled,
+		provider:        provider,
+		deltaThreshold:  threshold,
+		deltaWindow:     window,
+		deltaWithSteps:  semanticCfg.DeltaIncludeSteps,
+	}
+	meter := otel.Meter("memory/manager")
+	var err error
+	mgr.deltaTotal, err = meter.Int64Counter("memory_delta_items")
+	if err != nil {
+		logger.Printf("otel counter memory_delta_items: %v", err)
+	}
+	mgr.deltaNovel, err = meter.Int64Counter("memory_delta_novel")
+	if err != nil {
+		logger.Printf("otel counter memory_delta_novel: %v", err)
+	}
+	mgr.deltaDuplicates, err = meter.Int64Counter("memory_delta_duplicates")
+	if err != nil {
+		logger.Printf("otel counter memory_delta_duplicates: %v", err)
+	}
+	mgr.deltaLatency, err = meter.Float64Histogram("memory_delta_latency_ms", otelmetric.WithUnit("ms"))
+	if err != nil {
+		logger.Printf("otel histogram memory_delta_latency_ms: %v", err)
+	}
+	mgr.summaryLatency, err = meter.Float64Histogram("memory_summary_latency_ms", otelmetric.WithUnit("ms"))
+	if err != nil {
+		logger.Printf("otel histogram memory_summary_latency_ms: %v", err)
+	}
+	mgr.summaryTotal, err = meter.Int64Counter("memory_summary_runs")
+	if err != nil {
+		logger.Printf("otel counter memory_summary_runs: %v", err)
+	}
+	mgr.summaryFailures, err = meter.Int64Counter("memory_summary_failures")
+	if err != nil {
+		logger.Printf("otel counter memory_summary_failures: %v", err)
+	}
+	mgr.jobStatus, err = meter.Int64Counter("memory_job_status_total")
+	if err != nil {
+		logger.Printf("otel counter memory_job_status_total: %v", err)
+	}
+	return mgr
 }
 
 // WriteEpisode persists an episodic snapshot for later replay and summarisation.
 func (m *Manager) WriteEpisode(ctx context.Context, snapshot agentcore.EpisodicSnapshot) error {
 	if m == nil {
 		return fmt.Errorf("memory manager unavailable")
+	}
+	if !m.episodicEnabled {
+		return fmt.Errorf("episodic memory disabled")
 	}
 	ep, err := snapshotToEpisode(snapshot)
 	if err != nil {
@@ -50,13 +141,20 @@ func (m *Manager) WriteEpisode(ctx context.Context, snapshot agentcore.EpisodicS
 }
 
 // Summarize aggregates recent run summaries for a topic.
-func (m *Manager) Summarize(ctx context.Context, req memorysvc.SummaryRequest) (memorysvc.SummaryResponse, error) {
+func (m *Manager) Summarize(ctx context.Context, req memorysvc.SummaryRequest) (resp memorysvc.SummaryResponse, err error) {
 	if m == nil {
-		return memorysvc.SummaryResponse{}, fmt.Errorf("memory manager unavailable")
+		err = fmt.Errorf("memory manager unavailable")
+		return
+	}
+	if !m.episodicEnabled {
+		err = fmt.Errorf("episodic memory disabled")
+		return
 	}
 	if strings.TrimSpace(req.TopicID) == "" {
-		return memorysvc.SummaryResponse{}, fmt.Errorf("topic_id required")
+		err = fmt.Errorf("topic_id required")
+		return
 	}
+
 	maxRuns := req.MaxRuns
 	if maxRuns <= 0 {
 		maxRuns = 5
@@ -65,12 +163,96 @@ func (m *Manager) Summarize(ctx context.Context, req memorysvc.SummaryRequest) (
 		maxRuns = 20
 	}
 
-	runs, err := m.store.ListRuns(ctx, req.TopicID)
-	if err != nil {
-		return memorysvc.SummaryResponse{}, fmt.Errorf("list runs: %w", err)
+	var job *store.MemoryJobRecord
+	start := time.Now()
+	if m.store != nil {
+		params, marshalErr := json.Marshal(map[string]interface{}{
+			"max_runs": maxRuns,
+		})
+		if marshalErr != nil {
+			params = []byte(`{"max_runs":` + fmt.Sprintf("%d", maxRuns) + `}`)
+		}
+		started := time.Now().UTC()
+		if created, createErr := m.store.CreateMemoryJob(ctx, store.MemoryJobRecord{
+			TopicID:      req.TopicID,
+			JobType:      store.MemoryJobTypeSummarise,
+			Status:       store.MemoryJobStatusRunning,
+			ScheduledFor: started,
+			StartedAt:    &started,
+			Params:       params,
+		}); createErr == nil {
+			job = &created
+		} else if m.logger != nil {
+			m.logger.Printf("warn: create memory job failed: %v", createErr)
+		}
 	}
 
-	resp := memorysvc.SummaryResponse{TopicID: req.TopicID, GeneratedAt: time.Now().UTC()}
+	defer func() {
+		attrs := []attribute.KeyValue{attribute.String("topic_id", req.TopicID)}
+		elapsedMs := time.Since(start).Seconds() * 1000
+		if m.summaryLatency != nil {
+			m.summaryLatency.Record(ctx, elapsedMs, otelmetric.WithAttributes(attrs...))
+		}
+		if err != nil {
+			if m.summaryFailures != nil {
+				m.summaryFailures.Add(ctx, 1, otelmetric.WithAttributes(attrs...))
+			}
+		} else {
+			if m.summaryTotal != nil {
+				m.summaryTotal.Add(ctx, 1, otelmetric.WithAttributes(attrs...))
+			}
+		}
+		if job == nil {
+			return
+		}
+		status := store.MemoryJobStatusSuccess
+		errorMsg := ""
+		if err != nil {
+			status = store.MemoryJobStatusFailed
+			errorMsg = err.Error()
+		}
+		metricsBytes, metricsErr := json.Marshal(map[string]interface{}{
+			"runs_considered": len(resp.Items),
+			"max_runs":        maxRuns,
+			"summary_length":  len(resp.Summary),
+		})
+		if metricsErr != nil {
+			metricsBytes = []byte("{}")
+		}
+		summaryText := strings.TrimSpace(resp.Summary)
+		if summaryText == "" && status == store.MemoryJobStatusSuccess {
+			summaryText = fmt.Sprintf("processed %d runs", len(resp.Items))
+		}
+		if status == store.MemoryJobStatusFailed {
+			summaryText = ""
+		}
+		if completeErr := m.store.CompleteMemoryJob(ctx, job.ID, status, store.MemoryJobResultRecord{
+			JobID:    job.ID,
+			Metrics:  metricsBytes,
+			Summary:  summaryText,
+			ErrorMsg: errorMsg,
+		}); completeErr != nil {
+			if m.logger != nil {
+				m.logger.Printf("warn: complete memory job failed: %v", completeErr)
+			}
+			status = store.MemoryJobStatusFailed
+		}
+		if m.jobStatus != nil {
+			jobAttrs := []attribute.KeyValue{
+				attribute.String("job_type", store.MemoryJobTypeSummarise),
+				attribute.String("status", status),
+			}
+			m.jobStatus.Add(ctx, 1, otelmetric.WithAttributes(jobAttrs...))
+		}
+	}()
+
+	runs, listErr := m.store.ListRuns(ctx, req.TopicID)
+	if listErr != nil {
+		err = fmt.Errorf("list runs: %w", listErr)
+		return
+	}
+
+	resp = memorysvc.SummaryResponse{TopicID: req.TopicID, GeneratedAt: time.Now().UTC()}
 	limit := maxRuns
 	if len(runs) < limit {
 		limit = len(runs)
@@ -78,9 +260,10 @@ func (m *Manager) Summarize(ctx context.Context, req memorysvc.SummaryRequest) (
 	var lines []string
 	for i := 0; i < limit; i++ {
 		run := runs[i]
-		episode, ok, err := m.store.GetEpisodeByRunID(ctx, run.ID)
-		if err != nil {
-			return memorysvc.SummaryResponse{}, fmt.Errorf("get episode %s: %w", run.ID, err)
+		episode, ok, getErr := m.store.GetEpisodeByRunID(ctx, run.ID)
+		if getErr != nil {
+			err = fmt.Errorf("get episode %s: %w", run.ID, getErr)
+			return
 		}
 		if !ok {
 			continue
@@ -106,8 +289,8 @@ func (m *Manager) Summarize(ctx context.Context, req memorysvc.SummaryRequest) (
 	return resp, nil
 }
 
-// Delta filters already-seen items using known identifiers or hashes supplied by the caller.
-func (m *Manager) Delta(_ context.Context, req memorysvc.DeltaRequest) (memorysvc.DeltaResponse, error) {
+// Delta filters already-seen items using hashes and semantic similarity when available.
+func (m *Manager) Delta(ctx context.Context, req memorysvc.DeltaRequest) (memorysvc.DeltaResponse, error) {
 	if m == nil {
 		return memorysvc.DeltaResponse{}, fmt.Errorf("memory manager unavailable")
 	}
@@ -124,12 +307,40 @@ func (m *Manager) Delta(_ context.Context, req memorysvc.DeltaRequest) (memorysv
 	}
 	seen := make(map[string]struct{})
 	resp := memorysvc.DeltaResponse{TopicID: req.TopicID, Total: len(req.Items)}
+	start := time.Now()
+	success := false
+	defer func() {
+		if !success {
+			return
+		}
+		attrs := []attribute.KeyValue{attribute.Bool("semantic", m.semanticEnabled)}
+		if m.deltaTotal != nil {
+			m.deltaTotal.Add(ctx, int64(resp.Total), otelmetric.WithAttributes(attrs...))
+		}
+		if m.deltaNovel != nil {
+			m.deltaNovel.Add(ctx, int64(len(resp.Novel)), otelmetric.WithAttributes(attrs...))
+		}
+		if m.deltaDuplicates != nil {
+			m.deltaDuplicates.Add(ctx, int64(resp.DuplicateCount), otelmetric.WithAttributes(attrs...))
+		}
+		if m.deltaLatency != nil {
+			m.deltaLatency.Record(ctx, time.Since(start).Seconds()*1000, otelmetric.WithAttributes(attrs...))
+		}
+	}()
+	if len(req.Items) == 0 {
+		m.persistDelta(ctx, resp)
+		success = true
+		return resp, nil
+	}
+
+	var candidates []deltaCandidate
 	for _, item := range req.Items {
 		key := strings.TrimSpace(item.ID)
 		if key == "" {
 			key = strings.TrimSpace(item.Hash)
 		}
 		if key == "" {
+			resp.Novel = append(resp.Novel, item)
 			continue
 		}
 		if _, ok := known[key]; ok {
@@ -141,9 +352,151 @@ func (m *Manager) Delta(_ context.Context, req memorysvc.DeltaRequest) (memorysv
 			continue
 		}
 		seen[key] = struct{}{}
-		resp.Novel = append(resp.Novel, item)
+		if !m.semanticEnabled {
+			resp.Novel = append(resp.Novel, item)
+			continue
+		}
+		text := deltaText(item)
+		if text == "" {
+			resp.Novel = append(resp.Novel, item)
+			continue
+		}
+		candidates = append(candidates, deltaCandidate{Item: item, Text: text})
 	}
+
+	if !m.semanticEnabled || len(candidates) == 0 {
+		m.persistDelta(ctx, resp)
+		success = true
+		return resp, nil
+	}
+
+	texts := make([]string, 0, len(candidates))
+	for _, cand := range candidates {
+		texts = append(texts, cand.Text)
+	}
+	vectors, err := m.provider.Embed(ctx, m.cfg.Semantic.EmbeddingModel, texts)
+	if err != nil {
+		return memorysvc.DeltaResponse{}, fmt.Errorf("embed delta candidates: %w", err)
+	}
+	if len(vectors) != len(candidates) {
+		return memorysvc.DeltaResponse{}, fmt.Errorf("embedding provider returned %d vectors for %d candidates", len(vectors), len(candidates))
+	}
+
+	for idx, cand := range candidates {
+		vec := vectors[idx]
+		if len(vec) == 0 {
+			resp.Novel = append(resp.Novel, cand.Item)
+			continue
+		}
+		similar, err := m.store.HasSimilarRunEmbedding(ctx, req.TopicID, vec, m.deltaThreshold, m.deltaWindow)
+		if err != nil {
+			return memorysvc.DeltaResponse{}, fmt.Errorf("search run embeddings: %w", err)
+		}
+		if !similar && m.deltaWithSteps {
+			similar, err = m.store.HasSimilarPlanStepEmbedding(ctx, req.TopicID, vec, m.deltaThreshold, m.deltaWindow)
+			if err != nil {
+				return memorysvc.DeltaResponse{}, fmt.Errorf("search plan embeddings: %w", err)
+			}
+		}
+		if similar {
+			resp.DuplicateCount++
+			continue
+		}
+		resp.Novel = append(resp.Novel, cand.Item)
+	}
+	m.persistDelta(ctx, resp)
+	success = true
 	return resp, nil
+}
+
+type deltaCandidate struct {
+	Item memorysvc.DeltaItem
+	Text string
+}
+
+func (m *Manager) persistDelta(ctx context.Context, resp memorysvc.DeltaResponse) {
+	if m.store == nil {
+		return
+	}
+	meta := map[string]interface{}{
+		"novel_ids": extractDeltaIDs(resp.Novel),
+	}
+	rec := store.MemoryDeltaRecord{
+		TopicID:        resp.TopicID,
+		TotalItems:     resp.Total,
+		NovelItems:     len(resp.Novel),
+		DuplicateItems: resp.DuplicateCount,
+		Semantic:       m.semanticEnabled,
+		Metadata:       meta,
+	}
+	if err := m.store.LogMemoryDelta(ctx, rec); err != nil && m.logger != nil {
+		m.logger.Printf("warn: log memory delta failed: %v", err)
+	}
+}
+
+func deltaText(item memorysvc.DeltaItem) string {
+	keys := []string{"text", "summary", "content", "body", "description"}
+	for _, key := range keys {
+		if val, ok := lookupString(item.Payload, key); ok {
+			return val
+		}
+		if val, ok := lookupString(item.Metadata, key); ok {
+			return val
+		}
+	}
+	var parts []string
+	for key, raw := range item.Payload {
+		if str, ok := raw.(string); ok {
+			val := strings.TrimSpace(str)
+			if val != "" {
+				parts = append(parts, fmt.Sprintf("%s: %s", key, val))
+			}
+		}
+		if len(parts) >= 3 {
+			break
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	joined := strings.Join(parts, "\n")
+	if len(joined) > 4096 {
+		joined = joined[:4096]
+	}
+	return joined
+}
+
+func lookupString(m map[string]interface{}, key string) (string, bool) {
+	if m == nil {
+		return "", false
+	}
+	if val, ok := m[key]; ok {
+		switch v := val.(type) {
+		case string:
+			trimmed := strings.TrimSpace(v)
+			if trimmed != "" {
+				return trimmed, true
+			}
+		}
+	}
+	return "", false
+}
+
+func extractDeltaIDs(items []memorysvc.DeltaItem) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if id := strings.TrimSpace(item.ID); id != "" {
+			ids = append(ids, id)
+			continue
+		}
+		if hash := strings.TrimSpace(item.Hash); hash != "" {
+			ids = append(ids, hash)
+		}
+	}
+	return ids
 }
 
 func deriveFallbackSummary(res agentcore.ProcessingResult) string {

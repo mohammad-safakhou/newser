@@ -2,7 +2,7 @@
 
 Roadmap references: `Ix.Ey` = Initiative/Epic from `tasks.md`.
 
-- [ ] [I6.E1] Display evidence links with clickable citations for every claim returned by the API.
+- [x] [I6.E1] Display evidence links with clickable citations for every claim returned by the API.
 - [ ] [I6.E4] Build explainability UI elements (planner decisions, memory hits, evidence graph side panel, hover context).
 - [ ] [I7.E1] Implement the conversational builder (Topic/Blueprint/View/Route schemas), diff previews, and rollback UX.
 - [ ] [I7.E1] Add “Test Run” dry-run mode with cost/time estimation surfaced from the API.

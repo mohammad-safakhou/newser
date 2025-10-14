@@ -40,6 +40,12 @@
         "minLength": 1
       }
     },
+    "execution_layers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/execution_layer"
+      }
+    },
     "tasks": {
       "type": "array",
       "minItems": 1,
@@ -121,6 +127,29 @@
           "items": {
             "type": "string"
           }
+        }
+      }
+    },
+    "execution_layer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "tasks"],
+      "properties": {
+        "stage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tasks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "checkpoint_token": {
+          "type": "string",
+          "minLength": 1
         }
       }
     },

@@ -81,6 +81,7 @@ func (p *Publisher) Publish(ctx context.Context, stream string, envelope Envelop
 	if err != nil {
 		return "", fmt.Errorf("xadd: %w", err)
 	}
+	recordStreamMetrics(ctx, envelope.EventType, envelope.Data)
 	return id, nil
 }
 

@@ -163,3 +163,52 @@ func TestBudgetApprovalLifecycle(t *testing.T) {
 		t.Fatalf("expectations: %v", err)
 	}
 }
+
+func TestRecordBudgetBreach(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	st := &Store{DB: db}
+	maxCost := 10.0
+	cfg := budget.Config{MaxCost: &maxCost, RequireApproval: true}
+	usage := budget.Usage{Cost: 12.5}
+	exceeded := budget.ErrExceeded{Kind: "cost", Usage: "$12.50", Limit: "$10.00"}
+
+	mock.ExpectExec(`INSERT INTO run_budget_events`).
+		WithArgs("run-1", "topic-1", "breach", sqlmock.AnyArg(), nil).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	if err := st.RecordBudgetBreach(context.Background(), "run-1", "topic-1", cfg, usage, exceeded); err != nil {
+		t.Fatalf("RecordBudgetBreach: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+func TestRecordBudgetOverride(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	st := &Store{DB: db}
+	reason := "Approved after manual review"
+
+	mock.ExpectExec(`INSERT INTO run_budget_events`).
+		WithArgs("run-1", "topic-1", "override.approved", sqlmock.AnyArg(), "user-1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	if err := st.RecordBudgetOverride(context.Background(), "run-1", "topic-1", "user-1", true, &reason); err != nil {
+		t.Fatalf("RecordBudgetOverride: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}

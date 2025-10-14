@@ -131,9 +131,12 @@ func Run(cfg *config.Config) error {
 			semIngestor = ing
 		}
 	}
+	if semIngestor != nil {
+		orch.AttachSemanticMemory(semIngestor)
+	}
 
 	var episodicManager memorysvc.Manager
-	if mgr := memorymanager.New(auth.Store, cfg.Memory, log.New(log.Writer(), "[EPISODIC] ", log.LstdFlags)); mgr != nil {
+	if mgr := memorymanager.New(auth.Store, cfg.Memory, llmProvider, log.New(log.Writer(), "[EPISODIC] ", log.LstdFlags)); mgr != nil {
 		episodicManager = mgr
 	}
 

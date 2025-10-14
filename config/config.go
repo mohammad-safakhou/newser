@@ -99,11 +99,12 @@ type CapabilityConfig struct {
 
 // SecurityConfig declares sandbox policy defaults.
 type SecurityConfig struct {
-	SandboxProvider string        `mapstructure:"sandbox_provider"`
-	PolicyFile      string        `mapstructure:"policy_file"`
-	DefaultTimeout  time.Duration `mapstructure:"default_timeout"`
-	DefaultCPU      float64       `mapstructure:"default_cpu"`
-	DefaultMemory   string        `mapstructure:"default_memory"`
+	SandboxProvider string            `mapstructure:"sandbox_provider"`
+	PolicyFile      string            `mapstructure:"policy_file"`
+	DefaultTimeout  time.Duration     `mapstructure:"default_timeout"`
+	DefaultCPU      float64           `mapstructure:"default_cpu"`
+	DefaultMemory   string            `mapstructure:"default_memory"`
+	CrawlPolicy     CrawlPolicyConfig `mapstructure:"crawl_policy"`
 }
 
 // BuilderConfig defines conversational builder defaults.
@@ -183,13 +184,25 @@ type EpisodicMemoryConfig struct {
 
 // SemanticMemoryConfig defines behaviour for semantic embedding storage and search.
 type SemanticMemoryConfig struct {
-	Enabled             bool    `mapstructure:"enabled"`
-	EmbeddingModel      string  `mapstructure:"embedding_model"`
-	EmbeddingDimensions int     `mapstructure:"embedding_dimensions"`
-	SearchTopK          int     `mapstructure:"search_top_k"`
-	SearchThreshold     float64 `mapstructure:"search_threshold"`
-	WriterBatchSize     int     `mapstructure:"writer_batch_size"`
-	RebuildOnStartup    bool    `mapstructure:"rebuild_on_startup"`
+	Enabled             bool          `mapstructure:"enabled"`
+	EmbeddingModel      string        `mapstructure:"embedding_model"`
+	EmbeddingDimensions int           `mapstructure:"embedding_dimensions"`
+	SearchTopK          int           `mapstructure:"search_top_k"`
+	SearchThreshold     float64       `mapstructure:"search_threshold"`
+	WriterBatchSize     int           `mapstructure:"writer_batch_size"`
+	RebuildOnStartup    bool          `mapstructure:"rebuild_on_startup"`
+	DeltaThreshold      float64       `mapstructure:"delta_threshold"`
+	DeltaWindow         time.Duration `mapstructure:"delta_window"`
+	DeltaIncludeSteps   bool          `mapstructure:"delta_include_steps"`
+}
+
+// CrawlPolicyConfig configures domain-level crawling rules.
+type CrawlPolicyConfig struct {
+	RespectRobots bool              `mapstructure:"respect_robots" json:"respect_robots"`
+	Allow         []string          `mapstructure:"allow" json:"allow"`
+	Disallow      []string          `mapstructure:"disallow" json:"disallow"`
+	Paywall       []string          `mapstructure:"paywall" json:"paywall"`
+	Attribution   map[string]string `mapstructure:"attribution" json:"attribution"`
 }
 
 // RedisConfig contains Redis connection settings

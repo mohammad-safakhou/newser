@@ -14,13 +14,13 @@ import (
 )
 
 type planStore interface {
-    SavePlanGraph(ctx context.Context, rec store.PlanGraphRecord) error
-    GetLatestPlanGraph(ctx context.Context, thoughtID string) (store.PlanGraphRecord, bool, error)
+	SavePlanGraph(ctx context.Context, rec store.PlanGraphRecord) error
+	GetLatestPlanGraph(ctx context.Context, thoughtID string) (store.PlanGraphRecord, bool, error)
 }
 
 type planRepository struct {
-    store  planStore
-    logger *log.Logger
+	store  planStore
+	logger *log.Logger
 }
 
 func newPlanRepository(st *store.Store, logger *log.Logger) agentcore.PlanRepository {
@@ -37,6 +37,29 @@ func (r *planRepository) SavePlanGraph(ctx context.Context, thoughtID string, do
 	if doc == nil {
 		return "", fmt.Errorf("plan document is nil")
 	}
+
+	var (
+		normalizedDoc  *planner.PlanDocument
+		normalizedJSON []byte
+		err            error
+	)
+	if len(raw) > 0 {
+		normalizedDoc, normalizedJSON, err = planner.NormalizePlanDocument(raw)
+		if err != nil {
+			return "", err
+		}
+	} else {
+		encoded, err := json.Marshal(doc)
+		if err != nil {
+			return "", fmt.Errorf("marshal plan doc: %w", err)
+		}
+		normalizedDoc, normalizedJSON, err = planner.NormalizePlanDocument(encoded)
+		if err != nil {
+			return "", err
+		}
+	}
+	*doc = *normalizedDoc
+	raw = normalizedJSON
 	planID := doc.PlanID
 	if planID == "" {
 		if thoughtID != "" {
@@ -50,13 +73,11 @@ func (r *planRepository) SavePlanGraph(ctx context.Context, thoughtID string, do
 		doc.Version = "v1"
 	}
 
-	if len(raw) == 0 {
-		encoded, err := json.Marshal(doc)
-		if err != nil {
-			return planID, fmt.Errorf("marshal plan doc: %w", err)
-		}
-		raw = encoded
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		return planID, fmt.Errorf("marshal plan doc: %w", err)
 	}
+	raw = encoded
 
 	budgetBytes, err := json.Marshal(doc.Budget)
 	if err != nil {

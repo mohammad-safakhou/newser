@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mohammad-safakhou/newser/config"
+	policypkg "github.com/mohammad-safakhou/newser/internal/policy"
 	"github.com/mohammad-safakhou/newser/internal/runtime"
 )
 
@@ -39,6 +40,10 @@ func main() {
 
 	if _, _, err := runtime.InitSchemaRegistry(ctx, cfg); err != nil {
 		log.Fatalf("crawler schema registry init: %v", err)
+	}
+
+	if _, err := policypkg.NewCrawlPolicy(cfg.Security.CrawlPolicy); err != nil {
+		log.Fatalf("crawler policy invalid: %v", err)
 	}
 
 	if err := runtime.RunPlaceholder(ctx, "crawler"); err != nil {

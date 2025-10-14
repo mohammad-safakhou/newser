@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +24,7 @@ type Planner struct {
 	telemetry   *telemetry.Telemetry
 	logger      *log.Logger
 	registry    *capability.Registry
+	semantic    SemanticMemory
 }
 
 // NewPlanner creates a new planner instance
@@ -36,12 +38,37 @@ func NewPlanner(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetr
 	}
 }
 
+// SetSemanticMemory attaches the semantic memory backend used for contextual retrieval.
+func (p *Planner) SetSemanticMemory(memory SemanticMemory) {
+	p.semantic = memory
+}
+
 // Plan creates an execution plan for a user thought
 func (p *Planner) Plan(ctx context.Context, thought UserThought) (PlanningResult, error) {
 	startTime := time.Now()
 
+	semanticBlock := ""
+	var semanticResults *SemanticSearchResults
+	if p.semantic != nil && thought.TopicID != "" {
+		if query := selectSemanticQuery(thought); query != "" {
+			req := SemanticSearchRequest{
+				TopicID:      thought.TopicID,
+				Query:        query,
+				TopK:         p.semanticTopK(),
+				Threshold:    p.semanticThreshold(),
+				IncludeSteps: true,
+			}
+			if results, err := p.semantic.SearchSimilar(ctx, req); err != nil {
+				p.logger.Printf("warn: semantic memory search failed: %v", err)
+			} else if len(results.Runs) > 0 || len(results.PlanSteps) > 0 {
+				semanticResults = &results
+				semanticBlock = formatSemanticBlock(results)
+			}
+		}
+	}
+
 	// Create planning prompt with schema guidance
-	prompt := p.createPlanningPrompt(thought)
+	prompt := p.createPlanningPrompt(thought, semanticBlock)
 
 	// Get the planning model
 	model := p.config.LLM.Routing.Planning
@@ -57,6 +84,24 @@ func (p *Planner) Plan(ctx context.Context, thought UserThought) (PlanningResult
 	if err != nil {
 		return PlanningResult{}, fmt.Errorf("failed to parse planning response: %w", err)
 	}
+	if plan.Graph != nil {
+		est := budget.EstimateFromPlan(plan.Graph)
+		plan.BudgetEstimate = &est
+		if plan.Graph.Metadata == nil {
+			plan.Graph.Metadata = make(map[string]interface{})
+		}
+		plan.Graph.Metadata["budget_estimate"] = budget.SerializeEstimate(est)
+	}
+	plan.Semantic = semanticResults
+	if plan.Graph != nil && semanticResults != nil {
+		if plan.Graph.Metadata == nil {
+			plan.Graph.Metadata = make(map[string]interface{})
+		}
+		plan.Graph.Metadata["semantic_context"] = semanticMetadata(*semanticResults)
+		if updated, err := json.Marshal(plan.Graph); err == nil {
+			plan.RawJSON = updated
+		}
+	}
 
 	// Validate the plan
 	if err := p.ValidatePlan(plan); err != nil {
@@ -64,6 +109,12 @@ func (p *Planner) Plan(ctx context.Context, thought UserThought) (PlanningResult
 	}
 
 	applyBudgetToPlan(&plan, thought.Budget, p.registry)
+	if plan.BudgetEstimate == nil && len(plan.RawJSON) > 0 {
+		if doc, _, err := plannerv1.NormalizePlanDocument(plan.RawJSON); err == nil {
+			est := budget.EstimateFromPlan(doc)
+			plan.BudgetEstimate = &est
+		}
+	}
 	if plan.BudgetApprovalRequired {
 		threshold := 0.0
 		if plan.BudgetConfig != nil && plan.BudgetConfig.ApprovalThreshold != nil {
@@ -137,6 +188,143 @@ func (p *Planner) Plan(ctx context.Context, thought UserThought) (PlanningResult
 	return plan, nil
 }
 
+func (p *Planner) semanticTopK() int {
+	if p.config != nil && p.config.Memory.Semantic.SearchTopK > 0 {
+		return p.config.Memory.Semantic.SearchTopK
+	}
+	return 5
+}
+
+func (p *Planner) semanticThreshold() float64 {
+	if p.config != nil && p.config.Memory.Semantic.SearchThreshold > 0 {
+		return p.config.Memory.Semantic.SearchThreshold
+	}
+	return 0.8
+}
+
+func selectSemanticQuery(thought UserThought) string {
+	candidates := []string{
+		thought.Content,
+	}
+	if thought.Preferences != nil {
+		if summary, ok := thought.Preferences["context_summary"].(string); ok {
+			candidates = append(candidates, summary)
+		}
+		if prompt, ok := thought.Preferences["prompt"].(string); ok {
+			candidates = append(candidates, prompt)
+		}
+	}
+	if thought.Context != nil {
+		if prev, ok := thought.Context["prev_summary"].(string); ok {
+			candidates = append(candidates, prev)
+		}
+		if last, ok := thought.Context["last_plan_prompt"].(string); ok {
+			candidates = append(candidates, last)
+		}
+	}
+	for _, candidate := range candidates {
+		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func formatSemanticBlock(results SemanticSearchResults) string {
+	const limit = 3
+	var b strings.Builder
+	if len(results.Runs) > 0 {
+		b.WriteString("\nSEMANTIC MEMORY HINTS (recent runs):\n")
+		for idx, hit := range results.Runs {
+			if idx >= limit {
+				break
+			}
+			snippet := semanticSnippet(hit.Metadata, "summary_snippet", "summary")
+			b.WriteString(fmt.Sprintf("%d) Run %s — similarity %.2f", idx+1, hit.RunID, hit.Similarity))
+			if snippet != "" {
+				b.WriteString(": ")
+				b.WriteString(snippet)
+			}
+			b.WriteString("\n")
+		}
+	}
+	if len(results.PlanSteps) > 0 {
+		b.WriteString("\nRELATED PLAN STEPS:\n")
+		for idx, hit := range results.PlanSteps {
+			if idx >= limit {
+				break
+			}
+			desc := semanticSnippet(hit.Metadata, "description", "name")
+			if desc == "" {
+				desc = fmt.Sprintf("task %s", hit.TaskID)
+			}
+			b.WriteString(fmt.Sprintf("%d) Run %s → %s — similarity %.2f\n", idx+1, hit.RunID, desc, hit.Similarity))
+		}
+	}
+	return b.String()
+}
+
+func semanticSnippet(meta map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if meta == nil {
+			continue
+		}
+		if val, ok := meta[key].(string); ok {
+			trimmed := strings.TrimSpace(val)
+			if trimmed == "" {
+				continue
+			}
+			if len(trimmed) > 180 {
+				trimmed = trimmed[:180] + "..."
+			}
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func semanticMetadata(results SemanticSearchResults) map[string]interface{} {
+	meta := make(map[string]interface{})
+	if len(results.Runs) > 0 {
+		items := make([]map[string]interface{}, 0, len(results.Runs))
+		for _, hit := range results.Runs {
+			entry := map[string]interface{}{
+				"run_id":     hit.RunID,
+				"topic_id":   hit.TopicID,
+				"kind":       hit.Kind,
+				"distance":   hit.Distance,
+				"similarity": hit.Similarity,
+				"created_at": hit.CreatedAt,
+			}
+			if hit.Metadata != nil {
+				entry["metadata"] = hit.Metadata
+			}
+			items = append(items, entry)
+		}
+		meta["runs"] = items
+	}
+	if len(results.PlanSteps) > 0 {
+		items := make([]map[string]interface{}, 0, len(results.PlanSteps))
+		for _, hit := range results.PlanSteps {
+			entry := map[string]interface{}{
+				"run_id":     hit.RunID,
+				"topic_id":   hit.TopicID,
+				"task_id":    hit.TaskID,
+				"kind":       hit.Kind,
+				"distance":   hit.Distance,
+				"similarity": hit.Similarity,
+				"created_at": hit.CreatedAt,
+			}
+			if hit.Metadata != nil {
+				entry["metadata"] = hit.Metadata
+			}
+			items = append(items, entry)
+		}
+		meta["plan_steps"] = items
+	}
+	return meta
+}
+
 func applyBudgetToPlan(plan *PlanningResult, cfg *budget.Config, reg *capability.Registry) {
 	if plan == nil {
 		return
@@ -147,6 +335,14 @@ func applyBudgetToPlan(plan *PlanningResult, cfg *budget.Config, reg *capability
 	plan.Budget = nil
 	if plan.Graph != nil {
 		plan.Graph.Budget = nil
+	}
+	if plan.BudgetEstimate == nil && plan.Graph != nil {
+		est := budget.EstimateFromPlan(plan.Graph)
+		plan.BudgetEstimate = &est
+		if plan.Graph.Metadata == nil {
+			plan.Graph.Metadata = make(map[string]interface{})
+		}
+		plan.Graph.Metadata["budget_estimate"] = budget.SerializeEstimate(est)
 	}
 	if cfg == nil {
 		return
@@ -185,6 +381,10 @@ func applyBudgetToPlan(plan *PlanningResult, cfg *budget.Config, reg *capability
 			plan.Graph.Metadata = make(map[string]interface{})
 		}
 		plan.Graph.Metadata["budget_source"] = "topic"
+		plan.Graph.Metadata["budget_config"] = budget.SerializeConfig(clone)
+		if plan.BudgetEstimate != nil {
+			plan.Graph.Metadata["budget_estimate"] = budget.SerializeEstimate(*plan.BudgetEstimate)
+		}
 	}
 	if clone.ApprovalThreshold != nil && plan.EstimatedCost > 0 && plan.EstimatedCost > *clone.ApprovalThreshold {
 		plan.BudgetApprovalRequired = true
@@ -360,7 +560,7 @@ func applyTemporalPolicyHints(plan *PlanningResult, pol policypkg.UpdatePolicy) 
 }
 
 // createPlanningPrompt creates a comprehensive prompt for planning
-func (p *Planner) createPlanningPrompt(thought UserThought) string {
+func (p *Planner) createPlanningPrompt(thought UserThought, semanticBlock string) string {
 	// Prior context block
 	ctxBlock := ""
 	if thought.Context != nil {
@@ -387,6 +587,9 @@ func (p *Planner) createPlanningPrompt(thought UserThought) string {
 	}
 	if ctxBlock != "" {
 		ctxBlock = "\nPRIOR CONTEXT:\n" + ctxBlock
+	}
+	if semanticBlock != "" {
+		ctxBlock += semanticBlock
 	}
 
 	// Temporal policy guidance for the planner
@@ -517,16 +720,9 @@ func (p *Planner) parsePlanningResponse(response string) (PlanningResult, error)
 	}
 
 	jsonBytes := []byte(jsonStr)
-	if err := plannerv1.ValidatePlanDocument(jsonBytes); err != nil {
+	graph, normalized, err := plannerv1.NormalizePlanDocument(jsonBytes)
+	if err != nil {
 		return PlanningResult{}, fmt.Errorf("plan schema validation failed: %w", err)
-	}
-
-	var graph plannerv1.PlanDocument
-	if err := json.Unmarshal(jsonBytes, &graph); err != nil {
-		return PlanningResult{}, fmt.Errorf("failed to decode plan graph: %w", err)
-	}
-	if graph.Version == "" {
-		graph.Version = "v1"
 	}
 
 	tasks := make([]AgentTask, 0, len(graph.Tasks))
@@ -581,8 +777,8 @@ func (p *Planner) parsePlanningResponse(response string) (PlanningResult, error)
 		Budget:         graph.Budget,
 		Edges:          graph.Edges,
 		Estimates:      graph.Estimates,
-		Graph:          &graph,
-		RawJSON:        jsonBytes,
+		Graph:          graph,
+		RawJSON:        normalized,
 	}, nil
 }
 
