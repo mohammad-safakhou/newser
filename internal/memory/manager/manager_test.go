@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,10 @@ type stubStore struct {
 	jobResults     []store.MemoryJobResultRecord
 	createJobError error
 	completeError  error
+	prunedRuns     int64
+	prunedPlan     int64
+	pruneRunError  error
+	prunePlanError error
 }
 
 func (s *stubStore) SaveEpisode(context.Context, store.Episode) error      { return nil }
@@ -59,6 +64,48 @@ func (s *stubStore) CompleteMemoryJob(_ context.Context, jobID int64, status str
 	result.JobID = jobID
 	s.jobResults = append(s.jobResults, result)
 	return nil
+}
+
+func (s *stubStore) PruneRunEmbeddingsBefore(context.Context, time.Time) (int64, error) {
+	if s.pruneRunError != nil {
+		return 0, s.pruneRunError
+	}
+	return s.prunedRuns, nil
+}
+
+func (s *stubStore) PrunePlanStepEmbeddingsBefore(context.Context, time.Time) (int64, error) {
+	if s.prunePlanError != nil {
+		return 0, s.prunePlanError
+	}
+	return s.prunedPlan, nil
+}
+
+func (s *stubStore) MemoryHealthStats(context.Context, time.Duration) (store.MemoryHealthStats, error) {
+	return store.MemoryHealthStats{}, nil
+}
+
+func (s *stubStore) ListProceduralTemplateFingerprints(context.Context, string, int) ([]store.ProceduralTemplateFingerprintRecord, error) {
+	return nil, nil
+}
+
+func (s *stubStore) CreateProceduralTemplate(ctx context.Context, rec store.ProceduralTemplateRecord) (store.ProceduralTemplateRecord, error) {
+	return rec, nil
+}
+
+func (s *stubStore) CreateProceduralTemplateVersion(ctx context.Context, rec store.ProceduralTemplateVersionRecord) (store.ProceduralTemplateVersionRecord, error) {
+	return rec, nil
+}
+
+func (s *stubStore) LinkProceduralTemplateFingerprint(context.Context, string, string, string) error {
+	return nil
+}
+
+func (s *stubStore) ListProceduralTemplates(context.Context, string) ([]store.ProceduralTemplateRecord, error) {
+	return nil, nil
+}
+
+func (s *stubStore) ListProceduralTemplateVersions(context.Context, string) ([]store.ProceduralTemplateVersionRecord, error) {
+	return nil, nil
 }
 
 type stubProvider struct {
@@ -151,4 +198,39 @@ func TestManagerDeltaSemanticDuplicate(t *testing.T) {
 	if store.deltaRecords[0].DuplicateItems != 1 {
 		t.Fatalf("expected duplicate count recorded")
 	}
+}
+
+func TestManagerPruneSemanticEmbeddings(t *testing.T) {
+	cfg := config.MemoryConfig{}
+	cfg.Semantic.Enabled = true
+	cfg.Semantic.EmbeddingModel = "embed"
+	provider := &stubProvider{}
+    stub := &stubStore{
+        prunedRuns: 4,
+        prunedPlan: 2,
+    }
+    mgr := New(stub, cfg, provider, nil)
+	if mgr == nil {
+		t.Fatalf("expected manager instance")
+	}
+	cutoff := time.Now().Add(-24 * time.Hour)
+	stats, err := mgr.PruneSemanticEmbeddings(context.Background(), cutoff)
+	if err != nil {
+		t.Fatalf("PruneSemanticEmbeddings returned error: %v", err)
+	}
+	if stats.RunEmbeddings != 4 || stats.PlanEmbeddings != 2 {
+		t.Fatalf("unexpected prune stats: %+v", stats)
+	}
+    if len(stub.jobStatuses) != 1 {
+        t.Fatalf("expected prune job recorded, got %d statuses", len(stub.jobStatuses))
+    }
+    if stub.jobStatuses[0] != store.MemoryJobStatusSuccess {
+        t.Fatalf("expected prune job success, got %s", stub.jobStatuses[0])
+    }
+    if len(stub.jobResults) == 0 {
+        t.Fatalf("expected prune job result recorded")
+    }
+    if summary := strings.TrimSpace(stub.jobResults[0].Summary); summary == "" {
+        t.Fatalf("expected summary in job result")
+    }
 }

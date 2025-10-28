@@ -1,9 +1,14 @@
 sandbox:
   provider: docker
   image: alpine:3.20
+  image_allowlist:
+    - alpine:3.20
   cpu: 1
+  max_cpu: 1
   memory: 1Gi
+  max_memory: 2Gi
   timeout: 120s
+  max_timeout: 180s
   network:
     enabled: false
     allowlist: []
@@ -12,6 +17,8 @@ sandbox:
     - LANG
   mount_readonly:
     - /etc/ssl/certs
+  command_allowlist:
+    - echo
 crawl_policy:
   respect_robots: true
   allow: []

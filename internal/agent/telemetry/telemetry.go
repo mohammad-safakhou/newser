@@ -27,21 +27,29 @@ type Telemetry struct {
 	costTracker *CostTracker
 	mu          sync.RWMutex
 	// otel instruments
-	runDuration           otelmetric.Float64Histogram
-	runCost               otelmetric.Float64Histogram
-	runTokens             otelmetric.Int64Counter
-	runFailures           otelmetric.Int64Counter
-	runBudgetUsageCost    otelmetric.Float64Histogram
-	runBudgetUsageTokens  otelmetric.Int64Counter
-	runBudgetUsageSeconds otelmetric.Float64Histogram
-	runBudgetOverruns     otelmetric.Int64Counter
-	runBudgetUsageRatio   otelmetric.Float64Histogram
-	runBudgetAlerts       otelmetric.Int64Counter
-	agentDuration         otelmetric.Float64Histogram
-	agentCost             otelmetric.Float64Histogram
-	agentTokens           otelmetric.Int64Counter
-	agentFailures         otelmetric.Int64Counter
-	budgetAlertAt         map[string]time.Time
+	runDuration               otelmetric.Float64Histogram
+	runCost                   otelmetric.Float64Histogram
+	runTokens                 otelmetric.Int64Counter
+	runFailures               otelmetric.Int64Counter
+	runBudgetUsageCost        otelmetric.Float64Histogram
+	runBudgetUsageTokens      otelmetric.Int64Counter
+	runBudgetUsageSeconds     otelmetric.Float64Histogram
+	runBudgetOverruns         otelmetric.Int64Counter
+	runBudgetUsageRatio       otelmetric.Float64Histogram
+	runBudgetAlerts           otelmetric.Int64Counter
+	agentDuration             otelmetric.Float64Histogram
+	agentCost                 otelmetric.Float64Histogram
+	agentTokens               otelmetric.Int64Counter
+	agentFailures             otelmetric.Int64Counter
+    fairnessBias              otelmetric.Float64Histogram
+    fairnessCredibility       otelmetric.Float64Histogram
+    fairnessLowSources        otelmetric.Int64Counter
+    fairnessRegressions       otelmetric.Int64Counter
+    fairnessBiasDistribution  otelmetric.Float64Histogram
+	templateSuggestionCounter otelmetric.Int64Counter
+	templateReuseCounter      otelmetric.Int64Counter
+	templateTaskHistogram     otelmetric.Float64Histogram
+	budgetAlertAt             map[string]time.Time
 }
 
 // Metrics holds various performance metrics
@@ -148,6 +156,26 @@ type SourceEvent struct {
 	Success   bool
 	Error     string
 	Results   int
+}
+
+// TemplateEvent captures procedural template suggestion and reuse signals.
+type TemplateEvent struct {
+	TopicID     string
+	Stage       string
+	Fingerprint string
+	TemplateID  string
+	Occurrences int
+	TaskCount   int
+	Status      string
+}
+
+// FairnessMetrics summarises bias and credibility adjustments applied to a run.
+type FairnessMetrics struct {
+    Bias               float64
+    AverageCredibility float64
+    LowCredibility     int
+    TotalSources       int
+    Regressed          bool
 }
 
 // NewTelemetry creates a new telemetry instance
@@ -293,6 +321,72 @@ func NewTelemetry(config config.TelemetryConfig) *Telemetry {
 		t.logger.Printf("otel counter agent_execution_failures: %v", err)
 	} else {
 		t.agentFailures = ctr
+	}
+    if hist, err := meter.Float64Histogram(
+        "agent_fairness_bias",
+        otelmetric.WithDescription("Bias adjustments applied during fairness scoring"),
+    ); err != nil {
+        t.logger.Printf("otel histogram agent_fairness_bias: %v", err)
+    } else {
+        t.fairnessBias = hist
+    }
+    if hist, err := meter.Float64Histogram(
+        "agent_fairness_avg_credibility",
+        otelmetric.WithDescription("Average credibility after fairness adjustments"),
+    ); err != nil {
+        t.logger.Printf("otel histogram agent_fairness_avg_credibility: %v", err)
+    } else {
+        t.fairnessCredibility = hist
+    }
+    if ctr, err := meter.Int64Counter(
+        "agent_fairness_low_sources",
+        otelmetric.WithDescription("Sources falling below minimum credibility"),
+    ); err != nil {
+        t.logger.Printf("otel counter agent_fairness_low_sources: %v", err)
+    } else {
+        t.fairnessLowSources = ctr
+    }
+    if ctr, err := meter.Int64Counter(
+        "agent_fairness_regressions_total",
+        otelmetric.WithDescription("Runs where fairness metrics regressed vs baseline"),
+    ); err != nil {
+        t.logger.Printf("otel counter agent_fairness_regressions_total: %v", err)
+    } else {
+        t.fairnessRegressions = ctr
+    }
+    if hist, err := meter.Float64Histogram(
+        "agent_fairness_bias_distribution",
+        otelmetric.WithDescription("Distribution of per-run fairness bias adjustments"),
+        otelmetric.WithUnit("1"),
+    ); err != nil {
+        t.logger.Printf("otel histogram agent_fairness_bias_distribution: %v", err)
+    } else {
+        t.fairnessBiasDistribution = hist
+    }
+	if ctr, err := meter.Int64Counter(
+		"procedural_template_events_total",
+		otelmetric.WithDescription("Occurrences of procedural template fingerprints (by status)"),
+	); err != nil {
+		t.logger.Printf("otel counter procedural_template_events_total: %v", err)
+	} else {
+		t.templateSuggestionCounter = ctr
+	}
+	if ctr, err := meter.Int64Counter(
+		"procedural_template_reuse_total",
+		otelmetric.WithDescription("Occurrences where a plan stage matched an existing template"),
+	); err != nil {
+		t.logger.Printf("otel counter procedural_template_reuse_total: %v", err)
+	} else {
+		t.templateReuseCounter = ctr
+	}
+	if hist, err := meter.Float64Histogram(
+		"procedural_template_task_count",
+		otelmetric.WithDescription("Task count captured within suggested procedural templates"),
+		otelmetric.WithUnit("1"),
+	); err != nil {
+		t.logger.Printf("otel histogram procedural_template_task_count: %v", err)
+	} else {
+		t.templateTaskHistogram = hist
 	}
 
 	// Start background tasks (periodic logs can be disabled via config)
@@ -448,6 +542,70 @@ func (t *Telemetry) RecordBudgetUsage(ctx context.Context, usage budget.Usage, c
 	}
 	if cfg.MaxTimeSeconds != nil && *cfg.MaxTimeSeconds > 0 && usage.Elapsed > 0 {
 		recordRatio("time", usage.Elapsed.Seconds(), float64(*cfg.MaxTimeSeconds))
+	}
+}
+
+// RecordFairness logs fairness metrics for a run.
+func (t *Telemetry) RecordFairness(ctx context.Context, metrics FairnessMetrics) {
+    if !t.config.Enabled {
+        return
+    }
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+    if t.fairnessBias != nil {
+        t.fairnessBias.Record(ctx, metrics.Bias)
+        if t.fairnessBiasDistribution != nil {
+            t.fairnessBiasDistribution.Record(ctx, metrics.Bias)
+        }
+    }
+    if t.fairnessCredibility != nil {
+        t.fairnessCredibility.Record(ctx, metrics.AverageCredibility)
+    }
+    if t.fairnessLowSources != nil && metrics.LowCredibility > 0 {
+        t.fairnessLowSources.Add(ctx, int64(metrics.LowCredibility))
+    }
+    if t.fairnessRegressions != nil && metrics.Regressed {
+        t.fairnessRegressions.Add(ctx, 1)
+    }
+}
+
+// RecordTemplateEvent emits telemetry for procedural template suggestions and reuse.
+func (t *Telemetry) RecordTemplateEvent(ctx context.Context, event TemplateEvent) {
+	if !t.config.Enabled {
+		return
+	}
+	status := event.Status
+	if status == "" {
+		status = "candidate"
+	}
+	attrs := []attribute.KeyValue{
+		attribute.String("template.status", status),
+	}
+	if event.TopicID != "" {
+		attrs = append(attrs, attribute.String("topic_id", event.TopicID))
+	}
+	if event.Stage != "" {
+		attrs = append(attrs, attribute.String("stage", event.Stage))
+	}
+	if event.TemplateID != "" {
+		attrs = append(attrs, attribute.String("template_id", event.TemplateID))
+	}
+	if event.Fingerprint != "" {
+		attrs = append(attrs, attribute.String("fingerprint", event.Fingerprint))
+	}
+	if event.Occurrences > 0 {
+		attrs = append(attrs, attribute.Int64("occurrences", int64(event.Occurrences)))
+	}
+	if t.templateSuggestionCounter != nil {
+		t.templateSuggestionCounter.Add(ctx, 1, otelmetric.WithAttributes(attrs...))
+	}
+	if status == "reused" && t.templateReuseCounter != nil {
+		t.templateReuseCounter.Add(ctx, 1, otelmetric.WithAttributes(attrs...))
+	}
+	if event.TaskCount > 0 && t.templateTaskHistogram != nil {
+		t.templateTaskHistogram.Record(ctx, float64(event.TaskCount), otelmetric.WithAttributes(attrs...))
 	}
 }
 

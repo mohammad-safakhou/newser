@@ -116,8 +116,9 @@ func Run(cfg *config.Config) error {
 	}
 
 	planRepo := newPlanRepository(auth.Store, orchLogger)
+	templateRepo := newTemplateRepository(auth.Store, orchLogger)
 	episodesRepo := newEpisodicRepository(auth.Store)
-	orch, err := agentcore.NewOrchestrator(cfg, orchLogger, tele, capRegistry, planRepo, episodesRepo)
+	orch, err := agentcore.NewOrchestrator(cfg, orchLogger, tele, capRegistry, planRepo, episodesRepo, templateRepo)
 	if err != nil {
 		return err
 	}

@@ -1,13 +1,14 @@
 package core
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-func buildEvidence(items []map[string]interface{}) []Evidence {
+func buildEvidence(items []map[string]interface{}, lookup map[string]*Source) []Evidence {
 	if len(items) == 0 {
 		return nil
 	}
@@ -36,6 +37,7 @@ func buildEvidence(items []map[string]interface{}) []Evidence {
 			Statement: statement,
 			SourceIDs: sourceIDs,
 			Metadata:  make(map[string]interface{}),
+			Sources:   extractEvidenceSources(item["sources"], lookup),
 		}
 		if cat, ok := item["category"].(string); ok && strings.TrimSpace(cat) != "" {
 			ev.Category = strings.TrimSpace(cat)
@@ -130,4 +132,97 @@ func evidenceMetadataTimestamp(item map[string]interface{}, key string) *time.Ti
 		}
 	}
 	return nil
+}
+
+func extractEvidenceSources(raw interface{}, lookup map[string]*Source) []EvidenceSource {
+	var entries []map[string]interface{}
+	switch v := raw.(type) {
+	case []map[string]interface{}:
+		entries = v
+	case []interface{}:
+		for _, item := range v {
+			if m, ok := item.(map[string]interface{}); ok {
+				entries = append(entries, m)
+			}
+		}
+	default:
+		return nil
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]EvidenceSource, 0, len(entries))
+	for _, entry := range entries {
+		if entry == nil {
+			continue
+		}
+		id := strings.TrimSpace(stringFromAny(entry["id"]))
+		url := strings.TrimSpace(stringFromAny(entry["url"]))
+		title := strings.TrimSpace(stringFromAny(entry["title"]))
+		domain := strings.TrimSpace(stringFromAny(entry["domain"]))
+		if domain == "" && url != "" {
+			domain = toDomain(url)
+		}
+		snippet := strings.TrimSpace(stringFromAny(entry["snippet"]))
+		if snippet == "" && id != "" && lookup != nil {
+			if src, ok := lookup[id]; ok && src != nil {
+				snippet = trimSnippet(src.Summary)
+				if snippet == "" {
+					snippet = trimSnippet(src.Content)
+				}
+			}
+		}
+		cred := 0.0
+		if id != "" && lookup != nil {
+			if src, ok := lookup[id]; ok && src != nil {
+				cred = src.Credibility
+			}
+		}
+		if cred == 0 {
+			if v, ok := asFloat(entry["credibility"]); ok {
+				cred = v
+			}
+		}
+		out = append(out, EvidenceSource{
+			ID:          id,
+			Title:       title,
+			URL:         url,
+			Domain:      domain,
+			Snippet:     snippet,
+			Credibility: cred,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func stringFromAny(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case fmt.Stringer:
+		return v.String()
+	case jsonNumber:
+		if s, ok := v.(fmt.Stringer); ok {
+			return s.String()
+		}
+		if f, err := v.Float64(); err == nil {
+			return fmt.Sprintf("%.3f", f)
+		}
+		return ""
+	case float64:
+		return fmt.Sprintf("%.3f", v)
+	case float32:
+		return fmt.Sprintf("%.3f", v)
+	case int:
+		return fmt.Sprintf("%d", v)
+	case int64:
+		return fmt.Sprintf("%d", v)
+	case bool:
+		return fmt.Sprintf("%t", v)
+	default:
+		return ""
+	}
 }

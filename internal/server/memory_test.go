@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -79,6 +81,16 @@ type stubMemoryManager struct {
 	deltaReq     memorysvc.DeltaRequest
 	deltaResp    memorysvc.DeltaResponse
 	deltaErr     error
+	healthResp   memorysvc.HealthStats
+	healthErr    error
+	fingerprints []core.TemplateFingerprintState
+	templates    []core.ProceduralTemplate
+	promoteReq   memorysvc.TemplatePromotionRequest
+	promoteResp  core.ProceduralTemplate
+	promoteErr   error
+	approveReq   memorysvc.TemplateApprovalRequest
+	approveResp  core.ProceduralTemplate
+	approveErr   error
 }
 
 func (m *stubMemoryManager) WriteEpisode(ctx context.Context, snapshot core.EpisodicSnapshot) error {
@@ -103,6 +115,49 @@ func (m *stubMemoryManager) Delta(ctx context.Context, req memorysvc.DeltaReques
 	}
 	m.deltaReq = req
 	return m.deltaResp, m.deltaErr
+}
+
+func (m *stubMemoryManager) Health(ctx context.Context) (memorysvc.HealthStats, error) {
+	if ctx == nil {
+		return memorysvc.HealthStats{}, errors.New("missing context")
+	}
+	return m.healthResp, m.healthErr
+}
+
+func (m *stubMemoryManager) ListFingerprints(ctx context.Context, topicID string, limit int) ([]core.TemplateFingerprintState, error) {
+	if ctx == nil {
+		return nil, errors.New("missing context")
+	}
+	return m.fingerprints, nil
+}
+
+func (m *stubMemoryManager) PromoteFingerprint(ctx context.Context, req memorysvc.TemplatePromotionRequest) (core.ProceduralTemplate, error) {
+	if ctx == nil {
+		return core.ProceduralTemplate{}, errors.New("missing context")
+	}
+	m.promoteReq = req
+	if m.promoteErr != nil {
+		return core.ProceduralTemplate{}, m.promoteErr
+	}
+	return m.promoteResp, nil
+}
+
+func (m *stubMemoryManager) ListTemplates(ctx context.Context, topicID string) ([]core.ProceduralTemplate, error) {
+	if ctx == nil {
+		return nil, errors.New("missing context")
+	}
+	return m.templates, nil
+}
+
+func (m *stubMemoryManager) ApproveTemplate(ctx context.Context, req memorysvc.TemplateApprovalRequest) (core.ProceduralTemplate, error) {
+	if ctx == nil {
+		return core.ProceduralTemplate{}, errors.New("missing context")
+	}
+	m.approveReq = req
+	if m.approveErr != nil {
+		return core.ProceduralTemplate{}, m.approveErr
+	}
+	return m.approveResp, nil
 }
 
 func TestMemoryHandlerSearchSuccess(t *testing.T) {
@@ -306,5 +361,104 @@ func TestMemoryHandlerDelta(t *testing.T) {
 	}
 	if manager.deltaReq.TopicID != "topic-42" {
 		t.Fatalf("delta request topic not forwarded")
+	}
+}
+
+func TestMemoryHandlerListTemplates(t *testing.T) {
+	manager := &stubMemoryManager{templates: []core.ProceduralTemplate{{ID: "tpl-1", Name: "Template"}}}
+	h := NewMemoryHandler(&config.Config{}, nil, nil, manager, nil)
+	secret := []byte("secret")
+	e := echo.New()
+	h.Register(e.Group("/memory"), secret)
+	token, _ := runtime.SignJWT("svc", secret, time.Hour, "memory:read")
+	req := httptest.NewRequest(http.MethodGet, "/memory/templates", nil)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer "+token)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestMemoryHandlerListFingerprints(t *testing.T) {
+	manager := &stubMemoryManager{fingerprints: []core.TemplateFingerprintState{{TopicID: "topic", Fingerprint: "abc", Occurrences: 3}}}
+	h := NewMemoryHandler(&config.Config{}, nil, nil, manager, nil)
+	secret := []byte("secret")
+	e := echo.New()
+	h.Register(e.Group("/memory"), secret)
+	token, _ := runtime.SignJWT("svc", secret, time.Hour, "memory:read")
+	req := httptest.NewRequest(http.MethodGet, "/memory/templates/fingerprints?limit=5", nil)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer "+token)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestMemoryHandlerPromoteTemplate(t *testing.T) {
+	manager := &stubMemoryManager{promoteResp: core.ProceduralTemplate{ID: "tpl-1"}}
+	h := NewMemoryHandler(&config.Config{}, nil, nil, manager, nil)
+	secret := []byte("secret")
+	e := echo.New()
+	h.Register(e.Group("/memory"), secret)
+	token, _ := runtime.SignJWT("svc", secret, time.Hour, "memory:write")
+	req := httptest.NewRequest(http.MethodPost, "/memory/templates/promote", strings.NewReader(`{"topic_id":"topic","fingerprint":"abc"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer "+token)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", rec.Code)
+	}
+	if manager.promoteReq.Fingerprint != "abc" {
+		t.Fatalf("promotion request not recorded")
+	}
+}
+
+func TestMemoryHandlerApproveTemplate(t *testing.T) {
+	manager := &stubMemoryManager{approveResp: core.ProceduralTemplate{ID: "tpl-1"}}
+	h := NewMemoryHandler(&config.Config{}, nil, nil, manager, nil)
+	secret := []byte("secret")
+	e := echo.New()
+	h.Register(e.Group("/memory"), secret)
+	token, _ := runtime.SignJWT("svc", secret, time.Hour, "memory:write")
+	req := httptest.NewRequest(http.MethodPost, "/memory/templates/approve", strings.NewReader(`{"template_id":"tpl-1"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer "+token)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if manager.approveReq.TemplateID != "tpl-1" {
+		t.Fatalf("approval request not recorded")
+	}
+}
+
+func TestMemoryHandlerHealth(t *testing.T) {
+	manager := &stubMemoryManager{healthResp: memorysvc.HealthStats{Episodes: 12, CollectedAt: time.Unix(1700, 0).UTC().Format(time.RFC3339)}}
+	cfg := &config.Config{}
+	h := NewMemoryHandler(cfg, nil, nil, manager, log.New(io.Discard, "", 0))
+	if h == nil {
+		t.Fatalf("expected handler")
+	}
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/memory/health", nil)
+	rec := httptest.NewRecorder()
+	ctx := e.NewContext(req, rec)
+
+	if err := h.health(ctx); err != nil {
+		t.Fatalf("health returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var resp memorysvc.HealthStats
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Episodes != 12 {
+		t.Fatalf("unexpected episodes: %d", resp.Episodes)
 	}
 }

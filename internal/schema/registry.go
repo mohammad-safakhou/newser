@@ -32,6 +32,9 @@ func SeedBaseSchemas(ctx context.Context, st Store) error {
 			return fmt.Errorf("seed %s %s: %w", def.EventType, def.Version, err)
 		}
 	}
+	if err := SeedRunManifestSchema(ctx, st); err != nil {
+		return err
+	}
 	return nil
 }
 

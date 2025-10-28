@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -84,6 +85,13 @@ func runShowCommand(args []string) error {
 		if !ok {
 			return fmt.Errorf("no episode found for run %s", *runID)
 		}
+		planDoc := planWithMetadata(episode)
+
+		status, err := verifyRunManifest(ctx, st, cfg, episode.RunID)
+		if err != nil {
+			return fmt.Errorf("run manifest verification failed: %w", err)
+		}
+		logManifestStatus(status, episode.RunID)
 
 		summaries, err := st.ListEpisodes(ctx, store.EpisodeFilter{RunID: *runID, Limit: 1})
 		if err != nil {
@@ -108,6 +116,9 @@ func runShowCommand(args []string) error {
 		}
 
 		printEpisodeSummary(episode, status, startedAt)
+		if planDoc != nil {
+			printProceduralTemplates(extractProceduralTemplateUsage(planDoc))
+		}
 		if *showSteps {
 			fmt.Println()
 			printEpisodeSteps(episode, *showArtifacts)
@@ -266,6 +277,12 @@ func runDiffCommand(args []string) error {
 			return fmt.Errorf("no episode found for run %s", *runID)
 		}
 
+		status, err := verifyRunManifest(ctx, st, cfg, episode.RunID)
+		if err != nil {
+			return fmt.Errorf("run manifest verification failed: %w", err)
+		}
+		logManifestStatus(status, episode.RunID)
+
 		orig := newEpisodeResponse(episode)
 		diffs := diffEpisodeResponses(orig, candidate)
 		if len(diffs) == 0 {
@@ -372,8 +389,9 @@ func newEpisodeResponse(ep store.Episode) episodeResponse {
 		Result:     ep.Result,
 		CreatedAt:  ep.CreatedAt,
 	}
-	if ep.PlanDocument != nil {
-		resp.PlanDocument = ep.PlanDocument
+	if plan := planWithMetadata(ep); plan != nil {
+		resp.PlanDocument = plan
+		resp.ProceduralTemplates = extractProceduralTemplateUsage(plan)
 	}
 	if len(ep.PlanRaw) > 0 {
 		resp.PlanRaw = append(resp.PlanRaw, ep.PlanRaw...)
@@ -448,15 +466,16 @@ func diffEpisodeResponses(orig, candidate episodeResponse) []string {
 }
 
 type episodeResponse struct {
-	RunID        string                     `json:"run_id"`
-	TopicID      string                     `json:"topic_id"`
-	Thought      agentcore.UserThought      `json:"thought"`
-	PlanDocument *planner.PlanDocument      `json:"plan_document,omitempty"`
-	PlanRaw      json.RawMessage            `json:"plan_raw,omitempty"`
-	PlanPrompt   string                     `json:"plan_prompt,omitempty"`
-	Result       agentcore.ProcessingResult `json:"result"`
-	Steps        []episodeStepResponse      `json:"steps"`
-	CreatedAt    time.Time                  `json:"created_at"`
+	RunID               string                     `json:"run_id"`
+	TopicID             string                     `json:"topic_id"`
+	Thought             agentcore.UserThought      `json:"thought"`
+	PlanDocument        *planner.PlanDocument      `json:"plan_document,omitempty"`
+	PlanRaw             json.RawMessage            `json:"plan_raw,omitempty"`
+	PlanPrompt          string                     `json:"plan_prompt,omitempty"`
+	ProceduralTemplates []proceduralTemplateUsage  `json:"procedural_templates,omitempty"`
+	Result              agentcore.ProcessingResult `json:"result"`
+	Steps               []episodeStepResponse      `json:"steps"`
+	CreatedAt           time.Time                  `json:"created_at"`
 }
 
 type episodeStepResponse struct {
@@ -478,4 +497,166 @@ type planExport struct {
 	Thought agentcore.UserThought `json:"thought,omitempty"`
 	Plan    planner.PlanDocument  `json:"plan"`
 	PlanRaw json.RawMessage       `json:"plan_raw,omitempty"`
+}
+
+type proceduralTemplateUsage struct {
+	Stage       string   `json:"stage"`
+	Status      string   `json:"status"`
+	TemplateID  string   `json:"template_id,omitempty"`
+	Fingerprint string   `json:"fingerprint,omitempty"`
+	TaskCount   int      `json:"task_count"`
+	TaskIDs     []string `json:"task_ids,omitempty"`
+	TaskTypes   []string `json:"task_types,omitempty"`
+	Occurrences int      `json:"occurrences"`
+}
+
+func planWithMetadata(ep store.Episode) *planner.PlanDocument {
+	if ep.PlanDocument != nil {
+		return ep.PlanDocument
+	}
+	if len(ep.PlanRaw) == 0 {
+		return nil
+	}
+	var doc planner.PlanDocument
+	if err := json.Unmarshal(ep.PlanRaw, &doc); err != nil {
+		return nil
+	}
+	return &doc
+}
+
+func extractProceduralTemplateUsage(plan *planner.PlanDocument) []proceduralTemplateUsage {
+	if plan == nil || plan.Metadata == nil {
+		return nil
+	}
+	raw, ok := plan.Metadata["procedural_templates"]
+	if !ok {
+		return nil
+	}
+	var entries []map[string]interface{}
+	switch v := raw.(type) {
+	case []interface{}:
+		for _, item := range v {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			entries = append(entries, m)
+		}
+	case []map[string]interface{}:
+		entries = append(entries, v...)
+	default:
+		return nil
+	}
+	usages := make([]proceduralTemplateUsage, 0, len(entries))
+	for _, entry := range entries {
+		usage := proceduralTemplateUsage{
+			Stage:       strings.TrimSpace(stringFromAny(entry["stage"])),
+			Status:      strings.TrimSpace(stringFromAny(entry["status"])),
+			TemplateID:  strings.TrimSpace(stringFromAny(entry["template_id"])),
+			Fingerprint: strings.TrimSpace(stringFromAny(entry["fingerprint"])),
+			Occurrences: intFromAny(entry["occurrences"]),
+		}
+		if usage.Status == "" {
+			usage.Status = "candidate"
+		}
+		usage.TaskIDs = stringsFromAny(entry["task_ids"])
+		usage.TaskCount = len(usage.TaskIDs)
+		usage.TaskTypes = stringsFromAny(entry["task_types"])
+		usages = append(usages, usage)
+	}
+	sort.Slice(usages, func(i, j int) bool {
+		if usages[i].Stage == usages[j].Stage {
+			if usages[i].Status == usages[j].Status {
+				return usages[i].TemplateID < usages[j].TemplateID
+			}
+			return usages[i].Status < usages[j].Status
+		}
+		return usages[i].Stage < usages[j].Stage
+	})
+	return usages
+}
+
+func printProceduralTemplates(usages []proceduralTemplateUsage) {
+	if len(usages) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Println("Procedural Templates:")
+	for _, usage := range usages {
+		line := fmt.Sprintf("  - Stage %s | Status: %s", usage.Stage, usage.Status)
+		if usage.TemplateID != "" {
+			line += fmt.Sprintf(" | Template: %s", usage.TemplateID)
+		}
+		if usage.Fingerprint != "" {
+			line += fmt.Sprintf(" | Fingerprint: %s", shortFingerprint(usage.Fingerprint))
+		}
+		if usage.Occurrences > 0 {
+			line += fmt.Sprintf(" | Occurrences: %d", usage.Occurrences)
+		}
+		line += fmt.Sprintf(" | Tasks: %d", usage.TaskCount)
+		if usage.TaskCount > 0 && usage.TaskCount <= 5 {
+			line += fmt.Sprintf(" (%s)", strings.Join(usage.TaskIDs, ", "))
+		}
+		fmt.Println(line)
+	}
+}
+
+func stringFromAny(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case fmt.Stringer:
+		return v.String()
+	case json.Number:
+		return v.String()
+	case float64:
+		return fmt.Sprintf("%.0f", v)
+	case bool:
+		return fmt.Sprintf("%t", v)
+	default:
+		return ""
+	}
+}
+
+func stringsFromAny(value interface{}) []string {
+	switch v := value.(type) {
+	case []string:
+		return append([]string(nil), v...)
+	case []interface{}:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			str := strings.TrimSpace(stringFromAny(item))
+			if str != "" {
+				out = append(out, str)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func intFromAny(value interface{}) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			return int(i)
+		}
+	default:
+		return 0
+	}
+	return 0
+}
+
+func shortFingerprint(fp string) string {
+	if len(fp) <= 8 {
+		return fp
+	}
+	return fp[:8]
 }

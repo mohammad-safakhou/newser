@@ -1,0 +1,41 @@
+{
+  "title": "Fairness Overview",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "30s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Bias Adjustments",
+      "targets": [
+        {
+          "expr": "increase(agent_fairness_bias_sum[5m]) / clamp_min(increase(agent_fairness_bias_count[5m]), 1)",
+          "legendFormat": "bias"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Average Credibility",
+      "targets": [
+        {
+          "expr": "increase(agent_fairness_avg_credibility_sum[5m]) / clamp_min(increase(agent_fairness_avg_credibility_count[5m]), 1)",
+          "legendFormat": "avg credibility"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Low Credibility Sources",
+      "targets": [
+        {
+          "expr": "increase(agent_fairness_low_sources_total[5m])",
+          "legendFormat": "low credibility"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 }
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+[
+  {
+    "name": "synthesis_smoke",
+    "type": "synthesis",
+    "input": "synthesis_ok.json"
+  },
+  {
+    "name": "planner_smoke",
+    "type": "planner",
+    "input": "plan_ok.json"
+  }
+]

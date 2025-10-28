@@ -25,6 +25,7 @@ type Planner struct {
 	logger      *log.Logger
 	registry    *capability.Registry
 	semantic    SemanticMemory
+	templates   ProceduralTemplateRepository
 }
 
 // NewPlanner creates a new planner instance
@@ -41,6 +42,11 @@ func NewPlanner(cfg *config.Config, llmProvider LLMProvider, telemetry *telemetr
 // SetSemanticMemory attaches the semantic memory backend used for contextual retrieval.
 func (p *Planner) SetSemanticMemory(memory SemanticMemory) {
 	p.semantic = memory
+}
+
+// SetTemplateRepository wires the template persistence layer used for procedural suggestions.
+func (p *Planner) SetTemplateRepository(repo ProceduralTemplateRepository) {
+	p.templates = repo
 }
 
 // Plan creates an execution plan for a user thought
@@ -184,6 +190,10 @@ func (p *Planner) Plan(ctx context.Context, thought UserThought) (PlanningResult
 	processingTime := time.Since(startTime)
 	p.logger.Printf("Planning completed in %v with %d tasks", processingTime, len(plan.Tasks))
 	plan.Prompt = prompt
+
+	if p.templates != nil && plan.Graph != nil && strings.TrimSpace(thought.TopicID) != "" {
+		p.annotateProceduralTemplates(ctx, thought, &plan)
+	}
 
 	return plan, nil
 }

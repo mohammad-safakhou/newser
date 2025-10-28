@@ -199,6 +199,45 @@ type ProceduralTemplateVersionRecord struct {
 	CreatedAt  time.Time
 }
 
+// ProceduralTemplateFingerprintRecord tracks recurring plan signatures for template suggestions.
+type ProceduralTemplateFingerprintRecord struct {
+	TopicID      string
+	Fingerprint  string
+	Occurrences  int
+	LastSeenAt   time.Time
+	TemplateID   string
+	SampleGraph  json.RawMessage
+	SampleParams json.RawMessage
+	Metadata     map[string]interface{}
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// ProceduralTemplateUsageRecord captures a single execution of a procedural template.
+type ProceduralTemplateUsageRecord struct {
+	ID              int64
+	RunID           string
+	TopicID         string
+	TemplateID      string
+	TemplateVersion int
+	Fingerprint     string
+	Stage           string
+	Success         bool
+	LatencyMS       float64
+	Metadata        map[string]interface{}
+	CreatedAt       time.Time
+}
+
+// ProceduralTemplateMetricsRecord aggregates usage statistics for a template.
+type ProceduralTemplateMetricsRecord struct {
+	TemplateID   string
+	UsageCount   int64
+	SuccessCount int64
+	TotalLatency float64
+	LastUsedAt   *time.Time
+	UpdatedAt    time.Time
+}
+
 // MemoryJobRecord represents a scheduled summarisation/pruning job entry.
 type MemoryJobRecord struct {
 	ID           int64
@@ -222,6 +261,17 @@ type MemoryJobResultRecord struct {
 	Summary   string
 	ErrorMsg  string
 	CreatedAt time.Time
+}
+
+// MemoryHealthStats captures aggregated indicators for episodic and semantic memory.
+type MemoryHealthStats struct {
+	Episodes          int64
+	RunEmbeddings     int64
+	PlanEmbeddings    int64
+	NovelDeltaCount   int64
+	DuplicateDeltaCnt int64
+	LastDeltaAt       *time.Time
+	CollectedAt       time.Time
 }
 
 // AttachmentRecord captures metadata about artifacts persisted to attachment storage.
@@ -468,6 +518,256 @@ ORDER BY version DESC
 		out = append(out, rec)
 	}
 	return out, rows.Err()
+}
+
+// UpsertProceduralTemplateFingerprint increments recurrence counts for a plan fingerprint.
+func (s *Store) UpsertProceduralTemplateFingerprint(ctx context.Context, rec ProceduralTemplateFingerprintRecord) (ProceduralTemplateFingerprintRecord, error) {
+	if strings.TrimSpace(rec.TopicID) == "" {
+		return ProceduralTemplateFingerprintRecord{}, fmt.Errorf("topic_id required")
+	}
+	if strings.TrimSpace(rec.Fingerprint) == "" {
+		return ProceduralTemplateFingerprintRecord{}, fmt.Errorf("fingerprint required")
+	}
+	if len(rec.SampleGraph) == 0 {
+		return ProceduralTemplateFingerprintRecord{}, fmt.Errorf("sample_graph required")
+	}
+	params := defaultJSON(rec.SampleParams)
+	metaBytes, err := encodeJSONMap(rec.Metadata)
+	if err != nil {
+		return ProceduralTemplateFingerprintRecord{}, fmt.Errorf("marshal metadata: %w", err)
+	}
+
+	query := `
+INSERT INTO procedural_template_fingerprints (topic_id, fingerprint, occurrences, last_seen_at, sample_graph, sample_parameters, metadata)
+VALUES ($1,$2,1,NOW(),$3,$4,$5)
+ON CONFLICT (topic_id, fingerprint) DO UPDATE SET
+  occurrences = procedural_template_fingerprints.occurrences + 1,
+  last_seen_at = NOW(),
+  sample_graph = CASE WHEN procedural_template_fingerprints.template_id IS NULL THEN EXCLUDED.sample_graph ELSE procedural_template_fingerprints.sample_graph END,
+  sample_parameters = CASE WHEN procedural_template_fingerprints.template_id IS NULL THEN EXCLUDED.sample_parameters ELSE procedural_template_fingerprints.sample_parameters END,
+  metadata = jsonb_strip_nulls(procedural_template_fingerprints.metadata || EXCLUDED.metadata),
+  updated_at = NOW()
+RETURNING topic_id, fingerprint, occurrences, last_seen_at, template_id, sample_graph, sample_parameters, metadata, created_at, updated_at
+`
+	row := s.DB.QueryRowContext(ctx, query, rec.TopicID, rec.Fingerprint, rec.SampleGraph, params, metaBytes)
+	var (
+		out       ProceduralTemplateFingerprintRecord
+		template  sql.NullString
+		rawParams []byte
+		rawMeta   []byte
+	)
+	if err := row.Scan(&out.TopicID, &out.Fingerprint, &out.Occurrences, &out.LastSeenAt, &template, &out.SampleGraph, &rawParams, &rawMeta, &out.CreatedAt, &out.UpdatedAt); err != nil {
+		return ProceduralTemplateFingerprintRecord{}, err
+	}
+	out.SampleParams = append(out.SampleParams[:0], rawParams...)
+	if template.Valid {
+		out.TemplateID = template.String
+	}
+	if len(rawMeta) > 0 {
+		meta, err := decodeJSONMap(rawMeta)
+		if err != nil {
+			return ProceduralTemplateFingerprintRecord{}, fmt.Errorf("decode metadata: %w", err)
+		}
+		out.Metadata = meta
+	} else {
+		out.Metadata = map[string]interface{}{}
+	}
+	return out, nil
+}
+
+// ListProceduralTemplateFingerprints returns fingerprints for a topic ordered by recency/count.
+func (s *Store) ListProceduralTemplateFingerprints(ctx context.Context, topicID string, limit int) ([]ProceduralTemplateFingerprintRecord, error) {
+	if strings.TrimSpace(topicID) == "" {
+		return nil, fmt.Errorf("topic_id required")
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT topic_id, fingerprint, occurrences, last_seen_at, template_id, sample_graph, sample_parameters, metadata, created_at, updated_at
+FROM procedural_template_fingerprints
+WHERE topic_id=$1
+ORDER BY occurrences DESC, updated_at DESC
+LIMIT $2
+`, topicID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ProceduralTemplateFingerprintRecord
+	for rows.Next() {
+		var (
+			rec       ProceduralTemplateFingerprintRecord
+			template  sql.NullString
+			rawParams []byte
+			rawMeta   []byte
+		)
+		if err := rows.Scan(&rec.TopicID, &rec.Fingerprint, &rec.Occurrences, &rec.LastSeenAt, &template, &rec.SampleGraph, &rawParams, &rawMeta, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if template.Valid {
+			rec.TemplateID = template.String
+		}
+		rec.SampleParams = append(rec.SampleParams[:0], rawParams...)
+		if len(rawMeta) > 0 {
+			meta, err := decodeJSONMap(rawMeta)
+			if err != nil {
+				return nil, err
+			}
+			rec.Metadata = meta
+		} else {
+			rec.Metadata = map[string]interface{}{}
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// LinkProceduralTemplateFingerprint associates a fingerprint with an approved template.
+func (s *Store) LinkProceduralTemplateFingerprint(ctx context.Context, topicID, fingerprint, templateID string) error {
+	if strings.TrimSpace(topicID) == "" {
+		return fmt.Errorf("topic_id required")
+	}
+	if strings.TrimSpace(fingerprint) == "" {
+		return fmt.Errorf("fingerprint required")
+	}
+	if strings.TrimSpace(templateID) == "" {
+		return fmt.Errorf("template_id required")
+	}
+	res, err := s.DB.ExecContext(ctx, `
+UPDATE procedural_template_fingerprints
+SET template_id=$3, updated_at=NOW()
+WHERE topic_id=$1 AND fingerprint=$2
+`, topicID, fingerprint, templateID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("fingerprint not found for topic %s", topicID)
+	}
+	return nil
+}
+
+// RecordProceduralTemplateUsage logs a template execution and updates metrics.
+func (s *Store) RecordProceduralTemplateUsage(ctx context.Context, rec ProceduralTemplateUsageRecord) (ProceduralTemplateUsageRecord, error) {
+	if strings.TrimSpace(rec.TopicID) == "" {
+		return ProceduralTemplateUsageRecord{}, fmt.Errorf("topic_id required")
+	}
+	metaBytes, err := encodeJSONMap(rec.Metadata)
+	if err != nil {
+		return ProceduralTemplateUsageRecord{}, fmt.Errorf("marshal metadata: %w", err)
+	}
+
+	var (
+		runID      interface{}
+		templateID interface{}
+		version    interface{}
+		latency    interface{}
+	)
+	runID = nullableString(rec.RunID)
+	templateID = nullableString(rec.TemplateID)
+	if rec.TemplateVersion > 0 {
+		version = rec.TemplateVersion
+	}
+	if rec.LatencyMS > 0 && !math.IsNaN(rec.LatencyMS) && !math.IsInf(rec.LatencyMS, 0) {
+		latency = rec.LatencyMS
+	}
+
+	row := s.DB.QueryRowContext(ctx, `
+INSERT INTO procedural_template_usage (run_id, topic_id, template_id, template_version, fingerprint, stage, success, latency_ms, metadata)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+RETURNING id, run_id, topic_id, template_id, template_version, fingerprint, stage, success, latency_ms, metadata, created_at
+`, runID, rec.TopicID, templateID, version, nullableString(rec.Fingerprint), nullableString(rec.Stage), rec.Success, latency, metaBytes)
+
+	var (
+		out       ProceduralTemplateUsageRecord
+		dbRunID   sql.NullString
+		dbTplID   sql.NullString
+		dbVersion sql.NullInt64
+		dbLatency sql.NullFloat64
+		rawMeta   []byte
+	)
+	if err := row.Scan(&out.ID, &dbRunID, &out.TopicID, &dbTplID, &dbVersion, &out.Fingerprint, &out.Stage, &out.Success, &dbLatency, &rawMeta, &out.CreatedAt); err != nil {
+		return ProceduralTemplateUsageRecord{}, err
+	}
+	if dbRunID.Valid {
+		out.RunID = dbRunID.String
+	}
+	if dbTplID.Valid {
+		out.TemplateID = dbTplID.String
+	}
+	if dbVersion.Valid {
+		out.TemplateVersion = int(dbVersion.Int64)
+	}
+	if dbLatency.Valid {
+		out.LatencyMS = dbLatency.Float64
+	}
+	if len(rawMeta) > 0 {
+		meta, err := decodeJSONMap(rawMeta)
+		if err != nil {
+			return ProceduralTemplateUsageRecord{}, fmt.Errorf("decode metadata: %w", err)
+		}
+		out.Metadata = meta
+	} else {
+		out.Metadata = map[string]interface{}{}
+	}
+
+	if out.TemplateID != "" {
+		successInc := 0
+		if out.Success {
+			successInc = 1
+		}
+		latencyVal := out.LatencyMS
+		if latencyVal < 0 || math.IsNaN(latencyVal) || math.IsInf(latencyVal, 0) {
+			latencyVal = 0
+		}
+		if _, err := s.DB.ExecContext(ctx, `
+INSERT INTO procedural_template_metrics (template_id, usage_count, success_count, total_latency_ms, last_used_at, updated_at)
+VALUES ($1,1,$2,$3,NOW(),NOW())
+ON CONFLICT (template_id) DO UPDATE SET
+  usage_count = procedural_template_metrics.usage_count + 1,
+  success_count = procedural_template_metrics.success_count + $2,
+  total_latency_ms = procedural_template_metrics.total_latency_ms + $3,
+  last_used_at = NOW(),
+  updated_at = NOW()
+`, out.TemplateID, successInc, latencyVal); err != nil {
+			return ProceduralTemplateUsageRecord{}, err
+		}
+	}
+
+	return out, nil
+}
+
+// GetProceduralTemplateMetrics returns aggregated usage metrics for a template.
+func (s *Store) GetProceduralTemplateMetrics(ctx context.Context, templateID string) (ProceduralTemplateMetricsRecord, bool, error) {
+	if strings.TrimSpace(templateID) == "" {
+		return ProceduralTemplateMetricsRecord{}, false, fmt.Errorf("template_id required")
+	}
+	row := s.DB.QueryRowContext(ctx, `
+SELECT template_id, usage_count, success_count, total_latency_ms, last_used_at, updated_at
+FROM procedural_template_metrics
+WHERE template_id=$1
+`, templateID)
+	var (
+		rec      ProceduralTemplateMetricsRecord
+		lastUsed sql.NullTime
+	)
+	if err := row.Scan(&rec.TemplateID, &rec.UsageCount, &rec.SuccessCount, &rec.TotalLatency, &lastUsed, &rec.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ProceduralTemplateMetricsRecord{}, false, nil
+		}
+		return ProceduralTemplateMetricsRecord{}, false, err
+	}
+	if lastUsed.Valid {
+		ts := lastUsed.Time
+		rec.LastUsedAt = &ts
+	}
+	return rec, true, nil
 }
 
 // CreateMemoryJob enqueues a summarisation or pruning job.
@@ -717,6 +1017,90 @@ func (s *Store) DeleteAttachment(ctx context.Context, id string) error {
 		return err
 	}
 	return nil
+}
+
+// GetAttachment fetches a specific attachment by identifier.
+func (s *Store) GetAttachment(ctx context.Context, id string) (AttachmentRecord, bool, error) {
+	if strings.TrimSpace(id) == "" {
+		return AttachmentRecord{}, false, fmt.Errorf("attachment id required")
+	}
+	row := s.DB.QueryRowContext(ctx, `
+SELECT id, run_id, task_id, attempt, artifact_id,
+       COALESCE(name,''), COALESCE(media_type,''), COALESCE(size_bytes,0),
+       COALESCE(checksum,''), storage_uri, retention_expires_at, metadata, created_at, updated_at
+FROM attachments
+WHERE id=$1
+`, id)
+
+	var rec AttachmentRecord
+	var retention sql.NullTime
+	if err := row.Scan(&rec.ID, &rec.RunID, &rec.TaskID, &rec.Attempt, &rec.ArtifactID, &rec.Name, &rec.MediaType, &rec.SizeBytes, &rec.Checksum, &rec.StorageURI, &retention, &rec.Metadata, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return AttachmentRecord{}, false, nil
+		}
+		return AttachmentRecord{}, false, err
+	}
+	if retention.Valid {
+		ts := retention.Time
+		rec.RetentionExpiresAt = &ts
+	}
+	return rec, true, nil
+}
+
+// UpdateAttachmentRetention updates the retention expiry timestamp for an attachment.
+func (s *Store) UpdateAttachmentRetention(ctx context.Context, id string, expiresAt *time.Time) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("attachment id required")
+	}
+	var retention interface{}
+	if expiresAt != nil && !expiresAt.IsZero() {
+		retention = expiresAt.UTC()
+	}
+	res, err := s.DB.ExecContext(ctx, `
+UPDATE attachments
+SET retention_expires_at=$2,
+    updated_at=NOW()
+WHERE id=$1
+`, id, retention)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// PurgeExpiredAttachments deletes attachments whose retention window has passed.
+func (s *Store) PurgeExpiredAttachments(ctx context.Context, before time.Time, limit int) (int, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if before.IsZero() {
+		before = time.Now().UTC()
+	}
+	res, err := s.DB.ExecContext(ctx, `
+DELETE FROM attachments
+WHERE id IN (
+    SELECT id FROM attachments
+    WHERE retention_expires_at IS NOT NULL
+      AND retention_expires_at <= $1
+    ORDER BY retention_expires_at ASC
+    LIMIT $2
+)
+`, before, limit)
+	if err != nil {
+		return 0, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(rows), nil
 }
 
 // Episode captures the full episodic memory snapshot for a run.
@@ -2276,6 +2660,64 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)
 	return err
 }
 
+// MemoryHealthStats aggregates high-level metrics for episodic and semantic memory.
+func (s *Store) MemoryHealthStats(ctx context.Context, window time.Duration) (MemoryHealthStats, error) {
+	if s == nil || s.DB == nil {
+		return MemoryHealthStats{}, fmt.Errorf("store unavailable")
+	}
+	if window <= 0 {
+		window = 24 * time.Hour
+	}
+	stats := MemoryHealthStats{CollectedAt: time.Now().UTC()}
+
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM run_episodes`).Scan(&stats.Episodes); err != nil {
+		if !isUndefinedTable(err) {
+			return stats, err
+		}
+		stats.Episodes = 0
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM run_embeddings`).Scan(&stats.RunEmbeddings); err != nil {
+		if !isUndefinedTable(err) {
+			return stats, err
+		}
+		stats.RunEmbeddings = 0
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM plan_step_embeddings`).Scan(&stats.PlanEmbeddings); err != nil {
+		if !isUndefinedTable(err) {
+			return stats, err
+		}
+		stats.PlanEmbeddings = 0
+	}
+
+	since := time.Now().Add(-window)
+	var last sql.NullTime
+	err := s.DB.QueryRowContext(ctx, `
+SELECT COALESCE(SUM(novel_items),0), COALESCE(SUM(duplicate_items),0), MAX(created_at)
+FROM memory_delta_events
+WHERE created_at >= $1
+`, since).Scan(&stats.NovelDeltaCount, &stats.DuplicateDeltaCnt, &last)
+	if err != nil {
+		if !isUndefinedTable(err) {
+			return stats, err
+		}
+		stats.NovelDeltaCount = 0
+		stats.DuplicateDeltaCnt = 0
+	} else if last.Valid {
+		ts := last.Time.UTC()
+		stats.LastDeltaAt = &ts
+	}
+
+	return stats, nil
+}
+
+func isUndefinedTable(err error) bool {
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		return pqErr.Code == "42P01"
+	}
+	return false
+}
+
 // SaveEpisode persists or updates an episodic memory snapshot for a run.
 func (s *Store) SaveEpisode(ctx context.Context, ep Episode) (err error) {
 	if ep.RunID == "" {
@@ -2751,6 +3193,38 @@ func (s *Store) PruneEpisodesBefore(ctx context.Context, cutoff time.Time) (int6
 	return n, nil
 }
 
+// PruneRunEmbeddingsBefore deletes semantic run embeddings older than the supplied cutoff.
+func (s *Store) PruneRunEmbeddingsBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	if cutoff.IsZero() {
+		return 0, fmt.Errorf("cutoff must be provided")
+	}
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM run_embeddings WHERE created_at < $1`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// PrunePlanStepEmbeddingsBefore deletes plan-step embeddings older than the cutoff.
+func (s *Store) PrunePlanStepEmbeddingsBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	if cutoff.IsZero() {
+		return 0, fmt.Errorf("cutoff must be provided")
+	}
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM plan_step_embeddings WHERE created_at < $1`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // GetKnowledgeGraph retrieves the most recent knowledge graph for a given topic
 func (s *Store) GetKnowledgeGraph(ctx context.Context, topic string) (core.KnowledgeGraph, error) {
 	var (
@@ -2835,6 +3309,34 @@ func nullableInt64(v int64) interface{} {
 		return nil
 	}
 	return v
+}
+
+func encodeJSONMap(meta map[string]interface{}) ([]byte, error) {
+	if len(meta) == 0 {
+		return []byte("{}"), nil
+	}
+	b, err := json.Marshal(meta)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) == 0 {
+		return []byte("{}"), nil
+	}
+	return b, nil
+}
+
+func decodeJSONMap(raw []byte) (map[string]interface{}, error) {
+	if len(raw) == 0 {
+		return map[string]interface{}{}, nil
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = map[string]interface{}{}
+	}
+	return out, nil
 }
 
 func defaultJSON(raw json.RawMessage) []byte {

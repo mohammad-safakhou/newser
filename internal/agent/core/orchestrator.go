@@ -18,6 +18,7 @@ import (
 	"github.com/mohammad-safakhou/newser/internal/budget"
 	"github.com/mohammad-safakhou/newser/internal/capability"
 	"github.com/mohammad-safakhou/newser/internal/planner"
+	policypkg "github.com/mohammad-safakhou/newser/internal/policy"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -39,6 +40,8 @@ type Orchestrator struct {
 	storage     Storage
 	planRepo    PlanRepository
 	episodes    EpisodeRepository
+	templates   ProceduralTemplateRepository
+	fairness    *policypkg.FairnessPolicy
 
 	// Processing state
 	processing map[string]*ProcessingStatus
@@ -48,10 +51,18 @@ type Orchestrator struct {
 	semaphore chan struct{}
 }
 
+// FairnessStats captures the outcome of credibility adjustments.
+type FairnessStats struct {
+	Bias               float64
+	AverageCredibility float64
+	LowCredibility     int
+	TotalSources       int
+}
+
 var orchestratorTracer trace.Tracer = otel.Tracer("newser/internal/agent/orchestrator")
 
 // NewOrchestrator creates a new orchestrator instance
-func NewOrchestrator(cfg *config.Config, logger *log.Logger, telemetry *telemetry.Telemetry, registry *capability.Registry, plans PlanRepository, episodes EpisodeRepository) (*Orchestrator, error) {
+func NewOrchestrator(cfg *config.Config, logger *log.Logger, telemetry *telemetry.Telemetry, registry *capability.Registry, plans PlanRepository, episodes EpisodeRepository, templates ProceduralTemplateRepository) (*Orchestrator, error) {
 	// Initialize LLM provider
 	llmProvider, err := NewLLMProvider(cfg.LLM)
 	if err != nil {
@@ -76,6 +87,11 @@ func NewOrchestrator(cfg *config.Config, logger *log.Logger, telemetry *telemetr
 		return nil, fmt.Errorf("failed to create storage: %w", err)
 	}
 
+	fairnessPolicy, err := policypkg.NewFairnessPolicy(cfg.Fairness)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build fairness policy: %w", err)
+	}
+
 	o := &Orchestrator{
 		config:      cfg,
 		logger:      logger,
@@ -88,8 +104,13 @@ func NewOrchestrator(cfg *config.Config, logger *log.Logger, telemetry *telemetr
 		storage:     storage,
 		planRepo:    plans,
 		episodes:    episodes,
+		templates:   templates,
+		fairness:    fairnessPolicy,
 		processing:  make(map[string]*ProcessingStatus),
 		semaphore:   make(chan struct{}, cfg.Agents.MaxConcurrentAgents),
+	}
+	if templates != nil {
+		o.planner.SetTemplateRepository(templates)
 	}
 
 	return o, nil
@@ -626,6 +647,7 @@ func (o *Orchestrator) synthesizeResults(ctx context.Context, thought UserThough
 		"topic": thought.Content,
 	}
 	var budgetUsage budget.Usage
+	var fairnessStats *FairnessStats
 	if monitor != nil {
 		budgetUsage = budget.UsageFromMonitor(monitor)
 		result.Metadata["budget_usage"] = budget.SerializeUsage(budgetUsage)
@@ -642,8 +664,17 @@ func (o *Orchestrator) synthesizeResults(ctx context.Context, thought UserThough
 	if plan.BudgetConfig != nil {
 		o.telemetry.RecordBudgetUsage(ctx, budgetUsage, *plan.BudgetConfig, false)
 	}
+	sourceByID := make(map[string]*Source, len(allSources))
 	if len(allSources) > 0 {
 		ensureSourceIDs(&allSources)
+		for i := range allSources {
+			if allSources[i].ID != "" {
+				sourceByID[allSources[i].ID] = &allSources[i]
+			}
+		}
+		if stats := o.applyFairness(&allSources, thought.Preferences); stats != nil {
+			fairnessStats = stats
+		}
 	}
 
 	if len(items) > 0 {
@@ -684,7 +715,7 @@ func (o *Orchestrator) synthesizeResults(ctx context.Context, thought UserThough
 			delete(result.Metadata, "digest_stats")
 		} else {
 			items = filtered
-			if ev := buildEvidence(items); len(ev) > 0 {
+			if ev := buildEvidence(items, sourceByID); len(ev) > 0 {
 				result.Evidence = ev
 			}
 			arr := make([]interface{}, len(items))
@@ -757,6 +788,23 @@ func (o *Orchestrator) synthesizeResults(ctx context.Context, thought UserThough
 		delete(result.Metadata, "digest_stats")
 	}
 
+	if fairnessStats != nil {
+		result.Metadata["fairness"] = map[string]interface{}{
+			"bias":                  fairnessStats.Bias,
+			"avg_credibility":       fairnessStats.AverageCredibility,
+			"low_credibility_count": fairnessStats.LowCredibility,
+			"min_credibility":       o.fairness.MinCredibility,
+		}
+		if o.telemetry != nil {
+			o.telemetry.RecordFairness(ctx, telemetry.FairnessMetrics{
+				Bias:               fairnessStats.Bias,
+				AverageCredibility: fairnessStats.AverageCredibility,
+				LowCredibility:     fairnessStats.LowCredibility,
+				TotalSources:       fairnessStats.TotalSources,
+			})
+		}
+	}
+
 	return result, nil
 }
 
@@ -811,6 +859,33 @@ func collectArtifacts(res AgentResult) []map[string]interface{} {
 	default:
 		return nil
 	}
+}
+
+func (o *Orchestrator) applyFairness(sources *[]Source, preferences map[string]interface{}) *FairnessStats {
+	if o == nil || o.fairness == nil || !o.fairness.Enabled {
+		return nil
+	}
+	if sources == nil || len(*sources) == 0 {
+		return nil
+	}
+	bias := o.fairness.BiasFromPreferences(preferences)
+	list := *sources
+	var total float64
+	low := 0
+	for i := range list {
+		domain := normalizeSourceURL(list[i].URL)
+		adj, _ := o.fairness.Adjust(domain, list[i].Credibility, bias)
+		list[i].Credibility = adj
+		total += adj
+		if adj < o.fairness.MinCredibility {
+			low++
+		}
+	}
+	avg := 0.0
+	if len(list) > 0 {
+		avg = total / float64(len(list))
+	}
+	return &FairnessStats{Bias: bias, AverageCredibility: avg, LowCredibility: low, TotalSources: len(list)}
 }
 
 func ensureSourceIDs(sources *[]Source) {

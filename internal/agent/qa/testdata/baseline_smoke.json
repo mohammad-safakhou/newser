@@ -1,0 +1,12 @@
+{
+  "results": [
+    {
+      "name": "synthesis_smoke",
+      "passed": true
+    },
+    {
+      "name": "planner_smoke",
+      "passed": true
+    }
+  ]
+}

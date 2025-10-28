@@ -158,6 +158,52 @@ var baseDefinitions = []Definition{
 }`),
 	},
 	{
+		EventType: "crawl.schedule",
+		Version:   "v1",
+		Schema: []byte(`{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["topic_id", "canonical_url", "fingerprint", "shard", "refresh_after_seconds"],
+  "properties": {
+    "topic_id": {"type": "string"},
+    "original_url": {"type": "string", "format": "uri"},
+    "canonical_url": {"type": "string", "format": "uri"},
+    "fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "shard": {"type": "integer", "minimum": 0},
+    "refresh_after_seconds": {"type": "integer", "minimum": 0},
+    "policy_profile": {"type": "string"},
+    "priority": {"type": "integer"},
+    "metadata": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": false
+}`),
+	},
+	{
+		EventType: "crawl.dedup",
+		Version:   "v1",
+		Schema: []byte(`{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["topic_id", "original_url", "canonical_url", "fingerprint", "duplicate", "checked_at"],
+  "properties": {
+    "topic_id": {"type": "string"},
+    "original_url": {"type": "string", "format": "uri"},
+    "canonical_url": {"type": "string", "format": "uri"},
+    "fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "content_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "duplicate": {"type": "boolean"},
+    "shard": {"type": "integer", "minimum": 0},
+    "matched_run_id": {"type": "string"},
+    "matched_fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "dedup_ratio": {"type": "number", "minimum": 0},
+    "refresh_after_seconds": {"type": "integer", "minimum": 0},
+    "checked_at": {"type": "string", "format": "date-time"},
+    "metadata": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": false
+}`),
+	},
+	{
 		EventType: "run.completed",
 		Version:   "v1",
 		Schema: []byte(`{

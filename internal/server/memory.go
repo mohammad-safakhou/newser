@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -70,6 +71,11 @@ func (h *MemoryHandler) Register(g *echo.Group, secret []byte) {
 		g.POST("/write", h.write, runtime.RequireScopes("memory:write"))
 		g.POST("/summarize", h.summarize, runtime.RequireScopes("memory:summarize"))
 		g.POST("/delta", h.delta, runtime.RequireScopes("memory:delta"))
+		g.GET("/health", h.health, runtime.RequireScopes("memory:read"))
+		g.GET("/templates", h.listTemplates, runtime.RequireScopes("memory:read"))
+		g.GET("/templates/fingerprints", h.listFingerprints, runtime.RequireScopes("memory:read"))
+		g.POST("/templates/promote", h.promoteTemplate, runtime.RequireScopes("memory:write"))
+		g.POST("/templates/approve", h.approveTemplate, runtime.RequireScopes("memory:write"))
 	}
 }
 
@@ -257,6 +263,82 @@ func (h *MemoryHandler) delta(c echo.Context) error {
 		return h.toHTTPError(err)
 	}
 	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *MemoryHandler) health(c echo.Context) error {
+	if h.manager == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "memory manager disabled")
+	}
+	stats, err := h.manager.Health(c.Request().Context())
+	if err != nil {
+		return h.toHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, stats)
+}
+
+func (h *MemoryHandler) listTemplates(c echo.Context) error {
+	if h.manager == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "memory manager disabled")
+	}
+	topicID := strings.TrimSpace(c.QueryParam("topic_id"))
+	templates, err := h.manager.ListTemplates(c.Request().Context(), topicID)
+	if err != nil {
+		return h.toHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, templates)
+}
+
+func (h *MemoryHandler) listFingerprints(c echo.Context) error {
+	if h.manager == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "memory manager disabled")
+	}
+	topicID := strings.TrimSpace(c.QueryParam("topic_id"))
+	limit := 20
+	if raw := strings.TrimSpace(c.QueryParam("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			return echo.NewHTTPError(http.StatusBadRequest, "limit must be a positive integer")
+		}
+		limit = parsed
+	}
+	fingerprints, err := h.manager.ListFingerprints(c.Request().Context(), topicID, limit)
+	if err != nil {
+		return h.toHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, fingerprints)
+}
+
+func (h *MemoryHandler) promoteTemplate(c echo.Context) error {
+	if h.manager == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "memory manager disabled")
+	}
+	var req memorysvc.TemplatePromotionRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	if req.TopicID == "" {
+		req.TopicID = strings.TrimSpace(c.QueryParam("topic_id"))
+	}
+	tpl, err := h.manager.PromoteFingerprint(c.Request().Context(), req)
+	if err != nil {
+		return h.toHTTPError(err)
+	}
+	return c.JSON(http.StatusCreated, tpl)
+}
+
+func (h *MemoryHandler) approveTemplate(c echo.Context) error {
+	if h.manager == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "memory manager disabled")
+	}
+	var req memorysvc.TemplateApprovalRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	tpl, err := h.manager.ApproveTemplate(c.Request().Context(), req)
+	if err != nil {
+		return h.toHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, tpl)
 }
 
 func (h *MemoryHandler) toHTTPError(err error) error {

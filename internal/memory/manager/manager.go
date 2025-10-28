@@ -11,6 +11,7 @@ import (
 	"github.com/mohammad-safakhou/newser/config"
 	agentcore "github.com/mohammad-safakhou/newser/internal/agent/core"
 	memorysvc "github.com/mohammad-safakhou/newser/internal/memory/service"
+	"github.com/mohammad-safakhou/newser/internal/memory/templates"
 	"github.com/mohammad-safakhou/newser/internal/store"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -26,6 +27,15 @@ type storeAPI interface {
 	LogMemoryDelta(ctx context.Context, rec store.MemoryDeltaRecord) error
 	CreateMemoryJob(ctx context.Context, rec store.MemoryJobRecord) (store.MemoryJobRecord, error)
 	CompleteMemoryJob(ctx context.Context, jobID int64, status string, result store.MemoryJobResultRecord) error
+	PruneRunEmbeddingsBefore(ctx context.Context, cutoff time.Time) (int64, error)
+	PrunePlanStepEmbeddingsBefore(ctx context.Context, cutoff time.Time) (int64, error)
+	MemoryHealthStats(ctx context.Context, window time.Duration) (store.MemoryHealthStats, error)
+	ListProceduralTemplateFingerprints(ctx context.Context, topicID string, limit int) ([]store.ProceduralTemplateFingerprintRecord, error)
+	CreateProceduralTemplate(ctx context.Context, rec store.ProceduralTemplateRecord) (store.ProceduralTemplateRecord, error)
+	CreateProceduralTemplateVersion(ctx context.Context, rec store.ProceduralTemplateVersionRecord) (store.ProceduralTemplateVersionRecord, error)
+	LinkProceduralTemplateFingerprint(ctx context.Context, topicID, fingerprint, templateID string) error
+	ListProceduralTemplates(ctx context.Context, topicID string) ([]store.ProceduralTemplateRecord, error)
+	ListProceduralTemplateVersions(ctx context.Context, templateID string) ([]store.ProceduralTemplateVersionRecord, error)
 }
 
 // Manager provides a lightweight episodic memory implementation backed by the primary store.
@@ -46,7 +56,29 @@ type Manager struct {
 	summaryLatency  otelmetric.Float64Histogram
 	summaryTotal    otelmetric.Int64Counter
 	summaryFailures otelmetric.Int64Counter
+	pruneLatency    otelmetric.Float64Histogram
+	pruneTotal      otelmetric.Int64Counter
+	pruneFailures   otelmetric.Int64Counter
+	pruneRuns       otelmetric.Int64Counter
+	pruneSteps      otelmetric.Int64Counter
 	jobStatus       otelmetric.Int64Counter
+	healthEpisodes  otelmetric.Int64Histogram
+	healthRuns      otelmetric.Int64Histogram
+	healthSteps     otelmetric.Int64Histogram
+	healthNovel     otelmetric.Int64Histogram
+	healthDuplicate otelmetric.Int64Histogram
+	templates       *templates.Manager
+}
+
+// SemanticPruneStats captures counts of semantic embeddings removed during pruning.
+type SemanticPruneStats struct {
+	RunEmbeddings  int64
+	PlanEmbeddings int64
+}
+
+// Total returns the combined embeddings removed across run and plan-step stores.
+func (s SemanticPruneStats) Total() int64 {
+	return s.RunEmbeddings + s.PlanEmbeddings
 }
 
 // New constructs a memory manager for episodic and semantic memory operations.
@@ -115,10 +147,51 @@ func New(st storeAPI, cfg config.MemoryConfig, provider agentcore.LLMProvider, l
 	if err != nil {
 		logger.Printf("otel counter memory_summary_failures: %v", err)
 	}
+	mgr.pruneLatency, err = meter.Float64Histogram("memory_prune_latency_ms", otelmetric.WithUnit("ms"))
+	if err != nil {
+		logger.Printf("otel histogram memory_prune_latency_ms: %v", err)
+	}
+	mgr.pruneTotal, err = meter.Int64Counter("memory_prune_runs")
+	if err != nil {
+		logger.Printf("otel counter memory_prune_runs: %v", err)
+	}
+	mgr.pruneFailures, err = meter.Int64Counter("memory_prune_failures")
+	if err != nil {
+		logger.Printf("otel counter memory_prune_failures: %v", err)
+	}
+	mgr.pruneRuns, err = meter.Int64Counter("memory_pruned_run_embeddings")
+	if err != nil {
+		logger.Printf("otel counter memory_pruned_run_embeddings: %v", err)
+	}
+	mgr.pruneSteps, err = meter.Int64Counter("memory_pruned_plan_embeddings")
+	if err != nil {
+		logger.Printf("otel counter memory_pruned_plan_embeddings: %v", err)
+	}
 	mgr.jobStatus, err = meter.Int64Counter("memory_job_status_total")
 	if err != nil {
 		logger.Printf("otel counter memory_job_status_total: %v", err)
 	}
+	mgr.healthEpisodes, err = meter.Int64Histogram("memory_episodes_sample")
+	if err != nil {
+		logger.Printf("otel histogram memory_episodes_sample: %v", err)
+	}
+	mgr.healthRuns, err = meter.Int64Histogram("memory_run_embeddings_sample")
+	if err != nil {
+		logger.Printf("otel histogram memory_run_embeddings_sample: %v", err)
+	}
+	mgr.healthSteps, err = meter.Int64Histogram("memory_plan_embeddings_sample")
+	if err != nil {
+		logger.Printf("otel histogram memory_plan_embeddings_sample: %v", err)
+	}
+	mgr.healthNovel, err = meter.Int64Histogram("memory_delta_novel_sample")
+	if err != nil {
+		logger.Printf("otel histogram memory_delta_novel_sample: %v", err)
+	}
+	mgr.healthDuplicate, err = meter.Int64Histogram("memory_delta_duplicate_sample")
+	if err != nil {
+		logger.Printf("otel histogram memory_delta_duplicate_sample: %v", err)
+	}
+	mgr.templates = templates.NewManager(st, logger)
 	return mgr
 }
 
@@ -289,6 +362,174 @@ func (m *Manager) Summarize(ctx context.Context, req memorysvc.SummaryRequest) (
 	return resp, nil
 }
 
+// PruneSemanticEmbeddings removes aged semantic vectors to control storage growth.
+func (m *Manager) PruneSemanticEmbeddings(ctx context.Context, cutoff time.Time) (stats SemanticPruneStats, err error) {
+	if m == nil {
+		err = fmt.Errorf("memory manager unavailable")
+		return
+	}
+	if !m.semanticEnabled {
+		err = fmt.Errorf("semantic memory disabled")
+		return
+	}
+	if cutoff.IsZero() {
+		err = fmt.Errorf("cutoff required")
+		return
+	}
+	if m.store == nil {
+		err = fmt.Errorf("store unavailable")
+		return
+	}
+
+	params, marshalErr := json.Marshal(map[string]interface{}{
+		"cutoff": cutoff.UTC().Format(time.RFC3339),
+	})
+	if marshalErr != nil {
+		params = []byte("{}")
+	}
+	var job *store.MemoryJobRecord
+	started := time.Now().UTC()
+	if created, createErr := m.store.CreateMemoryJob(ctx, store.MemoryJobRecord{
+		JobType:      store.MemoryJobTypePrune,
+		Status:       store.MemoryJobStatusRunning,
+		ScheduledFor: started,
+		StartedAt:    &started,
+		Params:       params,
+	}); createErr == nil {
+		job = &created
+	} else if m.logger != nil {
+		m.logger.Printf("warn: create semantic prune job failed: %v", createErr)
+	}
+
+	start := time.Now()
+	defer func() {
+		attrs := []attribute.KeyValue{attribute.Bool("semantic", true)}
+		if m.pruneLatency != nil {
+			m.pruneLatency.Record(ctx, time.Since(start).Seconds()*1000, otelmetric.WithAttributes(attrs...))
+		}
+		if err != nil {
+			if m.pruneFailures != nil {
+				m.pruneFailures.Add(ctx, 1, otelmetric.WithAttributes(attrs...))
+			}
+		} else {
+			if m.pruneTotal != nil {
+				m.pruneTotal.Add(ctx, 1, otelmetric.WithAttributes(attrs...))
+			}
+			if m.pruneRuns != nil && stats.RunEmbeddings > 0 {
+				m.pruneRuns.Add(ctx, stats.RunEmbeddings, otelmetric.WithAttributes(attrs...))
+			}
+			if m.pruneSteps != nil && stats.PlanEmbeddings > 0 {
+				m.pruneSteps.Add(ctx, stats.PlanEmbeddings, otelmetric.WithAttributes(attrs...))
+			}
+		}
+		if job == nil {
+			return
+		}
+		status := store.MemoryJobStatusSuccess
+		errorMsg := ""
+		if err != nil {
+			status = store.MemoryJobStatusFailed
+			errorMsg = err.Error()
+		}
+		jobMetrics, metricsErr := json.Marshal(map[string]interface{}{
+			"run_embeddings_pruned":  stats.RunEmbeddings,
+			"plan_embeddings_pruned": stats.PlanEmbeddings,
+			"cutoff":                 cutoff.UTC().Format(time.RFC3339),
+		})
+		if metricsErr != nil {
+			jobMetrics = []byte("{}")
+		}
+		summary := fmt.Sprintf("pruned %d run embeddings, %d plan embeddings", stats.RunEmbeddings, stats.PlanEmbeddings)
+		if status == store.MemoryJobStatusFailed {
+			summary = ""
+		}
+		if completeErr := m.store.CompleteMemoryJob(ctx, job.ID, status, store.MemoryJobResultRecord{
+			JobID:    job.ID,
+			Metrics:  jobMetrics,
+			Summary:  summary,
+			ErrorMsg: errorMsg,
+		}); completeErr != nil {
+			if m.logger != nil {
+				m.logger.Printf("warn: complete semantic prune job failed: %v", completeErr)
+			}
+		}
+		if m.jobStatus != nil {
+			m.jobStatus.Add(ctx, 1, otelmetric.WithAttributes(
+				attribute.String("job_type", store.MemoryJobTypePrune),
+				attribute.String("status", status),
+			))
+		}
+	}()
+
+	runs, pruneErr := m.store.PruneRunEmbeddingsBefore(ctx, cutoff)
+	if pruneErr != nil {
+		err = fmt.Errorf("prune run embeddings: %w", pruneErr)
+		return
+	}
+	stats.RunEmbeddings = runs
+	steps, pruneStepsErr := m.store.PrunePlanStepEmbeddingsBefore(ctx, cutoff)
+	if pruneStepsErr != nil {
+		err = fmt.Errorf("prune plan embeddings: %w", pruneStepsErr)
+		return
+	}
+	stats.PlanEmbeddings = steps
+	return
+}
+
+func (m *Manager) ListFingerprints(ctx context.Context, topicID string, limit int) ([]agentcore.TemplateFingerprintState, error) {
+	tm, err := m.templateManager()
+	if err != nil {
+		return nil, err
+	}
+	return tm.ListFingerprints(ctx, topicID, limit)
+}
+
+func (m *Manager) PromoteFingerprint(ctx context.Context, req memorysvc.TemplatePromotionRequest) (agentcore.ProceduralTemplate, error) {
+	tm, err := m.templateManager()
+	if err != nil {
+		return agentcore.ProceduralTemplate{}, err
+	}
+	return tm.PromoteFingerprint(ctx, req)
+}
+
+func (m *Manager) ListTemplates(ctx context.Context, topicID string) ([]agentcore.ProceduralTemplate, error) {
+	tm, err := m.templateManager()
+	if err != nil {
+		return nil, err
+	}
+	return tm.ListTemplates(ctx, topicID)
+}
+
+func (m *Manager) ApproveTemplate(ctx context.Context, req memorysvc.TemplateApprovalRequest) (agentcore.ProceduralTemplate, error) {
+	tm, err := m.templateManager()
+	if err != nil {
+		return agentcore.ProceduralTemplate{}, err
+	}
+	return tm.ApproveTemplate(ctx, req)
+}
+
+func (m *Manager) Health(ctx context.Context) (memorysvc.HealthStats, error) {
+	if m == nil || m.store == nil {
+		return memorysvc.HealthStats{}, fmt.Errorf("memory manager unavailable")
+	}
+	stats, err := m.store.MemoryHealthStats(ctx, 24*time.Hour)
+	if err != nil {
+		return memorysvc.HealthStats{}, err
+	}
+	out := memorysvc.HealthStats{
+		Episodes:          stats.Episodes,
+		RunEmbeddings:     stats.RunEmbeddings,
+		PlanEmbeddings:    stats.PlanEmbeddings,
+		NovelDeltaCount:   stats.NovelDeltaCount,
+		DuplicateDeltaCnt: stats.DuplicateDeltaCnt,
+		CollectedAt:       stats.CollectedAt.UTC().Format(time.RFC3339),
+	}
+	if stats.LastDeltaAt != nil {
+		out.LastDeltaAt = stats.LastDeltaAt.UTC().Format(time.RFC3339)
+	}
+	return out, nil
+}
+
 // Delta filters already-seen items using hashes and semantic similarity when available.
 func (m *Manager) Delta(ctx context.Context, req memorysvc.DeltaRequest) (memorysvc.DeltaResponse, error) {
 	if m == nil {
@@ -432,6 +673,36 @@ func (m *Manager) persistDelta(ctx context.Context, resp memorysvc.DeltaResponse
 	if err := m.store.LogMemoryDelta(ctx, rec); err != nil && m.logger != nil {
 		m.logger.Printf("warn: log memory delta failed: %v", err)
 	}
+}
+
+// RecordHealthSnapshot emits telemetry metrics describing overall memory health.
+func (m *Manager) RecordHealthSnapshot(ctx context.Context, stats store.MemoryHealthStats) {
+	if m == nil {
+		return
+	}
+	attrs := []attribute.KeyValue{}
+	if m.healthEpisodes != nil {
+		m.healthEpisodes.Record(ctx, stats.Episodes, otelmetric.WithAttributes(attrs...))
+	}
+	if m.healthRuns != nil {
+		m.healthRuns.Record(ctx, stats.RunEmbeddings, otelmetric.WithAttributes(attrs...))
+	}
+	if m.healthSteps != nil {
+		m.healthSteps.Record(ctx, stats.PlanEmbeddings, otelmetric.WithAttributes(attrs...))
+	}
+	if m.healthNovel != nil {
+		m.healthNovel.Record(ctx, stats.NovelDeltaCount, otelmetric.WithAttributes(attrs...))
+	}
+	if m.healthDuplicate != nil {
+		m.healthDuplicate.Record(ctx, stats.DuplicateDeltaCnt, otelmetric.WithAttributes(attrs...))
+	}
+}
+
+func (m *Manager) templateManager() (*templates.Manager, error) {
+	if m == nil || m.templates == nil {
+		return nil, fmt.Errorf("template management unavailable")
+	}
+	return m.templates, nil
 }
 
 func deltaText(item memorysvc.DeltaItem) string {

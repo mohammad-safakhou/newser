@@ -624,12 +624,7 @@ func (h *RunsHandler) createManifest(c echo.Context) error {
 		span.SetStatus(codes.Error, err.Error())
 		return echo.NewHTTPError(http.StatusInternalServerError, "unable to build run manifest")
 	}
-	secret := h.cfg.Capability.SigningSecret
-	if secret == "" {
-		span.SetStatus(codes.Error, "signing secret not configured")
-		return echo.NewHTTPError(http.StatusInternalServerError, "capability.signing_secret not configured")
-	}
-	signed, err := manifest.SignRunManifest(payload, secret, time.Now().UTC())
+	signed, err := runtime.SignRunManifestPayload(h.cfg, payload, time.Now().UTC())
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -674,7 +669,7 @@ func (h *RunsHandler) createManifest(c echo.Context) error {
 		span.SetStatus(codes.Error, err.Error())
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	if err := manifest.VerifyRunManifest(signed, secret); err != nil {
+	if err := runtime.VerifyRunManifestSignature(h.cfg, signed); err != nil {
 		h.logger.Printf("manifest verify failed after insert: %v", err)
 		span.AddEvent("manifest verification warning", trace.WithAttributes(attribute.String("error", err.Error())))
 	}

@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -194,6 +195,123 @@ func TestAttachTemporalPolicyEmbedsMetadata(t *testing.T) {
 	}
 }
 
+func TestPlannerAnnotateProceduralTemplatesCandidate(t *testing.T) {
+	repo := &templateRepoStub{
+		upsertStates: []TemplateFingerprintState{
+			{Occurrences: 1},
+		},
+	}
+	pl := NewPlanner(&config.Config{}, stubLLM{}, telemetry.NewTelemetry(config.TelemetryConfig{}), nil)
+	pl.SetTemplateRepository(repo)
+
+	plan := PlanningResult{
+		Graph: &plannerv1.PlanDocument{
+			Tasks: []plannerv1.PlanTask{
+				{ID: "t1", Type: "research"},
+				{ID: "t2", Type: "analysis", DependsOn: []string{"t1"}},
+			},
+			ExecutionLayers: []plannerv1.PlanStage{
+				{Stage: "stage-01", Tasks: []string{"t1", "t2"}},
+			},
+		},
+	}
+	pl.annotateProceduralTemplates(context.Background(), UserThought{TopicID: "topic-1"}, &plan)
+	items, ok := plan.Graph.Metadata["procedural_templates"].([]map[string]interface{})
+	if !ok || len(items) != 1 {
+		t.Fatalf("expected procedural templates metadata, got %#v", plan.Graph.Metadata["procedural_templates"])
+	}
+	entry := items[0]
+	if entry["status"] != "candidate" {
+		t.Fatalf("expected candidate status, got %#v", entry["status"])
+	}
+	if _, exists := entry["template_id"]; exists {
+		t.Fatalf("did not expect template id for candidate")
+	}
+	if repo.createCount > 0 {
+		t.Fatalf("unexpected template creation")
+	}
+}
+
+func TestPlannerAnnotateProceduralTemplatesCreatesTemplate(t *testing.T) {
+	repo := &templateRepoStub{
+		upsertStates: []TemplateFingerprintState{
+			{Occurrences: templateSuggestionThreshold},
+		},
+		createResults: []ProceduralTemplate{
+			{
+				ID:             "tpl-1",
+				CurrentVersion: 1,
+				Version: ProceduralTemplateVersion{
+					Version: 1,
+					Status:  templateStatusPendingApproval,
+				},
+			},
+		},
+	}
+	pl := NewPlanner(&config.Config{}, stubLLM{}, telemetry.NewTelemetry(config.TelemetryConfig{}), nil)
+	pl.SetTemplateRepository(repo)
+
+	doc := &plannerv1.PlanDocument{
+		Tasks: []plannerv1.PlanTask{
+			{ID: "t1", Type: "research"},
+			{ID: "t2", Type: "analysis", DependsOn: []string{"t1"}},
+		},
+		ExecutionLayers: []plannerv1.PlanStage{
+			{Stage: "stage-01", Tasks: []string{"t1", "t2"}},
+		},
+	}
+	plan := PlanningResult{Graph: doc}
+	pl.annotateProceduralTemplates(context.Background(), UserThought{TopicID: "topic-1"}, &plan)
+
+	items := plan.Graph.Metadata["procedural_templates"].([]map[string]interface{})
+	entry := items[0]
+	if entry["status"] != templateStatusPendingApproval {
+		t.Fatalf("expected pending approval status, got %#v", entry["status"])
+	}
+	if entry["template_id"] != "tpl-1" {
+		t.Fatalf("expected template id tpl-1, got %#v", entry["template_id"])
+	}
+	if repo.linkCount != 1 {
+		t.Fatalf("expected fingerprint link to be recorded")
+	}
+}
+
+func TestPlannerAnnotateProceduralTemplatesReuse(t *testing.T) {
+	repo := &templateRepoStub{
+		upsertStates: []TemplateFingerprintState{
+			{Occurrences: 5, TemplateID: "tpl-1"},
+		},
+	}
+	pl := NewPlanner(&config.Config{}, stubLLM{}, telemetry.NewTelemetry(config.TelemetryConfig{}), nil)
+	pl.SetTemplateRepository(repo)
+	doc := &plannerv1.PlanDocument{
+		Tasks: []plannerv1.PlanTask{
+			{ID: "t1", Type: "research"},
+			{ID: "t2", Type: "analysis", DependsOn: []string{"t1"}},
+		},
+		ExecutionLayers: []plannerv1.PlanStage{
+			{Stage: "stage-01", Tasks: []string{"t1", "t2"}},
+		},
+	}
+	plan := PlanningResult{Graph: doc}
+	pl.annotateProceduralTemplates(context.Background(), UserThought{TopicID: "topic-1"}, &plan)
+
+	items := plan.Graph.Metadata["procedural_templates"].([]map[string]interface{})
+	entry := items[0]
+	if entry["status"] != "reused" {
+		t.Fatalf("expected reused status, got %#v", entry["status"])
+	}
+	if val, ok := entry["template_id"]; !ok || val != "tpl-1" {
+		t.Fatalf("expected template id tpl-1, got %#v", val)
+	}
+	if repo.createCount != 0 {
+		t.Fatalf("template should not be created on reuse")
+	}
+	if len(repo.usageRecords) != 1 {
+		t.Fatalf("expected usage to be recorded, got %d", len(repo.usageRecords))
+	}
+}
+
 type semanticMemoryStub struct {
 	lastRequest SemanticSearchRequest
 	results     SemanticSearchResults
@@ -202,6 +320,83 @@ type semanticMemoryStub struct {
 func (s *semanticMemoryStub) SearchSimilar(ctx context.Context, req SemanticSearchRequest) (SemanticSearchResults, error) {
 	s.lastRequest = req
 	return s.results, nil
+}
+
+type templateRepoStub struct {
+	upsertStates   []TemplateFingerprintState
+	createResults  []ProceduralTemplate
+	createRequests []TemplateCreationRequest
+	usageRecords   []TemplateUsageRecord
+	linkCount      int
+	stateIndex     int
+	createCount    int
+}
+
+func (s *templateRepoStub) UpsertFingerprint(ctx context.Context, req TemplateFingerprint) (TemplateFingerprintState, error) {
+	if s.stateIndex < len(s.upsertStates) {
+		st := s.upsertStates[s.stateIndex]
+		s.stateIndex++
+		if st.TopicID == "" {
+			st.TopicID = req.TopicID
+		}
+		if st.Fingerprint == "" {
+			st.Fingerprint = req.Fingerprint
+		}
+		return st, nil
+	}
+	return TemplateFingerprintState{
+		TopicID:     req.TopicID,
+		Fingerprint: req.Fingerprint,
+		Occurrences: 1,
+	}, nil
+}
+
+func (s *templateRepoStub) ListFingerprints(ctx context.Context, topicID string, limit int) ([]TemplateFingerprintState, error) {
+	return nil, nil
+}
+
+func (s *templateRepoStub) CreateTemplate(ctx context.Context, req TemplateCreationRequest) (ProceduralTemplate, error) {
+	s.createRequests = append(s.createRequests, req)
+	if s.createCount < len(s.createResults) {
+		out := s.createResults[s.createCount]
+		if out.ID == "" {
+			out.ID = fmt.Sprintf("tpl-%d", s.createCount+1)
+		}
+		if out.Version.Version == 0 {
+			out.Version.Version = 1
+		}
+		if out.Version.Status == "" {
+			out.Version.Status = templateStatusPendingApproval
+		}
+		if out.CurrentVersion == 0 {
+			out.CurrentVersion = out.Version.Version
+		}
+		s.createCount++
+		return out, nil
+	}
+	s.createCount++
+	return ProceduralTemplate{
+		ID:             fmt.Sprintf("tpl-%d", s.createCount),
+		CurrentVersion: 1,
+		Version: ProceduralTemplateVersion{
+			Version: 1,
+			Status:  templateStatusPendingApproval,
+		},
+	}, nil
+}
+
+func (s *templateRepoStub) LinkFingerprint(ctx context.Context, topicID, fingerprint, templateID string) error {
+	s.linkCount++
+	return nil
+}
+
+func (s *templateRepoStub) RecordUsage(ctx context.Context, usage TemplateUsageRecord) error {
+	s.usageRecords = append(s.usageRecords, usage)
+	return nil
+}
+
+func (s *templateRepoStub) GetTemplateMetrics(ctx context.Context, templateID string) (TemplateMetrics, bool, error) {
+	return TemplateMetrics{}, false, nil
 }
 
 type recordingLLM struct {

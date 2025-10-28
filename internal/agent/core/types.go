@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/mohammad-safakhou/newser/internal/budget"
@@ -87,6 +88,17 @@ type Evidence struct {
 	Category  string                 `json:"category,omitempty"`
 	Score     float64                `json:"score,omitempty"`
 	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	Sources   []EvidenceSource       `json:"sources,omitempty"`
+}
+
+// EvidenceSource provides contextual details for an evidence source.
+type EvidenceSource struct {
+	ID          string  `json:"id"`
+	Title       string  `json:"title,omitempty"`
+	URL         string  `json:"url,omitempty"`
+	Domain      string  `json:"domain,omitempty"`
+	Snippet     string  `json:"snippet,omitempty"`
+	Credibility float64 `json:"credibility,omitempty"`
 }
 
 // AgentTask represents a task for an agent to execute
@@ -202,6 +214,102 @@ type PlannerInterface interface {
 
 	// OptimizePlan optimizes a plan for cost/time/quality
 	OptimizePlan(plan PlanningResult, constraints map[string]interface{}) (PlanningResult, error)
+}
+
+// TemplateFingerprint captures a recurring sub-graph observed during planning.
+type TemplateFingerprint struct {
+	TopicID          string                 `json:"topic_id"`
+	Fingerprint      string                 `json:"fingerprint"`
+	Stage            string                 `json:"stage,omitempty"`
+	TaskIDs          []string               `json:"task_ids,omitempty"`
+	SampleGraph      json.RawMessage        `json:"sample_graph"`
+	SampleParameters json.RawMessage        `json:"sample_parameters,omitempty"`
+	Metadata         map[string]interface{} `json:"metadata,omitempty"`
+}
+
+// TemplateFingerprintState reflects the persisted state of a fingerprint.
+type TemplateFingerprintState struct {
+	TopicID          string                 `json:"topic_id"`
+	Fingerprint      string                 `json:"fingerprint"`
+	Occurrences      int                    `json:"occurrences"`
+	TemplateID       string                 `json:"template_id,omitempty"`
+	LastSeenAt       time.Time              `json:"last_seen_at"`
+	SampleGraph      json.RawMessage        `json:"sample_graph,omitempty"`
+	SampleParameters json.RawMessage        `json:"sample_parameters,omitempty"`
+	Metadata         map[string]interface{} `json:"metadata,omitempty"`
+}
+
+// TemplateCreationRequest provides the inputs to create a procedural template and an initial version.
+type TemplateCreationRequest struct {
+	TopicID     string                 `json:"topic_id"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	CreatedBy   string                 `json:"created_by,omitempty"`
+	Fingerprint string                 `json:"fingerprint,omitempty"`
+	Graph       json.RawMessage        `json:"graph"`
+	Parameters  json.RawMessage        `json:"parameters,omitempty"`
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	Changelog   string                 `json:"changelog,omitempty"`
+	Status      string                 `json:"status,omitempty"`
+}
+
+// ProceduralTemplateVersion describes a single version of a template.
+type ProceduralTemplateVersion struct {
+	ID         int64                  `json:"id"`
+	Version    int                    `json:"version"`
+	Status     string                 `json:"status"`
+	Graph      json.RawMessage        `json:"graph"`
+	Parameters json.RawMessage        `json:"parameters,omitempty"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	Changelog  string                 `json:"changelog,omitempty"`
+	ApprovedBy string                 `json:"approved_by,omitempty"`
+	ApprovedAt *time.Time             `json:"approved_at,omitempty"`
+	CreatedAt  time.Time              `json:"created_at"`
+}
+
+// ProceduralTemplate captures the persisted template metadata and active version.
+type ProceduralTemplate struct {
+	ID             string                    `json:"id"`
+	TopicID        string                    `json:"topic_id"`
+	Name           string                    `json:"name"`
+	Description    string                    `json:"description,omitempty"`
+	CurrentVersion int                       `json:"current_version"`
+	CreatedBy      string                    `json:"created_by,omitempty"`
+	CreatedAt      time.Time                 `json:"created_at"`
+	UpdatedAt      time.Time                 `json:"updated_at"`
+	Version        ProceduralTemplateVersion `json:"version"`
+}
+
+// TemplateUsageRecord records a concrete execution of a procedural template.
+type TemplateUsageRecord struct {
+	RunID           string                 `json:"run_id,omitempty"`
+	TopicID         string                 `json:"topic_id"`
+	TemplateID      string                 `json:"template_id,omitempty"`
+	TemplateVersion int                    `json:"template_version,omitempty"`
+	Fingerprint     string                 `json:"fingerprint,omitempty"`
+	Stage           string                 `json:"stage,omitempty"`
+	Success         bool                   `json:"success"`
+	LatencyMS       float64                `json:"latency_ms,omitempty"`
+	Metadata        map[string]interface{} `json:"metadata,omitempty"`
+}
+
+// TemplateMetrics summarises reuse patterns for a template.
+type TemplateMetrics struct {
+	TemplateID   string     `json:"template_id"`
+	UsageCount   int64      `json:"usage_count"`
+	SuccessCount int64      `json:"success_count"`
+	TotalLatency float64    `json:"total_latency_ms"`
+	LastUsedAt   *time.Time `json:"last_used_at,omitempty"`
+}
+
+// ProceduralTemplateRepository persists fingerprints, templates, and usage metrics.
+type ProceduralTemplateRepository interface {
+	UpsertFingerprint(ctx context.Context, req TemplateFingerprint) (TemplateFingerprintState, error)
+	ListFingerprints(ctx context.Context, topicID string, limit int) ([]TemplateFingerprintState, error)
+	CreateTemplate(ctx context.Context, req TemplateCreationRequest) (ProceduralTemplate, error)
+	LinkFingerprint(ctx context.Context, topicID, fingerprint, templateID string) error
+	RecordUsage(ctx context.Context, usage TemplateUsageRecord) error
+	GetTemplateMetrics(ctx context.Context, templateID string) (TemplateMetrics, bool, error)
 }
 
 // OrchestratorInterface defines the contract for the main orchestrator

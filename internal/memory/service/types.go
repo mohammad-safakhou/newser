@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	agentcore "github.com/mohammad-safakhou/newser/internal/agent/core"
@@ -12,6 +13,11 @@ type Manager interface {
 	WriteEpisode(ctx context.Context, snapshot agentcore.EpisodicSnapshot) error
 	Summarize(ctx context.Context, req SummaryRequest) (SummaryResponse, error)
 	Delta(ctx context.Context, req DeltaRequest) (DeltaResponse, error)
+	Health(ctx context.Context) (HealthStats, error)
+	ListFingerprints(ctx context.Context, topicID string, limit int) ([]agentcore.TemplateFingerprintState, error)
+	PromoteFingerprint(ctx context.Context, req TemplatePromotionRequest) (agentcore.ProceduralTemplate, error)
+	ListTemplates(ctx context.Context, topicID string) ([]agentcore.ProceduralTemplate, error)
+	ApproveTemplate(ctx context.Context, req TemplateApprovalRequest) (agentcore.ProceduralTemplate, error)
 }
 
 // SummaryRequest declares which runs should participate in a topic summary.
@@ -57,4 +63,43 @@ type DeltaResponse struct {
 	Novel          []DeltaItem `json:"novel"`
 	DuplicateCount int         `json:"duplicate_count"`
 	Total          int         `json:"total"`
+}
+
+// HealthStats aggregates high-level signals about episodic and semantic memory.
+type HealthStats struct {
+	Episodes          int64  `json:"episodes"`
+	RunEmbeddings     int64  `json:"run_embeddings"`
+	PlanEmbeddings    int64  `json:"plan_embeddings"`
+	NovelDeltaCount   int64  `json:"novel_deltas"`
+	DuplicateDeltaCnt int64  `json:"duplicate_deltas"`
+	LastDeltaAt       string `json:"last_delta_at,omitempty"`
+	CollectedAt       string `json:"collected_at"`
+}
+
+// Templates exposes procedural template workflows managed by memory.
+type Templates interface {
+	ListFingerprints(ctx context.Context, topicID string, limit int) ([]agentcore.TemplateFingerprintState, error)
+	PromoteFingerprint(ctx context.Context, req TemplatePromotionRequest) (agentcore.ProceduralTemplate, error)
+	ListTemplates(ctx context.Context, topicID string) ([]agentcore.ProceduralTemplate, error)
+	ApproveTemplate(ctx context.Context, req TemplateApprovalRequest) (agentcore.ProceduralTemplate, error)
+}
+
+// TemplatePromotionRequest declares how a fingerprint should be promoted into a template.
+type TemplatePromotionRequest struct {
+	TopicID     string                 `json:"topic_id"`
+	Fingerprint string                 `json:"fingerprint"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	CreatedBy   string                 `json:"created_by,omitempty"`
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+}
+
+// TemplateApprovalRequest captures the details required to approve a template version.
+type TemplateApprovalRequest struct {
+	TemplateID string                 `json:"template_id"`
+	ApprovedBy string                 `json:"approved_by"`
+	Changelog  string                 `json:"changelog,omitempty"`
+	Graph      json.RawMessage        `json:"graph,omitempty"`
+	Parameters json.RawMessage        `json:"parameters,omitempty"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
 }

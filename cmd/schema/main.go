@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mohammad-safakhou/newser/config"
+	"github.com/mohammad-safakhou/newser/internal/manifest"
 	"github.com/mohammad-safakhou/newser/internal/runtime"
 	"github.com/mohammad-safakhou/newser/internal/schema"
 	"github.com/mohammad-safakhou/newser/internal/store"
@@ -51,6 +53,10 @@ func main() {
 		withSchemaStore(*cfgPath, func(ctx context.Context, cfg *config.Config, st *store.Store) {
 			diffSchemasCmd(ctx, st, rest)
 		})
+	case "manifest-verify":
+		withSchemaStore(*cfgPath, func(ctx context.Context, cfg *config.Config, st *store.Store) {
+			manifestVerifyCmd(cfg, rest)
+		})
 	default:
 		usage()
 		os.Exit(1)
@@ -64,7 +70,8 @@ Commands:
   list
   publish --event EVENT --version VERSION --file schema.json
   validate --file schema.json
-  diff --event EVENT (--version VERSION --against OTHER | --against VERSION --file schema.json)`)
+  diff --event EVENT (--version VERSION --against OTHER | --against VERSION --file schema.json)
+  manifest-verify --file manifest.json`)
 }
 
 func withSchemaStore(cfgPath string, fn func(ctx context.Context, cfg *config.Config, st *store.Store)) {
@@ -175,6 +182,35 @@ func diffSchemasCmd(ctx context.Context, st *store.Store, args []string) {
 		log.Fatalf("diff: %v", err)
 	}
 	emitDiff(diff)
+}
+
+func manifestVerifyCmd(cfg *config.Config, args []string) {
+	fs := flag.NewFlagSet("manifest-verify", flag.ExitOnError)
+	file := fs.String("file", "", "signed manifest JSON file")
+	if err := fs.Parse(args); err != nil {
+		log.Fatal(err)
+	}
+	if *file == "" {
+		log.Fatal("manifest-verify requires --file")
+	}
+	contents, err := os.ReadFile(*file)
+	if err != nil {
+		log.Fatalf("read manifest file: %v", err)
+	}
+	if err := schema.ValidateRunManifestDocument(contents); err != nil {
+		log.Fatalf("manifest schema validation failed: %v", err)
+	}
+	var signed manifest.SignedRunManifest
+	if err := json.Unmarshal(contents, &signed); err != nil {
+		log.Fatalf("decode manifest: %v", err)
+	}
+	if v := signed.Manifest.Version; v != "" && v != schema.RunManifestSchemaVersion() {
+		log.Fatalf("unsupported manifest version %s (expected %s)", v, schema.RunManifestSchemaVersion())
+	}
+	if err := runtime.VerifyRunManifestSignature(cfg, signed); err != nil {
+		log.Fatalf("manifest signature verification failed: %v", err)
+	}
+	fmt.Printf("Manifest %s verified (checksum=%s)\n", *file, signed.Checksum)
 }
 
 func emitDiff(diff string) {

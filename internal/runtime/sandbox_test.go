@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -15,7 +16,23 @@ import (
 func writePolicy(t *testing.T, dir, provider string, network bool) string {
 	t.Helper()
 	path := filepath.Join(dir, "policy.yaml")
-	contents := []byte("sandbox:\n  provider: " + provider + "\n  cpu: 1\n  memory: 512Mi\n  timeout: 60s\n  network:\n    enabled: " + boolToString(network) + "\n    allowlist: []\n")
+	contents := fmt.Sprintf(`sandbox:
+  provider: %s
+  image: alpine:3.20
+  image_allowlist:
+    - alpine:3.20
+  cpu: 1
+  max_cpu: 2
+  memory: 512Mi
+  max_memory: 1Gi
+  timeout: 60s
+  max_timeout: 120s
+  command_allowlist:
+    - echo
+  network:
+    enabled: %s
+    allowlist: []
+`, provider, boolToString(network))
 	if err := os.WriteFile(path, contents, 0o644); err != nil {
 		t.Fatalf("write policy: %v", err)
 	}
@@ -99,7 +116,7 @@ func TestValidateMutatesRequest(t *testing.T) {
 
 	dir := t.TempDir()
 	policyPath := writePolicy(t, dir, "docker", false)
-	cfg := &config.Config{Security: config.SecurityConfig{PolicyFile: policyPath, SandboxProvider: "docker", DefaultCPU: 2, DefaultMemory: "1Gi", DefaultTimeout: 120 * time.Second}}
+	cfg := &config.Config{Security: config.SecurityConfig{PolicyFile: policyPath, SandboxProvider: "docker", DefaultCPU: 1, DefaultMemory: "1Gi", DefaultTimeout: 60 * time.Second}}
 
 	policy, err := LoadSandboxPolicy(cfg)
 	if err != nil {
@@ -115,10 +132,69 @@ func TestValidateMutatesRequest(t *testing.T) {
 	if req.Provider != "docker" {
 		t.Fatalf("expected provider docker, got %q", req.Provider)
 	}
-	if req.CPU != 2 {
-		t.Fatalf("expected cpu 2, got %v", req.CPU)
+	if req.CPU != 1 {
+		t.Fatalf("expected cpu 1, got %v", req.CPU)
 	}
-	if req.Timeout != 120*time.Second {
-		t.Fatalf("expected timeout 120s, got %s", req.Timeout)
+	if req.Timeout != 60*time.Second {
+		t.Fatalf("expected timeout 60s, got %s", req.Timeout)
+	}
+	if req.Memory != "512Mi" {
+		t.Fatalf("expected memory 512Mi, got %s", req.Memory)
+	}
+}
+
+func TestValidateRejectsExcessCPU(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	policyPath := writePolicy(t, dir, "docker", false)
+	cfg := &config.Config{Security: config.SecurityConfig{PolicyFile: policyPath, SandboxProvider: "docker", DefaultCPU: 1, DefaultMemory: "512Mi", DefaultTimeout: 60 * time.Second}}
+
+	policy, err := LoadSandboxPolicy(cfg)
+	if err != nil {
+		t.Fatalf("LoadSandboxPolicy error: %v", err)
+	}
+	enforcer := NewSandboxEnforcer(policy)
+	req := SandboxRequest{CPU: 3}
+	if err := enforcer.Validate(context.Background(), &req); err == nil {
+		t.Fatal("expected error for cpu limit breach")
+	}
+}
+
+func TestValidateRejectsExcessMemory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	policyPath := writePolicy(t, dir, "docker", false)
+	cfg := &config.Config{Security: config.SecurityConfig{PolicyFile: policyPath, SandboxProvider: "docker", DefaultCPU: 1, DefaultMemory: "512Mi", DefaultTimeout: 60 * time.Second}}
+
+	policy, err := LoadSandboxPolicy(cfg)
+	if err != nil {
+		t.Fatalf("LoadSandboxPolicy error: %v", err)
+	}
+	enforcer := NewSandboxEnforcer(policy)
+	req := SandboxRequest{Memory: "2Gi"}
+	if err := enforcer.Validate(context.Background(), &req); err == nil {
+		t.Fatal("expected error for memory limit breach")
+	}
+}
+
+func TestValidateEnforcesCommandAllowlist(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	policyPath := writePolicy(t, dir, "docker", false)
+	cfg := &config.Config{Security: config.SecurityConfig{PolicyFile: policyPath, SandboxProvider: "docker", DefaultCPU: 1, DefaultMemory: "512Mi", DefaultTimeout: 60 * time.Second}}
+
+	policy, err := LoadSandboxPolicy(cfg)
+	if err != nil {
+		t.Fatalf("LoadSandboxPolicy error: %v", err)
+	}
+	enforcer := NewSandboxEnforcer(policy)
+	if err := enforcer.Validate(context.Background(), &SandboxRequest{Command: "curl"}); err == nil {
+		t.Fatal("expected error for disallowed command")
+	}
+	if err := enforcer.Validate(context.Background(), &SandboxRequest{Command: "echo"}); err != nil {
+		t.Fatalf("expected echo to be allowed, got %v", err)
 	}
 }

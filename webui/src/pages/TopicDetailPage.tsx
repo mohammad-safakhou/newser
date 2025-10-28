@@ -325,6 +325,7 @@ export default function TopicDetailPage() {
                 const evidence = Array.isArray(latest.evidence) ? (latest.evidence as Evidence[]) : []
                 const sources = Array.isArray(latest.sources) ? (latest.sources as RunSource[]) : []
                 const hasEvidence = evidence.length > 0
+                const fairness = latest.metadata && typeof latest.metadata === 'object' ? (latest.metadata as any).fairness : null
                 const openLatest = () => {
                   const runs = (runsQ.data || []) as Run[]
                   if (runs.length === 0) return
@@ -340,6 +341,14 @@ export default function TopicDetailPage() {
                     </div>
                     {summary && (
                       <div className="text-xs text-slate-200 whitespace-pre-wrap leading-relaxed">{summary}</div>
+                    )}
+                    {fairness && (
+                      <div className="grid gap-2 text-[11px] text-slate-400 sm:grid-cols-2">
+                        <div>Bias adjustment: {typeof fairness.bias === 'number' ? fairness.bias.toFixed(2) : fairness.bias}</div>
+                        <div>Average credibility: {typeof fairness.avg_credibility === 'number' ? fairness.avg_credibility.toFixed(2) : fairness.avg_credibility}</div>
+                        <div>Low credibility sources: {fairness.low_credibility_count ?? 0}</div>
+                        <div>Minimum credibility: {typeof fairness.min_credibility === 'number' ? fairness.min_credibility.toFixed(2) : fairness.min_credibility}</div>
+                      </div>
                     )}
                     {hasEvidence && <EvidenceList evidence={evidence} sources={sources} />}
                   </div>
